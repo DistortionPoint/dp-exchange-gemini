@@ -150,6 +150,16 @@ defmodule DpExchange.Gemini.Socket do
     {:ok, state}
   end
 
+  # The subscribe acknowledgement. A non-200 is the venue refusing a subscription, which
+  # a consumer needs to hear about — silently continuing is how a feed reports healthy
+  # while delivering nothing.
+  defp handle_message(%{"id" => _id, "status" => status}, state) when status != 200 do
+    notify(state, Notice.new(:coverage_change, :gemini, details: %{subscribe_status: status}))
+    {:ok, state}
+  end
+
+  defp handle_message(_other, state), do: {:ok, state}
+
   # No trade price in the frame means the book has quotes and no execution to report. That
   # is a real state and it is silence here, not a `Quote` built from a bid.
   defp deliver_last_trade(nil, _symbol, _timestamp, _state), do: :ok
@@ -168,16 +178,6 @@ defmodule DpExchange.Gemini.Socket do
        }}
     )
   end
-
-  # The subscribe acknowledgement. A non-200 is the venue refusing a subscription, which
-  # a consumer needs to hear about — silently continuing is how a feed reports healthy
-  # while delivering nothing.
-  defp handle_message(%{"id" => _id, "status" => status}, state) when status != 200 do
-    notify(state, Notice.new(:coverage_change, :gemini, details: %{subscribe_status: status}))
-    {:ok, state}
-  end
-
-  defp handle_message(_other, state), do: {:ok, state}
 
   # Nanoseconds. Absent, and nothing is emitted — a quote whose freshness cannot be
   # stated must not be delivered, and on a stream that means dropping the frame rather
