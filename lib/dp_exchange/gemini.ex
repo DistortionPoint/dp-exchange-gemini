@@ -117,6 +117,11 @@ defmodule DpExchange.Gemini do
   #
   # Only two things are genuinely unsupported, and neither is about authentication:
   @unsupported [
+    # Neither exists on this venue. `preview_order/3` has no endpoint at all;
+    # `replace_order/4` means a caller cancels and re-places, which is NOT equivalent —
+    # it opens a window in which no order is live.
+    {:preview_order, 3},
+    {:replace_order, 4},
     # 346 symbols, and the venue offers no bulk detail endpoint — one request per symbol
     # is not a listing, it is a rate-limit incident. `get_symbols/1` gives the catalogue
     # and `quantization/1` gives one symbol's detail on demand.
@@ -264,6 +269,24 @@ defmodule DpExchange.Gemini do
   @impl true
   def place_order(credentials, request, opts),
     do: Private.place_order(credentials, request, with_limiter(opts))
+
+  @doc """
+  **Not supported.** Gemini publishes no order-preview endpoint.
+
+  Declared through `supports_order_preview: false`, so a consumer routes around it rather
+  than discovering the refusal at call time.
+  """
+  @impl true
+  def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
+
+  @doc """
+  **Not supported.** Gemini has no atomic replace; a caller cancels and re-places.
+
+  That is not equivalent — it opens a window in which no order is live — which is why
+  `supports_order_replace: false` is a claim about **risk** rather than convenience.
+  """
+  @impl true
+  def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def cancel_order(credentials, order_id, opts),

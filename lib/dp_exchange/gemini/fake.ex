@@ -236,6 +236,14 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  # Both refused, matching the real venue. A fake that answered where the real one
+  # refuses lets a consumer's suite go green against behaviour that cannot happen.
+  @impl true
+  def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
+
   @impl true
   def cancel_order(credentials, order_id, _opts \\ []) do
     with :ok <- authenticated(credentials) do

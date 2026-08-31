@@ -123,6 +123,8 @@ defmodule DpExchange.Gemini.RestTest do
     end
   end
 
+  defp to_ms(datetime), do: DateTime.to_unix(datetime, :millisecond)
+
   describe "get_historical_prices/4 — the fixed window" do
     @candles [
       [1_787_935_740_000, 77_986.74, 77_995.93, 77_908.94, 77_941.47, 0.0],
@@ -166,15 +168,27 @@ defmodule DpExchange.Gemini.RestTest do
     end
 
     test "a range inside the window is filtered here, because the venue will not" do
-      start = DateTime.from_unix!(1_787_935_700_000, :millisecond)
+      # Built relative to now, not from a fixed epoch. The `1m` window is 1,440 bars —
+      # twenty-four hours — so a hardcoded fixture stops being "inside the window" the
+      # day after it is written, and this test failed for exactly that reason three days
+      # after it was added. A time-relative fixture cannot rot that way.
+      newest = DateTime.utc_now() |> DateTime.add(-60, :second) |> to_ms()
+      older = newest - 60_000
+
+      candles = [
+        [newest, 77_986.74, 77_995.93, 77_908.94, 77_941.47, 0.0],
+        [older, 77_950.54, 77_981.02, 77_923.57, 77_934.41, 0.04]
+      ]
+
+      start = DateTime.from_unix!(newest - 40_000, :millisecond)
 
       assert {:ok, [candle]} =
                Rest.get_historical_prices("BTC-USD", "1m", [start: start],
-                 plug: responding(@candles),
+                 plug: responding(candles),
                  retry_attempts: 0
                )
 
-      assert candle.timestamp == DateTime.from_unix!(1_787_935_740_000, :millisecond)
+      assert candle.timestamp == DateTime.from_unix!(newest, :millisecond)
     end
 
     test "candles come back oldest-first with Decimal numerics" do

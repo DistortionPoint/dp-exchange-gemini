@@ -93,6 +93,7 @@ defmodule DpExchange.GeminiTest do
     case {name, arity} do
       {:list_instruments, 1} -> [[]]
       {:place_order, 3} -> [credentials, %{}, []]
+      {:replace_order, 4} -> [credentials, "id", %{}, []]
       {_name, 3} -> [credentials, "id", []]
       {_name, 2} -> [credentials, []]
       {_name, 1} -> [[]]
