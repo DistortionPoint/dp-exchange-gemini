@@ -54,10 +54,21 @@ defmodule DpExchange.Gemini.RestTest do
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
       assert Decimal.equal?(quote_struct.price, Decimal.new("77829.80000"))
-      assert Decimal.equal?(quote_struct.bid, Decimal.new("77791.77000"))
-      assert Decimal.equal?(quote_struct.ask, Decimal.new("77791.92000"))
       assert quote_struct.provider == :gemini
       assert quote_struct.symbol == "BTC-USD"
+    end
+
+    test "the book side comes back from get_top_of_book/2, not on the Quote" do
+      # One payload, two facts. `Core.Types.Quote` has no bid or ask to put them on, which
+      # is what stops a caller reading a resting order as a traded price.
+      assert {:ok, %Types.TopOfBook{} = top} =
+               Rest.get_top_of_book("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
+
+      assert Decimal.equal?(top.bid, Decimal.new("77791.77000"))
+      assert Decimal.equal?(top.ask, Decimal.new("77791.92000"))
+      assert top.symbol == "BTC-USD"
+      assert top.observed_at
+      refute Map.has_key?(top, :price)
     end
 
     test "the timestamp is the venue's Date header, not our clock" do

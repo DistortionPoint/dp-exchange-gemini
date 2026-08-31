@@ -42,7 +42,7 @@ defmodule DpExchange.Gemini.Socket do
   use WebSockex
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
   require Logger
@@ -112,25 +112,61 @@ defmodule DpExchange.Gemini.Socket do
 
   def handle_frame(_other, state), do: {:ok, state}
 
-  # A bookTicker frame. `s` is the symbol, `b`/`a` the best bid/ask, `c` the last trade
-  # price — present only once the book has traded, which is why `price` falls back to the
-  # bid rather than being invented.
+  # A `bookTicker` frame is the top of the book: `s` the symbol, `b`/`a` the best bid and
+  # ask, `c` the last trade price where one exists.
+  #
+  # This used to build a `Core.Types.Quote` with `price: message["c"] || bid` — falling back
+  # to the **bid** when the book had not traded — and the comment beside it defended that as
+  # better than inventing a value. It is not better; it is the same substitution wearing a
+  # different word. A bid is a resting order. A price is an execution. Handing a subscriber
+  # a bid in a field called `price` is handing it a plausible number with the wrong meaning,
+  # which is the defect this family shipped once already on another venue.
+  #
+  # A bookTicker frame is top-of-book data, so it now delivers `Core.Types.TopOfBook`, which
+  # has no `price` field to misuse. Where the frame also carries a last trade (`c`), that is
+  # a separate fact and is delivered as its own `Quote`.
   defp handle_message(%{"s" => native, "b" => bid, "a" => ask} = message, state) do
     with {:ok, timestamp} <- event_time(message) do
-      quote_struct = %Quote{
-        symbol: SymbolFormat.to_canonical_symbol(native),
-        price: decimal(message["c"] || bid),
-        bid: decimal(bid),
-        ask: decimal(ask),
-        volume: nil,
-        timestamp: timestamp,
-        provider: :gemini
-      }
+      symbol = SymbolFormat.to_canonical_symbol(native)
 
-      send(state.subscriber, {:dp_exchange, :gemini, quote_struct})
+      send(
+        state.subscriber,
+        {:dp_exchange, :gemini,
+         %TopOfBook{
+           symbol: symbol,
+           bid: decimal(bid),
+           ask: decimal(ask),
+           bid_size: decimal(message["B"]),
+           ask_size: decimal(message["A"]),
+           venue_time: timestamp,
+           observed_at: DateTime.utc_now(),
+           provider: :gemini
+         }}
+      )
+
+      deliver_last_trade(message["c"], symbol, timestamp, state)
     end
 
     {:ok, state}
+  end
+
+  # No trade price in the frame means the book has quotes and no execution to report. That
+  # is a real state and it is silence here, not a `Quote` built from a bid.
+  defp deliver_last_trade(nil, _symbol, _timestamp, _state), do: :ok
+  defp deliver_last_trade("", _symbol, _timestamp, _state), do: :ok
+
+  defp deliver_last_trade(last, symbol, timestamp, state) do
+    send(
+      state.subscriber,
+      {:dp_exchange, :gemini,
+       %Quote{
+         symbol: symbol,
+         price: decimal(last),
+         volume: nil,
+         timestamp: timestamp,
+         provider: :gemini
+       }}
+    )
   end
 
   # The subscribe acknowledgement. A non-200 is the venue refusing a subscription, which

@@ -43,7 +43,7 @@ defmodule DpExchange.Gemini.Rest do
   """
 
   alias DpExchange.Core.{HttpClient, Timeframe}
-  alias DpExchange.Core.Types.{OrderBook, Quote}
+  alias DpExchange.Core.Types.{OrderBook, Quote, TopOfBook}
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
   # Canonical width => the literal Gemini accepts. Measured 2026-08-28: the venue names
@@ -104,12 +104,49 @@ defmodule DpExchange.Gemini.Rest do
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: decimal(last),
-         bid: decimal(body["bid"]),
-         ask: decimal(body["ask"]),
          volume: base_volume(body, native),
          timestamp: timestamp,
          provider: :gemini
        }}
+    end
+  end
+
+  @doc """
+  Best bid and ask for `symbol` — the top of the book, not a traded price.
+
+  Same `/v1/pubticker/{symbol}` payload as `get_price/2`: the venue returns the last trade
+  and the top of the book together, and this splits them into the two types that say which
+  is which. `bid` and `ask` used to ride along on the `Quote`, which `Core.Types.Quote` no
+  longer has fields for.
+
+  The payload carries no sizes, so `bid_size` and `ask_size` stay `nil` — not published,
+  and not zero. `venue_time` comes from the `Date` header for the same reason
+  `get_price/2`'s timestamp does; `observed_at` is when this package read it.
+  """
+  @spec get_top_of_book(String.t(), keyword()) ::
+          {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
+  def get_top_of_book(symbol, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+
+    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts) do
+      {:ok,
+       %TopOfBook{
+         symbol: SymbolFormat.to_canonical_symbol(native),
+         bid: decimal(body["bid"]),
+         ask: decimal(body["ask"]),
+         bid_size: nil,
+         ask_size: nil,
+         venue_time: header_time_or_nil(headers),
+         observed_at: DateTime.utc_now(),
+         provider: :gemini
+       }}
+    end
+  end
+
+  defp header_time_or_nil(headers) do
+    case venue_time(headers) do
+      {:ok, timestamp} -> timestamp
+      _no_usable_header -> nil
     end
   end
 

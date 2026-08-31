@@ -67,10 +67,13 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
 
     test "a missing bid stays nil rather than becoming zero" do
       # Zero is a price. A venue that did not quote a bid has not quoted a bid of nothing.
+      # The assertion moved from `Quote` to `TopOfBook` when the book left the quote — the
+      # rule did not change, only where the field lives.
       body = %{"last" => "1.5", "ask" => "2"}
 
-      assert {:ok, quote_struct} = Rest.get_price("BTC-USD", plug: json(body), retry_attempts: 0)
-      assert quote_struct.bid == nil
+      assert {:ok, top} = Rest.get_top_of_book("BTC-USD", plug: json(body), retry_attempts: 0)
+      assert top.bid == nil
+      assert Decimal.equal?(top.ask, Decimal.new("2"))
     end
 
     test "a book side that is null yields no levels rather than crashing" do

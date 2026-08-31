@@ -117,6 +117,46 @@ defmodule DpExchange.Gemini do
   #
   # Only two things are genuinely unsupported, and neither is about authentication:
   @unsupported [
+    # Core 0.1.16 widened the facade; these are declared and not yet implemented, and each
+    # is a Phase 3–13 item. **Gemini publishes most of them** — staking, positions,
+    # funding, conversions, admin — so `:unsupported` here is a statement about this
+    # package, not about the venue. That distinction is the one Phase 1 had to correct on
+    # another venue, and it is stated here so it is not made again.
+    {:get_positions, 1},
+    {:get_funding, 2},
+    {:get_contract_stats, 2},
+    {:get_staking_rates, 1},
+    {:get_staking_balances, 1},
+    {:get_staking_rewards, 1},
+    {:get_staking_history, 1},
+    {:stake, 3},
+    {:unstake, 3},
+    {:quote_conversion, 4},
+    {:commit_conversion, 2},
+    {:get_conversion, 2},
+    {:list_portfolios, 1},
+    {:get_deposit_address, 3},
+    {:list_approved_addresses, 1},
+    {:estimate_withdrawal_fee, 4},
+    {:withdraw, 5},
+    # Gemini lists no options at all, so these are the venue's absence rather than this
+    # package's backlog.
+    {:get_option_chain, 2},
+    {:get_option_expirations, 2},
+    {:get_option_greeks, 2},
+    {:list_watchlists, 1},
+    {:get_watchlist, 2},
+    {:create_watchlist, 3},
+    {:update_watchlist, 2},
+    {:delete_watchlist, 2},
+    {:get_financials, 3},
+    {:get_corporate_events, 1},
+    {:get_filings, 2},
+    {:get_news, 1},
+    {:get_screener, 2},
+    {:create_account, 1},
+    {:rename_account, 3},
+    {:get_roles, 1},
     # Neither exists on this venue. `preview_order/3` has no endpoint at all;
     # `replace_order/4` means a caller cancels and re-places, which is NOT equivalent —
     # it opens a window in which no order is live.
@@ -159,7 +199,9 @@ defmodule DpExchange.Gemini do
       supported_quotes: SymbolFormat.quotes(),
       supported_instrument_types: [:spot],
       supports_short_selling: false,
-      streamable: [:quotes],
+      # `bookTicker` delivers top-of-book; a frame carrying a last trade also delivers a
+      # quote. Two kinds from one channel, and each says which it is.
+      streamable: [:quotes, :top_of_book],
       historical_timeframes: Rest.timeframes(),
 
       # **`:market` is absent, and that is the declaration doing its job.** The venue
@@ -234,6 +276,9 @@ defmodule DpExchange.Gemini do
 
   @impl true
   def get_symbols(opts \\ []), do: Rest.get_symbols(with_limiter(opts))
+
+  @impl true
+  def get_top_of_book(symbol, opts \\ []), do: Rest.get_top_of_book(symbol, with_limiter(opts))
 
   @impl true
   def get_order_book(symbol, opts \\ []), do: Rest.get_order_book(symbol, with_limiter(opts))
@@ -355,4 +400,115 @@ defmodule DpExchange.Gemini do
   defp with_limiter(opts) do
     Keyword.put_new(opts, :limiter, DpExchange.Gemini.Supervisor.limiter_name(opts))
   end
+
+  # --- Declared but not yet implemented -----------------------------------
+  #
+  # Core 0.1.16 widened the facade to the surface the venues actually publish. Gemini
+  # publishes most of what follows — staking, positions, funding, conversions, admin — and
+  # each is a Phase 3–13 item in the coverage plan.
+  #
+  # They answer `{:error, :not_supported}` and are declared `:unsupported` in
+  # `capabilities/0`, so a consumer routing on the declaration is told the truth. **The
+  # declaration is what a caller reads; a stub that claimed otherwise would be the lie.**
+  # Conformance assertion 12 checks the two agree in both directions, which is what stops
+  # one being updated without the other.
+
+  @impl true
+  def get_positions(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_funding(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_contract_stats(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_rates(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_balances(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_rewards(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_staking_history(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def stake(_asset, _amount, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def unstake(_asset, _amount, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def quote_conversion(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def commit_conversion(_id, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_conversion(_id, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_portfolios(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_deposit_address(_asset, _network, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_approved_addresses(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def estimate_withdrawal_fee(_asset, _network, _amount, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def withdraw(_asset, _network, _amount, _address, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_option_chain(_underlying, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_option_expirations(_underlying, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_option_greeks(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_watchlists(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_watchlist(_id, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def create_watchlist(_name, _symbols, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def update_watchlist(_id, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def delete_watchlist(_id, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_financials(_symbol, _kind, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_corporate_events(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_filings(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_news(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_screener(_name, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def create_account(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def rename_account(_id, _name, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_roles(_opts \\ []), do: Venue.not_supported()
 end

@@ -110,12 +110,23 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  @doc "Transfers in and out of the account."
+  @doc """
+  Transfers in and out of the account.
+
+  Calls **`/v2/transfers`**. The v1 path this package used until the D6 migration is absent
+  from Gemini's published OpenAPI document, and v2's own description says why: *"The v1
+  transfers endpoint is being retired. This v2 endpoint is the recommended"* replacement.
+
+  The three parameters are unchanged — `currency`, `timestamp`, `limit_transfers` — so this
+  was a path swap and nothing more. v2 additionally accepts `network`, `account` and
+  `show_completed_deposit_advances`, and each returned transfer now carries a `network`
+  field naming the chain. None of that is surfaced here yet; the rows are passed through.
+  """
   @spec get_transfers(map(), keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transfers(credentials, opts) do
     params = take_params(opts, [:limit_transfers, :currency, :timestamp])
 
-    with {:ok, rows, _headers} <- post("/v1/transfers", params, credentials, opts) do
+    with {:ok, rows, _headers} <- post("/v2/transfers", params, credentials, opts) do
       {:ok, List.wrap(rows)}
     end
   end

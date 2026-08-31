@@ -1,0 +1,137 @@
+# Gemini — every documented operation, from the published specifications
+#
+# Fetched 2026-08-31 from developer.gemini.com/specs/
+
+## REST (specs/openapi/rest.yaml)
+GET /v1/book/{symbol}
+GET /v1/feepromos
+GET /v1/fundingamount/{symbol}
+GET /v1/fundingamountreport/records.xlsx
+GET /v1/nextfundingtimestamp/{symbol}
+GET /v1/perpetuals/fundingpaymentreport/records.xlsx
+GET /v1/pricefeed
+GET /v1/pubticker/{symbol}
+GET /v1/riskstats/{symbol}
+GET /v1/staking/rates
+GET /v1/symbols
+GET /v1/symbols/details/{symbol}
+GET /v1/trades/{symbol}
+GET /v2/candles/{symbol}/{time_frame}
+GET /v2/derivatives/candles/{symbol}/{time_frame}
+GET /v2/fxrate/{symbol}/{timestamp}
+GET /v2/network/{token}
+GET /v2/networks/{network}/assets
+GET /v2/ticker/{symbol}
+POST /v1/account
+POST /v1/account/create
+POST /v1/account/list
+POST /v1/account/rename
+POST /v1/account/transfer/{currency}
+POST /v1/addresses/{network}
+POST /v1/approvedAddresses/account/{network}
+POST /v1/approvedAddresses/{network}/remove
+POST /v1/approvedAddresses/{network}/request
+POST /v1/balances
+POST /v1/balances/staking
+POST /v1/clearing/broker/list
+POST /v1/clearing/broker/new
+POST /v1/clearing/cancel
+POST /v1/clearing/confirm
+POST /v1/clearing/list
+POST /v1/clearing/new
+POST /v1/clearing/status
+POST /v1/clearing/trades
+POST /v1/custodyaccountfees
+POST /v1/deposit/{network}/newAddress
+POST /v1/heartbeat
+POST /v1/instant/execute
+POST /v1/instant/quote
+POST /v1/margin
+POST /v1/margin/account
+POST /v1/margin/order/preview
+POST /v1/margin/rates
+POST /v1/mytrades
+POST /v1/notionalbalances/{currency}
+POST /v1/notionalvolume
+POST /v1/oauth/revokeByToken
+POST /v1/order/cancel
+POST /v1/order/cancel/all
+POST /v1/order/cancel/session
+POST /v1/order/new
+POST /v1/order/status
+POST /v1/orders
+POST /v1/orders/history
+POST /v1/payments/addbank
+POST /v1/payments/addbank/cad
+POST /v1/payments/methods
+POST /v1/perpetuals/fundingPayment
+POST /v1/perpetuals/fundingpaymentreport/records.json
+POST /v1/positions
+POST /v1/roles
+POST /v1/staking/history
+POST /v1/staking/rewards
+POST /v1/staking/stake
+POST /v1/staking/unstake
+POST /v1/tradevolume
+POST /v1/transactions
+POST /v1/wrap/{symbol}
+POST /v2/transfers
+POST /v2/withdraw/{network}/{ticker}
+POST /v2/withdraw/{network}/{ticker}/feeEstimate
+
+## Prediction markets (specs/openapi/prediction-markets.yaml)
+GET /v1/prediction-markets/categories
+GET /v1/prediction-markets/combos
+GET /v1/prediction-markets/combos/{instrumentSymbol}
+GET /v1/prediction-markets/events
+GET /v1/prediction-markets/events/newly-listed
+GET /v1/prediction-markets/events/recently-settled
+GET /v1/prediction-markets/events/upcoming
+GET /v1/prediction-markets/events/{eventTicker}
+GET /v1/prediction-markets/events/{eventTicker}/strike
+GET /v1/prediction-markets/liquidity-rewards/config
+GET /v1/prediction-markets/liquidity-rewards/events
+GET /v1/prediction-markets/liquidity-rewards/summary/daily
+GET /v1/prediction-markets/liquidity-rewards/summary/total
+GET /v1/prediction-markets/maker-rebate/rates
+GET /v1/prediction-markets/maker-rebate/summary/total
+GET /v1/prediction-markets/terms
+GET /v1/prediction-markets/terms/status
+GET /v1/prediction-markets/volume/{date}
+GET /v1/prediction-markets/volume/{date}/hourly
+POST /v1/prediction-markets/combos
+POST /v1/prediction-markets/maker-rebate/payouts
+POST /v1/prediction-markets/metrics/volume
+POST /v1/prediction-markets/order
+POST /v1/prediction-markets/order/batch
+POST /v1/prediction-markets/order/batch/cancel
+POST /v1/prediction-markets/order/cancel
+POST /v1/prediction-markets/orders/active
+POST /v1/prediction-markets/orders/history
+POST /v1/prediction-markets/positions
+POST /v1/prediction-markets/positions/settled
+POST /v1/prediction-markets/terms/accept
+
+## WebSocket channels (specs/asyncapi/websocket.yaml)
+balancesAccount
+balancesAccountSnapshot
+bookTicker
+connection
+contractStatus
+depth
+depth10
+depth10Fast
+depth20
+depth20Fast
+depth5
+depth5Fast
+depthFast
+ordersAccount
+ordersSession
+positionsAccount
+positionsAccountSnapshot
+requestForQuote
+requestForQuoteAccount
+requestForQuoteSession
+settlementsAccount
+trade

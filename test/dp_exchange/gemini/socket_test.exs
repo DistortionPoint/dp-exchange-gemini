@@ -2,7 +2,7 @@ defmodule DpExchange.Gemini.SocketTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini.Socket
 
   @moduletag :capture_log
@@ -30,14 +30,27 @@ defmodule DpExchange.Gemini.SocketTest do
   }
 
   describe "bookTicker frames" do
-    test "become a Quote with the canonical symbol and Decimal numerics" do
+    test "deliver top-of-book with the canonical symbol and Decimal numerics" do
+      assert {:ok, _state} = deliver(@book_ticker)
+
+      assert_receive {:dp_exchange, :gemini, %TopOfBook{} = top}
+      assert top.symbol == "BTC-USD"
+      assert Decimal.equal?(top.bid, Decimal.new("77845.79000"))
+      assert Decimal.equal?(top.ask, Decimal.new("77846.48000"))
+      # The frame carries sizes, so they are carried too rather than dropped.
+      assert Decimal.equal?(top.bid_size, Decimal.new("0.0457361300"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("0.0143148700"))
+      assert top.provider == :gemini
+    end
+
+    test "a frame carrying a last trade also delivers it, as a separate Quote" do
+      # Two facts on one frame, and each arrives in the type that says which it is: the
+      # book in a TopOfBook, the execution in a Quote. Neither stands in for the other.
       assert {:ok, _state} = deliver(@book_ticker)
 
       assert_receive {:dp_exchange, :gemini, %Quote{} = quote_struct}
-      assert quote_struct.symbol == "BTC-USD"
-      assert Decimal.equal?(quote_struct.bid, Decimal.new("77845.79000"))
-      assert Decimal.equal?(quote_struct.ask, Decimal.new("77846.48000"))
-      assert quote_struct.provider == :gemini
+      assert Decimal.equal?(quote_struct.price, Decimal.new("77834.11000"))
+      refute Map.has_key?(quote_struct, :bid)
     end
 
     test "event time is read as NANOseconds" do
@@ -56,14 +69,20 @@ defmodule DpExchange.Gemini.SocketTest do
       assert Decimal.equal?(price, Decimal.new("77834.11000"))
     end
 
-    test "price falls back to the bid when the book has never traded" do
-      # `c` is documented as present only once the book has traded. Inventing a last
-      # price for an untraded book would be a substitution; the bid is a real quoted
-      # number and is labelled as the bid too.
+    test "a book that has never traded delivers top-of-book and NO quote" do
+      # This test used to assert the opposite — that `price` falls back to the bid — and
+      # its comment defended the bid as "a real quoted number". It is real, and it is not a
+      # price: a bid is a resting order, a price is an execution. The fallback was the same
+      # substitution this family shipped once already on another venue.
+      #
+      # An untraded book has a top and no last trade. That is what is delivered.
       assert {:ok, _state} = deliver(Map.drop(@book_ticker, ["c", "C"]))
 
-      assert_receive {:dp_exchange, :gemini, %Quote{price: price, bid: bid}}
-      assert Decimal.equal?(price, bid)
+      assert_receive {:dp_exchange, :gemini, %TopOfBook{bid: bid, ask: ask}}
+      assert Decimal.equal?(bid, Decimal.new("77845.79000"))
+      assert ask
+
+      refute_receive {:dp_exchange, :gemini, %Quote{}}, 50
     end
 
     test "a frame with NO event time delivers nothing at all" do

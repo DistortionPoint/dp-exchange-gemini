@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+- **`get_transfers/2` calls `/v2/transfers`** (D6). The v1 path is absent from Gemini's
+  published OpenAPI document, and v2's own description states *"The v1 transfers endpoint is
+  being retired."* The three parameters are unchanged, so this is a path change only.
+
+### Added
+- `ArchivedSocketsTest` — fails the build if any code path speaks one of Gemini's four
+  archived WebSocket APIs, or points a socket at `api.gemini.com` rather than
+  `ws.gemini.com`. This is the venue where that failure already happened once.
+
 ### Added
 - First release. Market data, order book, catalogue, quantization and streaming behind
   `DpExchange.Core.Venue`. Every authenticated endpoint is declared `:unsupported`:

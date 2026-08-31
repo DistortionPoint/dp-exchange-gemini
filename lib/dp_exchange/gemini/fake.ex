@@ -92,10 +92,32 @@ defmodule DpExchange.Gemini.Fake do
          %Types.Quote{
            symbol: symbol,
            price: Decimal.new(price),
-           bid: Decimal.new(price),
-           ask: Decimal.add(Decimal.new(price), Decimal.new("0.69")),
            volume: Decimal.new("183.72"),
            timestamp: @at,
+           provider: :gemini
+         }}
+
+      :error ->
+        {:refused, :not_listed}
+    end
+  end
+
+  @impl true
+  def get_top_of_book(symbol, _opts \\ []) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        {:ok,
+         %Types.TopOfBook{
+           symbol: symbol,
+           # A spread around the fake's price. The bid is deliberately *not* equal to the
+           # price: a test that passes only when they coincide is not testing the split
+           # this type exists to enforce.
+           bid: Decimal.sub(Decimal.new(price), Decimal.new("0.31")),
+           ask: Decimal.add(Decimal.new(price), Decimal.new("0.69")),
+           bid_size: nil,
+           ask_size: nil,
+           venue_time: @at,
+           observed_at: @at,
            provider: :gemini
          }}
 
