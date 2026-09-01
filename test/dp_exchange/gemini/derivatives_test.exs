@@ -241,6 +241,22 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert position.liquidation_price == nil
     end
 
+    test "the instrument kind is an atom, and an unknown one is nil" do
+      # A caller routes on this. The nearest atom that fits would be a guess it cannot see.
+      perp = %{"openPositions" => [%{"quantity" => "1", "instrument_type" => "perp"}]}
+      spot = %{"openPositions" => [%{"quantity" => "1", "instrument_type" => "spot"}]}
+      other = %{"openPositions" => [%{"quantity" => "1", "instrument_type" => "dated"}]}
+
+      assert {:ok, [%{instrument_type: :perp}]} =
+               Private.get_positions(@credentials, plug: responding(perp), retry_attempts: 0)
+
+      assert {:ok, [%{instrument_type: :spot}]} =
+               Private.get_positions(@credentials, plug: responding(spot), retry_attempts: 0)
+
+      assert {:ok, [%{instrument_type: nil}]} =
+               Private.get_positions(@credentials, plug: responding(other), retry_attempts: 0)
+    end
+
     test "no open positions is an empty list" do
       assert {:ok, []} =
                Private.get_positions(@credentials,

@@ -1596,7 +1596,7 @@ defmodule DpExchange.Gemini.Private do
       symbol: row["symbol"],
       side: position_side(quantity),
       quantity: position_size(quantity),
-      instrument_type: row["instrument_type"],
+      instrument_type: position_instrument(row["instrument_type"]),
       average_cost: decimal(row["average_cost"]),
       mark_price: decimal(row["mark_price"]),
       # Signed as the venue sent it: this is a value, not a magnitude with a side beside it.
@@ -1620,6 +1620,13 @@ defmodule DpExchange.Gemini.Private do
       provider: :gemini
     }
   end
+
+  # The contract types this as an atom, and the venue sends "spot" or "perp". A word this
+  # package does not know is `nil` rather than the nearest atom that fits — an instrument
+  # kind is what a caller routes on.
+  defp position_instrument("perp"), do: :perp
+  defp position_instrument("spot"), do: :spot
+  defp position_instrument(_other), do: nil
 
   # A quantity of exactly zero has no side, and guessing one would invent a direction the
   # venue did not state.

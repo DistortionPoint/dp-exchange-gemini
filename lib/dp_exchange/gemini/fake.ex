@@ -562,7 +562,7 @@ defmodule DpExchange.Gemini.Fake do
            symbol: "BTCGUSDPERP",
            side: :short,
            quantity: Decimal.new("0.2"),
-           instrument_type: "perp",
+           instrument_type: :perp,
            average_cost: Decimal.new("60000"),
            mark_price: Decimal.new("59500"),
            notional_value: Decimal.new("-11900"),
