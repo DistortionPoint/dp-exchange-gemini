@@ -343,6 +343,24 @@ defmodule DpExchange.Gemini do
   @impl true
   def get_fx_rate(pair, at, opts \\ []), do: Rest.get_fx_rate(pair, at, with_limiter(opts))
 
+  @doc """
+  The networks an asset moves over, or the assets a network carries.
+
+  See `DpExchange.Gemini.Private.list_networks/2` — in particular why the network→assets
+  direction is scoped to the credential and an empty answer does not describe the network.
+  """
+  @impl true
+  def list_networks(asset, opts \\ []), do: Private.list_networks(asset, with_limiter(opts))
+
+  @doc """
+  Symbols currently carrying a promotional fee.
+
+  See `DpExchange.Gemini.Rest.list_fee_promos/1` — not `get_fees/2`, which is the schedule
+  applying to a credential.
+  """
+  @impl true
+  def list_fee_promos(opts \\ []), do: Rest.list_fee_promos(with_limiter(opts))
+
   @impl true
   def get_accounts(credentials, opts),
     do: Private.get_accounts(credentials, with_limiter(opts))

@@ -475,6 +475,49 @@ defmodule DpExchange.Gemini.Rest do
 
   defp as_of(ms, _requested_at) when is_integer(ms), do: DateTime.from_unix!(ms, :millisecond)
   defp as_of(_absent, requested_at), do: requested_at
+
+  @doc """
+  The blockchain networks `asset` moves over — `GET /v2/network/{token}`.
+
+  **Read this before `get_deposit_address/3`.** That endpoint takes a network, and a wrong
+  one produces an address on a chain this venue does not credit; funds sent there are gone.
+
+  Public. The inverse direction — which assets a *network* carries — is authenticated and
+  lives in `DpExchange.Gemini.Private.list_networks/2`, because the venue scopes its answer
+  to the credential.
+
+  Rows come back as the venue sends them: its network names are its own, and translating
+  them would invent a vocabulary it does not accept back.
+  """
+  @spec networks_for_asset(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def networks_for_asset(asset, opts) do
+    with {:ok, body} <- get_body("/v2/network/#{asset}", opts), do: {:ok, List.wrap(body)}
+  end
+
+  @doc """
+  Symbols currently carrying a promotional fee — `GET /v1/feepromos`.
+
+  **Not `get_fees/2`.** That is the schedule applying to this credential; this is the public
+  list of symbols where the venue is charging something other than its published schedule.
+  A caller computing cost from the schedule alone is wrong for exactly these symbols.
+
+  An empty list means the venue is running no promotions, which is a real state and not an
+  error.
+  """
+  @spec list_fee_promos(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_fee_promos(opts) do
+    with {:ok, body} <- get_body("/v1/feepromos", opts) do
+      {:ok, body |> promo_rows() |> List.wrap()}
+    end
+  end
+
+  defp promo_rows(%{"symbols" => symbols}) when is_list(symbols),
+    do: Enum.map(symbols, &%{"symbol" => &1})
+
+  defp promo_rows(rows) when is_list(rows), do: rows
+  defp promo_rows(%{} = row), do: [row]
+  defp promo_rows(_other), do: []
   # --- internals ----------------------------------------------------------
 
   defp get_body(path, opts) do

@@ -76,7 +76,7 @@ defmodule DpExchange.Gemini.Private do
 
   alias DpExchange.Core.HttpClient
   alias DpExchange.Core.Types.{Balance, Conversion, Fill, Order}
-  alias DpExchange.Gemini.{Auth, Environment, SymbolFormat}
+  alias DpExchange.Gemini.{Auth, Environment, Rest, SymbolFormat}
 
   @doc "Every currency the account holds, with what is available and what is on hold."
   @spec get_balances(map(), keyword()) ::
@@ -770,6 +770,41 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  @doc """
+  The networks an asset moves over, or the assets a network carries.
+
+  **Call this before `get_deposit_address/3`.** That endpoint takes a network, and a wrong
+  one produces an address on a chain this venue does not credit — funds sent there are gone.
+
+  Two directions and two endpoints, and they are not symmetric:
+
+      list_networks("USDC", [])          public,  GET /v2/network/USDC
+      list_networks(nil, network: "…")   private, /v2/networks/{network}/assets
+
+  **The second is scoped to the credential and the first is not.** The vendor requires the
+  Fund Manager or Auditor role and states it returns *"only the assets where your account
+  has deposit and withdraw access enabled"*. So an empty answer means **this account cannot
+  move anything on that network**, not that the network carries nothing — a caller reading
+  it as a description of the network would draw the wrong conclusion from a true response.
+  """
+  @spec list_networks(String.t() | nil, keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_networks(nil, opts) do
+    case Keyword.get(opts, :network) do
+      nil ->
+        {:error, :asset_or_network_required}
+
+      network ->
+        credentials = Keyword.get(opts, :credentials, %{})
+
+        with {:ok, body, _headers} <-
+               post("/v2/networks/#{network}/assets", %{}, credentials, opts) do
+          {:ok, List.wrap(body)}
+        end
+    end
+  end
+
+  def list_networks(asset, opts), do: Rest.networks_for_asset(asset, opts)
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do

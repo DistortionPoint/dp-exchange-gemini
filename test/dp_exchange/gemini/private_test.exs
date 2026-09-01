@@ -3,7 +3,7 @@ defmodule DpExchange.Gemini.PrivateTest do
 
   alias DpExchange.Core.Config
   alias DpExchange.Core.Types.{Balance, Conversion, Fill, Order}
-  alias DpExchange.Gemini.Private
+  alias DpExchange.Gemini.{Private, Rest}
 
   @moduletag :capture_log
 
@@ -909,6 +909,93 @@ defmodule DpExchange.Gemini.PrivateTest do
     test "no volume is an empty list, not an error" do
       assert {:ok, []} =
                Private.get_trade_volume(@credentials, plug: responding([]), retry_attempts: 0)
+    end
+  end
+
+  describe "networks — the call that has to happen before a deposit address" do
+    test "the asset direction is public and lists the chains" do
+      # get_deposit_address/3 takes a network, and a wrong one produces an address on a
+      # chain this venue does not credit. Funds sent there are gone.
+      body = [%{"token" => "USDC", "network" => ["ethereum", "solana"]}]
+
+      assert {:ok, rows} =
+               Rest.networks_for_asset("USDC", plug: responding(body), retry_attempts: 0)
+
+      assert [%{"token" => "USDC"}] = rows
+    end
+
+    test "the network direction is authenticated and asks the venue's own path" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(%{"network" => "ethereum", "assets" => ["USDC"]})
+      end
+
+      assert {:ok, [_row]} =
+               Private.list_networks(nil,
+                 network: "ethereum",
+                 credentials: @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, "/v2/networks/ethereum/assets"}
+    end
+
+    test "neither an asset nor a network is an error" do
+      exploding = fn _conn -> raise "must not ask for networks with neither side given" end
+
+      assert {:error, :asset_or_network_required} =
+               Private.list_networks(nil, plug: exploding, retry_attempts: 0)
+    end
+
+    test "the asset direction goes through the public endpoint even from Private" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json([%{"token" => "USDC"}])
+      end
+
+      assert {:ok, [_row]} =
+               Private.list_networks("USDC", plug: plug, retry_attempts: 0)
+
+      assert_receive {:path, "/v2/network/USDC"}
+    end
+  end
+
+  describe "fee promos are not the fee schedule" do
+    test "the symbols come back as rows" do
+      # get_fees/2 is the schedule applying to this credential. This is the public list of
+      # symbols where the venue charges something other than that schedule, and a caller
+      # computing cost from the schedule alone is wrong for exactly these.
+      assert {:ok, rows} =
+               Rest.list_fee_promos(
+                 plug: responding(%{"symbols" => ["btcusd", "ethusd"]}),
+                 retry_attempts: 0
+               )
+
+      assert rows == [%{"symbol" => "btcusd"}, %{"symbol" => "ethusd"}]
+    end
+
+    test "no promotions is an empty list, which is a real state" do
+      assert {:ok, []} =
+               Rest.list_fee_promos(plug: responding(%{"symbols" => []}), retry_attempts: 0)
+    end
+
+    test "a bare list comes back as rows too" do
+      assert {:ok, [%{"symbol" => "btcusd"}]} =
+               Rest.list_fee_promos(
+                 plug: responding([%{"symbol" => "btcusd"}]),
+                 retry_attempts: 0
+               )
     end
   end
 end

@@ -226,6 +226,29 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
+  def list_networks(asset, opts \\ []) do
+    case {asset, Keyword.get(opts, :network)} do
+      {nil, nil} ->
+        {:error, :asset_or_network_required}
+
+      {nil, network} ->
+        # Scoped to the credential on the real venue, so the fake requires one: an empty
+        # answer means this account cannot move anything on that network, not that the
+        # network carries nothing.
+        with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+          {:ok, [%{"network" => network, "assets" => ["USDC", "USDT"]}]}
+        end
+
+      {asset, _network} ->
+        # The public direction takes no credential.
+        {:ok, [%{"asset" => asset, "networks" => ["ethereum", "solana"]}]}
+    end
+  end
+
+  @impl true
+  def list_fee_promos(_opts \\ []), do: {:ok, [%{"symbol" => "btcusd"}]}
+
+  @impl true
   def get_market_overview(_opts \\ []) do
     {:ok,
      Map.new(@symbols, fn symbol ->

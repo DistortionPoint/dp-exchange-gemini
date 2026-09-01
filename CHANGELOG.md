@@ -22,6 +22,29 @@ acceptable changelog line.
 
 ### Added
 
+- **`list_networks/2` and `list_fee_promos/1`.**
+
+  **`list_networks/2` is the call that has to happen before `get_deposit_address/3`.** That
+  endpoint takes a network and a wrong one produces an address on a chain this venue does
+  not credit — funds sent there are gone.
+
+  Two directions, two endpoints, **and they are not symmetric**: `GET /v2/network/{token}`
+  is public, while `/v2/networks/{network}/assets` needs the Fund Manager or Auditor role
+  and returns *"only the assets where your account has deposit and withdraw access
+  enabled"*. **Its answer is scoped to the credential**, so an empty result means this
+  account cannot move anything on that network — not that the network carries nothing. A
+  caller reading it as a description of the network would draw the wrong conclusion from a
+  true response.
+
+  Rows stay the venue's own: its network names are its own, and translating them would
+  invent a vocabulary it does not accept back.
+
+  **`list_fee_promos/1` is not `get_fees/2`.** That is the schedule applying to this
+  credential; this is the public list of symbols where the venue charges something else, and
+  a caller computing cost from the schedule alone is wrong for exactly these symbols. An
+  empty list means no promotions are running, which is a real state.
+
+
 - **`get_historical_prices/4` routes perpetuals to `/v2/derivatives/candles`, which serves
   `1m` and nothing else.**
 
