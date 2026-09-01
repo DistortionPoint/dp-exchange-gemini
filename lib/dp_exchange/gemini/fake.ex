@@ -418,6 +418,10 @@ defmodule DpExchange.Gemini.Fake do
   defp authenticated(%{access_token: _token}), do: :ok
   defp authenticated(_other), do: {:refused, :missing_credentials}
 
+  # The staking callbacks carry no credentials argument; the fake finds them where the
+  # facade does, so a consumer wiring them wrong fails here rather than in production.
+  defp fake_credentials(opts), do: Keyword.get(opts, :credentials, %{})
+
   # `:market` and `:stop` are refused because the venue serves neither, and reaching the
   # nearest thing would mean choosing a price the caller never supplied.
   defp supported_order_type(type)
@@ -557,22 +561,135 @@ defmodule DpExchange.Gemini.Fake do
   def get_contract_stats(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_staking_rates(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_rates(_opts \\ []) do
+    # Two providers for one asset, at different rates. One rate would hide the reason
+    # `provider_id` is required on stake/3 and unstake/3.
+    {:ok,
+     [
+       %Types.StakingRate{
+         asset: "ETH",
+         provider_id: "provider-a",
+         rate_pct: Decimal.new("4.0"),
+         apy_pct: Decimal.new("4.07"),
+         provider: :gemini
+       },
+       %Types.StakingRate{
+         asset: "ETH",
+         provider_id: "provider-b",
+         rate_pct: Decimal.new("3.5"),
+         # APY absent where the venue publishes none — never derived from the rate above it.
+         apy_pct: nil,
+         provider: :gemini
+       }
+     ]}
+  end
 
   @impl true
-  def get_staking_balances(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_balances(opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)) do
+      # The whole position redeemable and none of it tradable — the real shape that breaks
+      # a caller reading a single "available".
+      {:ok,
+       [
+         %Types.StakingBalance{
+           asset: "ETH",
+           staked: Decimal.new("10"),
+           available_to_trade: Decimal.new("0"),
+           available_for_withdrawal: Decimal.new("10"),
+           by_provider: %{},
+           provider: :gemini
+         }
+       ]}
+    end
+  end
 
   @impl true
-  def get_staking_rewards(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_rewards(opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)) do
+      {:ok,
+       [
+         %Types.StakingReward{
+           asset: "ETH",
+           amount: Decimal.new("0.0031"),
+           provider_id: "provider-a",
+           apy_pct: Decimal.new("4.07"),
+           accrual_count: 7,
+           period_start: ~U[2026-08-25 00:00:00Z],
+           period_end: ~U[2026-09-01 00:00:00Z],
+           provider: :gemini
+         }
+       ]}
+    end
+  end
 
   @impl true
-  def get_staking_history(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_history(opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)) do
+      # A redemption mid-unbond: requested, part paid, part outstanding. A fake whose rows
+      # all settled would never exercise the field this type exists for.
+      {:ok,
+       [
+         %Types.StakingTransaction{
+           id: "stk-1",
+           type: :unstake,
+           venue_type: "Redeem",
+           asset: "ETH",
+           amount: Decimal.new("10"),
+           amount_paid_so_far: Decimal.new("4"),
+           amount_remaining: Decimal.new("6"),
+           provider_id: "provider-a",
+           provider: :gemini
+         }
+       ]}
+    end
+  end
 
   @impl true
-  def stake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def stake(asset, amount, opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)),
+         {:ok, provider_id} <- fake_provider_id(opts) do
+      {:ok,
+       %Types.StakingTransaction{
+         id: "stk-new",
+         type: :stake,
+         venue_type: "Deposit",
+         asset: String.upcase(asset),
+         amount: amount,
+         amount_paid_so_far: nil,
+         amount_remaining: nil,
+         provider_id: provider_id,
+         provider: :gemini
+       }}
+    end
+  end
 
   @impl true
-  def unstake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def unstake(asset, amount, opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)),
+         {:ok, provider_id} <- fake_provider_id(opts) do
+      # Nothing has arrived yet. A fake reporting the full amount paid would teach a
+      # consumer to spend an asset that is still unbonding.
+      {:ok,
+       %Types.StakingTransaction{
+         id: "stk-redeem",
+         type: :unstake,
+         venue_type: "Redeem",
+         asset: String.upcase(asset),
+         amount: amount,
+         amount_paid_so_far: Decimal.new("0"),
+         amount_remaining: amount,
+         provider_id: provider_id,
+         provider: :gemini
+       }}
+    end
+  end
+
+  defp fake_provider_id(opts) do
+    case Keyword.get(opts, :provider_id) do
+      nil -> {:error, :missing_provider_id}
+      provider_id -> {:ok, provider_id}
+    end
+  end
 
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do

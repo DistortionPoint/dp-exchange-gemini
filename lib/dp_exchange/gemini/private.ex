@@ -83,6 +83,9 @@ defmodule DpExchange.Gemini.Private do
     DepositAddress,
     Fill,
     Order,
+    StakingBalance,
+    StakingReward,
+    StakingTransaction,
     Withdrawal
   }
 
@@ -1268,6 +1271,230 @@ defmodule DpExchange.Gemini.Private do
 
     with {:ok, body, _headers} <- post("/v1/custodyaccountfees", params, credentials, opts) do
       {:ok, body |> List.wrap() |> List.flatten()}
+    end
+  end
+
+  @doc """
+  Staked positions, one per asset — `POST /v1/balances/staking`.
+
+  **Three amounts, kept apart.** A real response carries `balance: 10`, `available: 0`,
+  `availableForWithdrawal: 10` — the whole position is redeemable and none of it is
+  tradable. A caller reading a single "available" would size an order against ten and place
+  it against zero, which is why `StakingBalance` refuses to collapse them.
+
+  **A missing state is `nil`, not zero.** A venue that did not report one has not said it is
+  none, and this package will not say it for it.
+
+  Zero-balance rows are **kept**. The host adapter this package replaces dropped them, which
+  makes "the venue reports no position in ETH" and "the account holds nothing in ETH" the
+  same answer; they are not.
+  """
+  @spec get_staking_balances(map(), keyword()) ::
+          {:ok, [StakingBalance.t()]} | {:error, term()} | {:refused, term()}
+  def get_staking_balances(credentials, opts) do
+    with {:ok, rows, headers} <- post("/v1/balances/staking", %{}, credentials, opts) do
+      at = venue_time_or_nil(headers)
+      {:ok, rows |> List.wrap() |> Enum.map(&to_staking_balance(&1, at))}
+    end
+  end
+
+  defp to_staking_balance(row, at) when is_map(row) do
+    %StakingBalance{
+      asset: String.upcase(row["currency"] || ""),
+      staked: decimal(row["balance"]),
+      available_to_trade: decimal(row["available"]),
+      available_for_withdrawal: decimal(row["availableForWithdrawal"]),
+      # Empty means the venue did not break the position down — never that there is one
+      # provider, which is what a `%{}` default silently asserts.
+      by_provider: %{},
+      venue_time: at,
+      provider: :gemini
+    }
+  end
+
+  defp to_staking_balance(_row, at) do
+    %StakingBalance{asset: "", staked: nil, venue_time: at, provider: :gemini}
+  end
+
+  @doc """
+  Rewards accrued over a window — `POST /v1/staking/rewards`.
+
+  **The window is part of the value.** The same number is a good day or a poor quarter
+  depending on it, so `opts[:since]` and `opts[:until]` are sent to the venue and the bounds
+  the venue reports back travel on the struct. Where the venue reports none, they stay `nil`
+  rather than being filled in from the request — the venue is free to clamp a window, and a
+  package that echoed the ask would report a period that was never served.
+
+  `:apy_pct` is the rate **at accrual**, which is not what `get_staking_rates/1` reports
+  today. That is what lets a caller reconcile a reward against the rate that produced it.
+  """
+  @spec get_staking_rewards(map(), keyword()) ::
+          {:ok, [StakingReward.t()]} | {:error, term()} | {:refused, term()}
+  def get_staking_rewards(credentials, opts) do
+    params =
+      %{}
+      |> put_present("since", timestamp_param(Keyword.get(opts, :since)))
+      |> put_present("until", timestamp_param(Keyword.get(opts, :until)))
+      |> put_present("providerId", Keyword.get(opts, :provider_id))
+
+    with {:ok, rows, _headers} <- post("/v1/staking/rewards", params, credentials, opts) do
+      {:ok, rows |> List.wrap() |> Enum.map(&to_staking_reward/1)}
+    end
+  end
+
+  defp to_staking_reward(row) when is_map(row) do
+    %StakingReward{
+      asset: String.upcase(row["currency"] || ""),
+      amount: decimal(row["amount"]),
+      provider_id: row["providerId"],
+      apy_pct: decimal(row["apyPct"]),
+      accrual_count: row["accrualCount"],
+      period_start: staking_time(row["since"]),
+      period_end: staking_time(row["until"]),
+      provider: :gemini
+    }
+  end
+
+  defp to_staking_reward(_row) do
+    %StakingReward{asset: "", amount: nil, provider: :gemini}
+  end
+
+  @doc """
+  Movements in and out of staked positions — `POST /v1/staking/history`.
+
+  **A redemption is a process, not an event.** Rows carry `amount`, `amountPaidSoFar` and
+  `amountRemaining`, and the three differ for most of a redemption's life while the asset
+  unbonds. All three travel; `nil` on the last two means the venue does not report progress,
+  **not** that the operation is complete.
+
+  `:type` is the normalised atom and `:venue_type` keeps Gemini's own word — `Deposit`,
+  `Redeem`, `Interest` and others. A normalisation that loses the original cannot be audited
+  when it turns out to be wrong, and an unrecognised word maps to `:other` rather than to
+  the nearest one that fits.
+  """
+  @spec get_staking_history(map(), keyword()) ::
+          {:ok, [StakingTransaction.t()]} | {:error, term()} | {:refused, term()}
+  def get_staking_history(credentials, opts) do
+    params =
+      %{}
+      |> put_present("since", timestamp_param(Keyword.get(opts, :since)))
+      |> put_present("until", timestamp_param(Keyword.get(opts, :until)))
+      |> put_present("limit", Keyword.get(opts, :limit))
+      |> put_present("providerId", Keyword.get(opts, :provider_id))
+
+    with {:ok, rows, _headers} <- post("/v1/staking/history", params, credentials, opts) do
+      {:ok, rows |> List.wrap() |> Enum.map(&to_staking_transaction/1)}
+    end
+  end
+
+  @doc """
+  Stakes `amount` of `asset` — `POST /v1/staking/stake`.
+
+  **This moves funds.** The decision belongs to the consumer; this package carries it out
+  and reports what the venue said.
+
+  `opts[:provider_id]` names the provider. It is **required**, because the same asset can be
+  staked with several at different rates and picking one here would stake at a rate the
+  caller never chose. Missing it is `{:error, :missing_provider_id}` before a request is
+  made.
+  """
+  @spec stake(String.t(), Decimal.t(), map(), keyword()) ::
+          {:ok, StakingTransaction.t()} | {:error, term()} | {:refused, term()}
+  def stake(asset, amount, credentials, opts) do
+    staking_write("/v1/staking/stake", asset, amount, credentials, opts)
+  end
+
+  @doc """
+  Redeems `amount` of a staked `asset` — `POST /v1/staking/unstake`.
+
+  **Returns immediately; the redemption does not complete immediately.** The returned
+  transaction carries `:amount_remaining`, non-zero for as long as the asset is unbonding. A
+  caller treating the return value as settled will spend an asset it does not have yet.
+
+  `opts[:provider_id]` is required for the same reason it is on `stake/4`: redeeming from
+  the wrong provider redeems at the wrong rate, and a default gives the caller no way to
+  notice.
+  """
+  @spec unstake(String.t(), Decimal.t(), map(), keyword()) ::
+          {:ok, StakingTransaction.t()} | {:error, term()} | {:refused, term()}
+  def unstake(asset, amount, credentials, opts) do
+    staking_write("/v1/staking/unstake", asset, amount, credentials, opts)
+  end
+
+  defp staking_write(path, asset, amount, credentials, opts) do
+    with {:ok, provider_id} <- required_provider_id(opts) do
+      params = %{
+        "currency" => String.upcase(asset),
+        "amount" => Decimal.to_string(amount, :normal),
+        "providerId" => provider_id
+      }
+
+      with {:ok, body, _headers} <- post(path, params, credentials, opts) do
+        {:ok, to_staking_transaction(body)}
+      end
+    end
+  end
+
+  defp required_provider_id(opts) do
+    case Keyword.get(opts, :provider_id) do
+      nil -> {:error, :missing_provider_id}
+      provider_id -> {:ok, provider_id}
+    end
+  end
+
+  defp to_staking_transaction(row) when is_map(row) do
+    %StakingTransaction{
+      id: row["transactionId"] || row["id"],
+      type: staking_type(row["transactionType"]),
+      venue_type: row["transactionType"],
+      asset: String.upcase(row["currency"] || ""),
+      amount: decimal(row["amount"]),
+      amount_paid_so_far: decimal(row["amountPaidSoFar"]),
+      amount_remaining: decimal(row["amountRemaining"]),
+      provider_id: row["providerId"],
+      venue_time: staking_time(row["timestamp"] || row["timestampms"]),
+      provider: :gemini
+    }
+  end
+
+  defp to_staking_transaction(_row) do
+    %StakingTransaction{
+      id: nil,
+      type: :other,
+      asset: "",
+      amount: nil,
+      provider: :gemini
+    }
+  end
+
+  defp staking_type("Deposit"), do: :stake
+  defp staking_type("Redeem"), do: :unstake
+  defp staking_type("Interest"), do: :reward
+  # A word this package does not know is `:other`, and `:venue_type` still carries it. The
+  # nearest atom that fits would be a guess a caller cannot see it made.
+  defp staking_type(_other), do: :other
+
+  # Gemini mixes seconds and milliseconds across its endpoints and the payload does not say
+  # which. Anything at or past 10^12 is milliseconds; below it is seconds. A ms value read
+  # as seconds lands past the epoch ceiling and raises.
+  defp staking_time(nil), do: nil
+
+  defp staking_time(value) when is_integer(value) do
+    unit = if value >= 1_000_000_000_000, do: :millisecond, else: :second
+
+    case DateTime.from_unix(value, unit) do
+      {:ok, at} -> at
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp staking_time(value) when is_float(value), do: staking_time(trunc(value))
+  defp staking_time(_other), do: nil
+
+  defp venue_time_or_nil(headers) do
+    case venue_time(headers) do
+      {:ok, at} -> at
+      _other -> nil
     end
   end
 

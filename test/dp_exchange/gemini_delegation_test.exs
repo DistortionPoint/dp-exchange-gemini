@@ -483,5 +483,49 @@ defmodule DpExchange.GeminiDelegationTest do
     test "get_payment_method/3 refuses rather than filtering the listing" do
       assert {:error, :not_supported} = Gemini.get_payment_method(@money_creds, "bank-1")
     end
+
+    test "get_staking_rates/1", %{opts: sup} do
+      body = %{"ETH" => %{"provider-a" => %{"ratePct" => "4.0"}}}
+
+      assert {:ok, [rate]} =
+               Gemini.get_staking_rates(Keyword.merge(money_opts(sup, body), credentials: nil))
+
+      assert rate.provider_id == "provider-a"
+    end
+
+    test "get_staking_balances/1", %{opts: sup} do
+      rows = [%{"currency" => "ETH", "balance" => "10"}]
+      assert {:ok, [balance]} = Gemini.get_staking_balances(money_opts(sup, rows))
+      assert balance.asset == "ETH"
+    end
+
+    test "get_staking_rewards/1", %{opts: sup} do
+      rows = [%{"currency" => "ETH", "amount" => "0.1"}]
+      assert {:ok, [_reward]} = Gemini.get_staking_rewards(money_opts(sup, rows))
+    end
+
+    test "get_staking_history/1", %{opts: sup} do
+      rows = [%{"transactionType" => "Redeem", "currency" => "ETH", "amount" => "1"}]
+      assert {:ok, [tx]} = Gemini.get_staking_history(money_opts(sup, rows))
+      assert tx.type == :unstake
+    end
+
+    test "stake/3 and unstake/3 both reach the venue", %{opts: sup} do
+      body = %{"transactionType" => "Deposit", "currency" => "ETH", "amount" => "1"}
+
+      assert {:ok, _tx} =
+               Gemini.stake(
+                 "ETH",
+                 Decimal.new("1"),
+                 money_opts(sup, body, provider_id: "provider-a")
+               )
+
+      assert {:ok, _tx} =
+               Gemini.unstake(
+                 "ETH",
+                 Decimal.new("1"),
+                 money_opts(sup, body, provider_id: "provider-a")
+               )
+    end
   end
 end

@@ -43,7 +43,17 @@ defmodule DpExchange.Gemini.Rest do
   """
 
   alias DpExchange.Core.{HttpClient, Timeframe}
-  alias DpExchange.Core.Types.{Candle, FxRate, OrderBook, Quote, TopOfBook, Trade}
+
+  alias DpExchange.Core.Types.{
+    Candle,
+    FxRate,
+    OrderBook,
+    Quote,
+    StakingRate,
+    TopOfBook,
+    Trade
+  }
+
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
   # Canonical width => the literal Gemini accepts. Measured 2026-08-28: the venue names
@@ -518,6 +528,75 @@ defmodule DpExchange.Gemini.Rest do
   defp promo_rows(rows) when is_list(rows), do: rows
   defp promo_rows(%{} = row), do: [row]
   defp promo_rows(_other), do: []
+
+  @doc """
+  What each provider pays for staking each asset — `GET /v1/staking/rates`.
+
+  Public: the schedule is the same for everyone, so no credential is involved.
+
+  **Three numbers, and only two of them survive.** Gemini publishes `rate` in *basis
+  points*, `ratePct` as a percentage and `apyPct` as an annualised percentage — the first
+  two differ by a factor of a hundred and the third by compounding as well. `StakingRate`
+  carries percentages only, both named for what they are, because a contract carrying "the
+  rate" invites a caller to be wrong by 100× and be plausible either way.
+
+  A row publishing only `rate` is converted (basis points ÷ 100). A row publishing neither
+  percentage leaves `:rate_pct` nil rather than deriving one, and `:apy_pct` is never
+  derived from `:rate_pct` at all — that needs a compounding frequency the venue did not
+  state, and assuming one is inventing a number.
+
+  The response is keyed by asset, each asset holding its providers. Both levels are walked
+  so a provider is addressable; `Types.StakingBalance` carries the matching breakdown, and
+  redeeming from the wrong provider redeems at the wrong rate.
+  """
+  @spec get_staking_rates(keyword()) ::
+          {:ok, [StakingRate.t()]} | {:error, term()} | {:refused, term()}
+  def get_staking_rates(opts) do
+    with {:ok, body} <- get_body("/v1/staking/rates", opts) do
+      {:ok, staking_rates(body)}
+    end
+  end
+
+  defp staking_rates(%{} = body) do
+    Enum.flat_map(body, fn {asset, providers} -> rates_for_asset(asset, providers) end)
+  end
+
+  defp staking_rates(_other), do: []
+
+  defp rates_for_asset(asset, %{} = providers) do
+    Enum.map(providers, fn {provider_id, row} -> staking_rate(asset, provider_id, row) end)
+  end
+
+  defp rates_for_asset(_asset, _other), do: []
+
+  defp staking_rate(asset, provider_id, row) when is_map(row) do
+    %StakingRate{
+      asset: String.upcase(asset),
+      provider_id: provider_id,
+      rate_pct: rate_pct(row),
+      apy_pct: decimal(row["apyPct"]),
+      deposit_limit_usd: decimal(row["depositLimitUsd"]),
+      venue_time: nil,
+      provider: :gemini
+    }
+  end
+
+  defp staking_rate(asset, provider_id, _other) do
+    %StakingRate{asset: String.upcase(asset), provider_id: provider_id, provider: :gemini}
+  end
+
+  # `ratePct` where the venue publishes it; otherwise `rate`, which is basis points, divided
+  # by a hundred. Never `apyPct`, which is a different number for the same position.
+  defp rate_pct(%{"ratePct" => pct}) when is_binary(pct) or is_number(pct), do: decimal(pct)
+
+  defp rate_pct(%{"rate" => bps}) when is_binary(bps) or is_number(bps) do
+    case decimal(bps) do
+      nil -> nil
+      value -> Decimal.div(value, Decimal.new(100))
+    end
+  end
+
+  defp rate_pct(_row), do: nil
   # --- internals ----------------------------------------------------------
 
   defp get_body(path, opts) do

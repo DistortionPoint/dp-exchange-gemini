@@ -496,4 +496,75 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:refused, :missing_credentials} = Fake.list_custody_fees(%{})
     end
   end
+
+  describe "the fake's staking surface" do
+    test "two providers pay different rates for the same asset" do
+      # One rate would hide the reason provider_id is required on the writes.
+      assert {:ok, rates} = Fake.get_staking_rates()
+      assert length(rates) == 2
+      assert Enum.map(rates, & &1.provider_id) |> Enum.uniq() |> length() == 2
+    end
+
+    test "one provider publishes no APY, and it is not derived from its rate" do
+      assert {:ok, rates} = Fake.get_staking_rates()
+      assert Enum.any?(rates, &is_nil(&1.apy_pct))
+    end
+
+    test "the staked position is redeemable in full and tradable not at all" do
+      assert {:ok, [balance]} = Fake.get_staking_balances(credentials: @credentials)
+      assert Decimal.equal?(balance.available_to_trade, Decimal.new("0"))
+      assert Decimal.equal?(balance.available_for_withdrawal, Decimal.new("10"))
+    end
+
+    test "the history carries a redemption mid-unbond" do
+      assert {:ok, [tx]} = Fake.get_staking_history(credentials: @credentials)
+      refute Decimal.equal?(tx.amount_remaining, Decimal.new("0"))
+    end
+
+    test "a reward carries the window it accrued over" do
+      assert {:ok, [reward]} = Fake.get_staking_rewards(credentials: @credentials)
+      assert reward.period_start
+      assert reward.period_end
+      assert reward.accrual_count == 7
+    end
+
+    test "the writes refuse without a provider" do
+      assert {:error, :missing_provider_id} =
+               Fake.stake("ETH", Decimal.new("1"), credentials: @credentials)
+
+      assert {:error, :missing_provider_id} =
+               Fake.unstake("ETH", Decimal.new("1"), credentials: @credentials)
+    end
+
+    test "an unstake reports nothing arrived yet" do
+      assert {:ok, tx} =
+               Fake.unstake("ETH", Decimal.new("10"),
+                 credentials: @credentials,
+                 provider_id: "provider-a"
+               )
+
+      assert Decimal.equal?(tx.amount_paid_so_far, Decimal.new("0"))
+      assert Decimal.equal?(tx.amount_remaining, Decimal.new("10"))
+    end
+
+    test "a stake records the provider it went to" do
+      assert {:ok, tx} =
+               Fake.stake("eth", Decimal.new("1"),
+                 credentials: @credentials,
+                 provider_id: "provider-b"
+               )
+
+      assert tx.asset == "ETH"
+      assert tx.provider_id == "provider-b"
+      assert tx.type == :stake
+    end
+
+    test "the account-scoped staking reads still need credentials" do
+      assert {:refused, :missing_credentials} = Fake.get_staking_balances()
+      assert {:refused, :missing_credentials} = Fake.get_staking_rewards()
+      assert {:refused, :missing_credentials} = Fake.get_staking_history()
+      assert {:refused, :missing_credentials} = Fake.stake("ETH", Decimal.new("1"))
+      assert {:refused, :missing_credentials} = Fake.unstake("ETH", Decimal.new("1"))
+    end
+  end
 end

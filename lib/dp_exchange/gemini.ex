@@ -125,12 +125,6 @@ defmodule DpExchange.Gemini do
     {:get_positions, 1},
     {:get_funding, 2},
     {:get_contract_stats, 2},
-    {:get_staking_rates, 1},
-    {:get_staking_balances, 1},
-    {:get_staking_rewards, 1},
-    {:get_staking_history, 1},
-    {:stake, 3},
-    {:unstake, 3},
     {:get_conversion, 2},
     {:list_portfolios, 1},
     # Gemini lists no options at all, so these are the venue's absence rather than this
@@ -643,23 +637,64 @@ defmodule DpExchange.Gemini do
   @impl true
   def get_contract_stats(_symbol, _opts \\ []), do: Venue.not_supported()
 
-  @impl true
-  def get_staking_rates(_opts \\ []), do: Venue.not_supported()
+  @doc """
+  What each provider pays for staking each asset.
 
+  Public. See `DpExchange.Gemini.Rest.get_staking_rates/1` — percentages only, both named,
+  and `:apy_pct` never derived from `:rate_pct`.
+  """
   @impl true
-  def get_staking_balances(_opts \\ []), do: Venue.not_supported()
+  def get_staking_rates(opts \\ []), do: Rest.get_staking_rates(with_limiter(opts))
 
-  @impl true
-  def get_staking_rewards(_opts \\ []), do: Venue.not_supported()
+  @doc """
+  Staked positions, one per asset.
 
+  See `DpExchange.Gemini.Private.get_staking_balances/2`. Three amounts, kept apart: the
+  whole position can be redeemable and none of it tradable.
+  """
   @impl true
-  def get_staking_history(_opts \\ []), do: Venue.not_supported()
+  def get_staking_balances(opts \\ []),
+    do: Private.get_staking_balances(credentials(opts), with_limiter(opts))
 
-  @impl true
-  def stake(_asset, _amount, _opts \\ []), do: Venue.not_supported()
+  @doc """
+  Rewards accrued over a window.
 
+  See `DpExchange.Gemini.Private.get_staking_rewards/2`. The window travels with the number,
+  because the same number is a good day or a poor quarter without it.
+  """
   @impl true
-  def unstake(_asset, _amount, _opts \\ []), do: Venue.not_supported()
+  def get_staking_rewards(opts \\ []),
+    do: Private.get_staking_rewards(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Movements in and out of staked positions.
+
+  See `DpExchange.Gemini.Private.get_staking_history/2`. A redemption's progress travels
+  with it; `nil` is "not reported", not "complete".
+  """
+  @impl true
+  def get_staking_history(opts \\ []),
+    do: Private.get_staking_history(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Stakes `amount` of `asset`. **This moves funds.**
+
+  See `DpExchange.Gemini.Private.stake/4`. `opts[:provider_id]` is required — the same asset
+  stakes with several providers at different rates.
+  """
+  @impl true
+  def stake(asset, amount, opts \\ []),
+    do: Private.stake(asset, amount, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Redeems `amount` of a staked `asset`. **Returns before the redemption completes.**
+
+  See `DpExchange.Gemini.Private.unstake/4`. `:amount_remaining` is non-zero for as long as
+  the asset is unbonding.
+  """
+  @impl true
+  def unstake(asset, amount, opts \\ []),
+    do: Private.unstake(asset, amount, credentials(opts), with_limiter(opts))
 
   @doc """
   Quotes a conversion — Gemini's Instant quote. See

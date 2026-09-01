@@ -22,6 +22,38 @@ acceptable changelog line.
 
 ### Added
 
+- **Custodial staking, all six endpoints**: `get_staking_rates/1` (public,
+  `GET /v1/staking/rates`), `get_staking_balances/1`, `get_staking_rewards/1`,
+  `get_staking_history/1`, `stake/3` and `unstake/3`.
+
+  **The rate's unit is the whole risk.** Gemini publishes three numbers for one position —
+  `rate` in basis points, `ratePct` as a percentage and `apyPct` annualised. The first two
+  differ by a factor of a hundred and the third by compounding. `Types.StakingRate` carries
+  percentages only, both named: basis points are converted on the way in, and **`:apy_pct`
+  is never derived from `:rate_pct`** — that needs a compounding frequency the venue did not
+  state.
+
+  **A staked position is three amounts and stays three.** The real shape is `balance: 10`,
+  `available: 0`, `availableForWithdrawal: 10` — redeemable in full, tradable not at all. A
+  state the venue does not report is `nil`, never zero. **Zero-balance rows are kept**: the
+  host adapter this replaces dropped them, which makes "no position reported" and "no
+  position" the same answer.
+
+  **An unstake returns before it completes.** `:amount`, `:amount_paid_so_far` and
+  `:amount_remaining` all travel, because a redemption unbonds on the chain's schedule and
+  the three differ for most of its life. `nil` on the last two is "not reported", not
+  "complete".
+
+  **`opts[:provider_id]` is required on both writes and is not defaulted.** The same asset
+  stakes with several providers at different rates; picking one here would stake or redeem
+  at a rate the caller never chose. Missing it is `{:error, :missing_provider_id}` before a
+  request is made.
+
+  A transaction type this package does not know maps to `:other`, with the venue's own word
+  kept in `:venue_type` — a normalisation that loses the original cannot be audited when it
+  turns out to be wrong.
+
+
 - **Notional balances and custody fees**, closing this venue's fund-management surface:
   `get_notional_balances/3` (`/v1/notionalbalances/{currency}`) and `list_custody_fees/2`
   (`/v1/custodyaccountfees`).
