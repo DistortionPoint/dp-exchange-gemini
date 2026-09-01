@@ -755,6 +755,100 @@ defmodule DpExchange.Gemini do
     do: Private.preview_margin_order(request, credentials(opts), with_limiter(opts))
 
   @doc """
+  Creates a bilateral clearing order. **Not `place_order/3`** — nothing reaches the book.
+
+  See `DpExchange.Gemini.Private.create_clearing_order/3`. `is_confirmed` on the response is
+  the field that matters: `false` means the trade has not happened.
+  """
+  @spec create_clearing_order(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_clearing_order(request, opts \\ []),
+    do: Private.create_clearing_order(request, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Submits a broker-facilitated clearing order between two named counterparties.
+
+  See `DpExchange.Gemini.Private.create_broker_clearing_order/3`. `side` is assigned to the
+  **source**, and passing the counterparties the wrong way round produces a valid order in
+  which each side trades the direction the other meant.
+  """
+  @spec create_broker_clearing_order(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_broker_clearing_order(request, opts \\ []),
+    do: Private.create_broker_clearing_order(request, credentials(opts), with_limiter(opts))
+
+  @doc """
+  One clearing order's state.
+
+  See `DpExchange.Gemini.Private.get_clearing_order/3`. Read `is_confirmed`, not `status`.
+  """
+  @spec get_clearing_order(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_clearing_order(clearing_id, opts \\ []),
+    do: Private.get_clearing_order(clearing_id, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Cancels an unconfirmed clearing order.
+
+  See `DpExchange.Gemini.Private.cancel_clearing_order/3`. A confirmed order is a trade, and
+  a trade is not cancellable.
+  """
+  @spec cancel_clearing_order(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def cancel_clearing_order(clearing_id, opts \\ []),
+    do: Private.cancel_clearing_order(clearing_id, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Confirms a clearing order. **This executes a trade.**
+
+  See `DpExchange.Gemini.Private.confirm_clearing_order/4`. The venue re-asks for every term
+  and this package fills none of them in — the confirming side says what it believes it is
+  agreeing to, which is the whole point of the check.
+  """
+  @spec confirm_clearing_order(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def confirm_clearing_order(clearing_id, request, opts \\ []),
+    do:
+      Private.confirm_clearing_order(
+        clearing_id,
+        request,
+        credentials(opts),
+        with_limiter(opts)
+      )
+
+  @doc """
+  Clearing orders this account is party to.
+
+  See `DpExchange.Gemini.Private.list_clearing_orders/2`. Expiration and submission are
+  different windows.
+  """
+  @spec list_clearing_orders(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_orders(opts \\ []),
+    do: Private.list_clearing_orders(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Broker clearing orders — a different row shape from `list_clearing_orders/1`.
+
+  See `DpExchange.Gemini.Private.list_clearing_brokers/2`.
+  """
+  @spec list_clearing_brokers(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_brokers(opts \\ []),
+    do: Private.list_clearing_brokers(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Clearing trades — the orders that completed.
+
+  See `DpExchange.Gemini.Private.list_clearing_trades/2`. `opts[:since_nanos]` is
+  nanoseconds, unlike every other timestamp on this venue.
+  """
+  @spec list_clearing_trades(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_trades(opts \\ []),
+    do: Private.list_clearing_trades(credentials(opts), with_limiter(opts))
+
+  @doc """
   What each provider pays for staking each asset.
 
   Public. See `DpExchange.Gemini.Rest.get_staking_rates/1` — percentages only, both named,

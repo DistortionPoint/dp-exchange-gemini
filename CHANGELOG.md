@@ -22,6 +22,37 @@ acceptable changelog line.
 
 ### Added
 
+- **Clearing, all eight endpoints**: `create_clearing_order/2`,
+  `create_broker_clearing_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`,
+  `confirm_clearing_order/3`, `list_clearing_orders/1`, `list_clearing_brokers/1` and
+  `list_clearing_trades/1`.
+
+  **A clearing order is not an order on the book.** It is one half of a trade agreed with a
+  named counterparty and it does nothing until that counterparty confirms. `is_confirmed` on
+  the response is the field that matters — a caller reading a successful create as a fill
+  holds a position it does not have.
+
+  **`confirm_clearing_order/3` re-states every term and this package fills none of them in.**
+  The venue re-asks for the symbol, amount, price and side alongside the clearing id;
+  reading them back from the order being confirmed would confirm whatever the venue had,
+  which is the one thing re-stating them exists to prevent. The `side` there is the
+  confirming party's own — the opposite of the creator's.
+
+  **The broker form names both counterparties, and `side` belongs to the source.** Passing
+  the two the wrong way round produces a valid order in which each side trades the direction
+  the other meant, so both ids are required and refused by name when missing. `expires_in_hrs`
+  is required here and optional on the bilateral form — the venue's own asymmetry.
+
+  **Three listings, three row shapes, and none of them merged.** A bilateral order names one
+  counterparty and a `side`; a broker order names a source and a target and a `source_side`;
+  a trade comes back camelCase under `results` where the orders come back snake_case under
+  `orders`. The venue's own keys are kept in each, because one normalised shape would match
+  none of the three.
+
+  `list_clearing_trades/1`'s `since_nanos` is **nanoseconds** — the one Gemini timestamp that
+  is not milliseconds.
+
+
 - **Perpetuals and margin, twelve endpoints.** `get_positions/1`, `get_funding/2`,
   `get_contract_stats/2` and `next_funding_timestamp/2`; `get_account_margin/1`,
   `list_funding_payments/1` and the three funding reports; and the spot-margin trio

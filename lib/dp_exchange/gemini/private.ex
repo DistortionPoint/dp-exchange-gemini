@@ -1912,6 +1912,229 @@ defmodule DpExchange.Gemini.Private do
   defp decimal_string(nil), do: nil
   defp decimal_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
   defp decimal_string(value), do: to_string(value)
+
+  # --- clearing -----------------------------------------------------------
+
+  @doc """
+  Creates a bilateral clearing order — `POST /v1/clearing/new`.
+
+  **This is not `place_order/3`.** A clearing order does not go to the book: it is one half
+  of a trade agreed directly with a named counterparty, and it does nothing until that
+  counterparty confirms it. A caller that treated a successful response as a fill has a
+  position it does not have.
+
+  `symbol`, `amount`, `price` and `side` are required by the venue and are not defaulted.
+  `opts[:counterparty_id]` names the other side; `opts[:expires_in_hrs]` bounds how long the
+  offer stands.
+
+  **`is_confirmed` on the response is the field that matters.** `false` means the trade has
+  not happened; the order sits until the counterparty confirms it or it expires.
+  """
+  @spec create_clearing_order(map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_clearing_order(request, credentials, opts) do
+    with {:ok, params} <- clearing_order_params(request) do
+      params =
+        params
+        |> put_present("counterparty_id", Keyword.get(opts, :counterparty_id))
+        |> put_present("expires_in_hrs", Keyword.get(opts, :expires_in_hrs))
+
+      with {:ok, body, _headers} <- post("/v1/clearing/new", params, credentials, opts),
+           do: {:ok, body}
+    end
+  end
+
+  @doc """
+  Submits a **broker-facilitated** clearing order — `POST /v1/clearing/broker/new`.
+
+  Not `create_clearing_order/3`: a broker order names **both** counterparties and the broker
+  is neither of them. `opts[:source_counterparty_id]` and `opts[:target_counterparty_id]` are
+  both required, and so is `opts[:expires_in_hrs]` — the venue marks it required here where
+  it is optional on the bilateral form.
+
+  **`side` is assigned to the source**, and the opposite side goes to the target. Passing the
+  two counterparties the wrong way round produces a valid order in which each side is trading
+  the direction the other meant.
+
+  The venue answers `AwaitSourceTargetConfirm`: **both** parties still have to confirm.
+  """
+  @spec create_broker_clearing_order(map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_broker_clearing_order(request, credentials, opts) do
+    with {:ok, params} <- clearing_order_params(request),
+         {:ok, source} <- required_opt(opts, :source_counterparty_id),
+         {:ok, target} <- required_opt(opts, :target_counterparty_id),
+         {:ok, hours} <- required_opt(opts, :expires_in_hrs) do
+      params =
+        params
+        |> Map.put("source_counterparty_id", source)
+        |> Map.put("target_counterparty_id", target)
+        |> Map.put("expires_in_hrs", hours)
+
+      with {:ok, body, _headers} <- post("/v1/clearing/broker/new", params, credentials, opts),
+           do: {:ok, body}
+    end
+  end
+
+  @doc """
+  One clearing order's state — `POST /v1/clearing/status`.
+
+  **Read `is_confirmed`, not `status`.** The status string is the venue's own description and
+  the boolean is the fact: an order that is not confirmed has not traded, whatever the
+  description says.
+  """
+  @spec get_clearing_order(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_clearing_order(clearing_id, credentials, opts) when is_binary(clearing_id) do
+    with {:ok, body, _headers} <-
+           post("/v1/clearing/status", %{"clearing_id" => clearing_id}, credentials, opts),
+         do: {:ok, body}
+  end
+
+  @doc """
+  Cancels a clearing order — `POST /v1/clearing/cancel`.
+
+  Only an unconfirmed order can be cancelled; once both sides have confirmed there is a
+  trade, and a trade is not cancellable. The venue's `result` and `details` both travel,
+  because `details` is where it says why a cancel did not take.
+  """
+  @spec cancel_clearing_order(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def cancel_clearing_order(clearing_id, credentials, opts) when is_binary(clearing_id) do
+    with {:ok, body, _headers} <-
+           post("/v1/clearing/cancel", %{"clearing_id" => clearing_id}, credentials, opts),
+         do: {:ok, body}
+  end
+
+  @doc """
+  Confirms a clearing order — `POST /v1/clearing/confirm`. **This executes a trade.**
+
+  **The venue re-asks for every term.** `symbol`, `amount`, `price` and `side` are required
+  alongside the `clearing_id`, and this package does not fill any of them in from the order
+  it is confirming: the point of re-stating them is that the confirming side says what it
+  believes it is agreeing to, and a package that read them back from the venue would confirm
+  whatever the venue had, which is the one thing the check exists to prevent.
+
+  `side` here is **the confirming party's own side**, which is the opposite of the side the
+  order was created with.
+  """
+  @spec confirm_clearing_order(String.t(), map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def confirm_clearing_order(clearing_id, request, credentials, opts)
+      when is_binary(clearing_id) do
+    with {:ok, params} <- clearing_order_params(request) do
+      params = Map.put(params, "clearing_id", clearing_id)
+
+      with {:ok, body, _headers} <- post("/v1/clearing/confirm", params, credentials, opts),
+           do: {:ok, body}
+    end
+  end
+
+  @doc """
+  Clearing orders this account is party to — `POST /v1/clearing/list`.
+
+  Every filter is optional and none is defaulted: `opts[:symbol]`, `opts[:counterparty]`
+  (which takes an id **or** an alias), `opts[:side]`, and four timestamp bounds —
+  `expiration_start`, `expiration_end`, `submission_start` and `submission_end`.
+
+  **Expiration and submission are different windows.** An order submitted last week can
+  expire tomorrow, and filtering on the wrong one returns a real list that is not the one
+  asked for.
+  """
+  @spec list_clearing_orders(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_orders(credentials, opts) do
+    params =
+      %{}
+      |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
+      |> put_present("counterparty", Keyword.get(opts, :counterparty))
+      |> put_present("side", clearing_side(Keyword.get(opts, :side)))
+      |> put_present("expiration_start", timestamp_param(Keyword.get(opts, :expiration_start)))
+      |> put_present("expiration_end", timestamp_param(Keyword.get(opts, :expiration_end)))
+      |> put_present("submission_start", timestamp_param(Keyword.get(opts, :submission_start)))
+      |> put_present("submission_end", timestamp_param(Keyword.get(opts, :submission_end)))
+
+    with {:ok, body, _headers} <- post("/v1/clearing/list", params, credentials, opts) do
+      {:ok, body |> clearing_rows("orders") |> List.wrap()}
+    end
+  end
+
+  @doc """
+  Broker clearing orders — `POST /v1/clearing/broker/list`.
+
+  Separate from `list_clearing_orders/2` because the rows are a different shape: a broker
+  order names a **source** and a **target** counterparty and a `source_side`, where a
+  bilateral order names one counterparty and one side. Merging the two would leave a caller
+  reading `side` on a row that has none.
+  """
+  @spec list_clearing_brokers(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_brokers(credentials, opts) do
+    params =
+      %{}
+      |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
+      |> put_present("expiration_start", timestamp_param(Keyword.get(opts, :expiration_start)))
+      |> put_present("expiration_end", timestamp_param(Keyword.get(opts, :expiration_end)))
+
+    with {:ok, body, _headers} <- post("/v1/clearing/broker/list", params, credentials, opts) do
+      {:ok, body |> clearing_rows("orders") |> List.wrap()}
+    end
+  end
+
+  @doc """
+  Clearing trades — `POST /v1/clearing/trades`.
+
+  Orders that **completed**, where `list_clearing_orders/2` shows what is outstanding. Rows
+  are camelCase here and snake_case there; the venue's own keys are kept either way rather
+  than normalised into one shape that matches neither response.
+
+  `opts[:limit]` maps to the venue's `limit_per_account` — default 100, maximum 300 — and
+  `opts[:since_nanos]` to `timestamp_nanos`, which is **nanoseconds**, not the milliseconds
+  every other Gemini timestamp uses.
+  """
+  @spec list_clearing_trades(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_trades(credentials, opts) do
+    params =
+      %{}
+      |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
+      |> put_present("timestamp_nanos", Keyword.get(opts, :since_nanos))
+      |> put_present("limit_per_account", Keyword.get(opts, :limit))
+
+    with {:ok, body, _headers} <- post("/v1/clearing/trades", params, credentials, opts) do
+      {:ok, body |> clearing_rows("results") |> List.wrap()}
+    end
+  end
+
+  # The four terms the venue requires on every clearing write, and none of them defaulted.
+  defp clearing_order_params(%{symbol: symbol, amount: amount, price: price, side: side})
+       when is_binary(symbol) do
+    {:ok,
+     %{
+       "symbol" => SymbolFormat.to_exchange_symbol(symbol),
+       "amount" => decimal_string(amount),
+       "price" => decimal_string(price),
+       "side" => to_string(side)
+     }}
+  end
+
+  defp clearing_order_params(_request), do: {:error, :missing_clearing_terms}
+
+  defp clearing_symbol(nil), do: nil
+  defp clearing_symbol(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
+
+  defp clearing_side(nil), do: nil
+  defp clearing_side(side), do: to_string(side)
+
+  defp clearing_rows(%{} = body, key) do
+    case Map.get(body, key) do
+      rows when is_list(rows) -> rows
+      _other -> []
+    end
+  end
+
+  defp clearing_rows(rows, _key) when is_list(rows), do: rows
+  defp clearing_rows(_body, _key), do: []
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do
