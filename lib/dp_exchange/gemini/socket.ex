@@ -43,7 +43,7 @@ defmodule DpExchange.Gemini.Socket do
 
   alias DpExchange.Core.Notice
   alias DpExchange.Core.Types.{Quote, TopOfBook}
-  alias DpExchange.Gemini.{Environment, SymbolFormat}
+  alias DpExchange.Gemini.{Environment, SymbolFormat, WsChannels, WsDecode}
 
   require Logger
 
@@ -63,20 +63,51 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   @doc """
-  Subscribes the connection to `@bookTicker` for each symbol.
+  Subscribes the connection to `channel` for each symbol.
 
-  Returns `{:error, :send_timeout}` rather than exiting when the socket will not accept
-  the frame — a caller can retry a batch, but it cannot recover from a linked exit it did
-  not expect.
+  `channel` defaults to `:book_ticker`, which is the only channel this socket delivered
+  before the AsyncAPI document was read. **The address is built by `WsChannels`**, not
+  concatenated here — the interval is part of the address for the `…Fast` and `…Snapshot`
+  channels, and a hand-assembled `"{symbol}@depthFast"` subscribes to nothing and produces
+  silence rather than an error.
+
+  A per-account channel takes no symbols: pass `[]`.
+
+  Returns `{:error, :send_timeout}` rather than exiting when the socket will not accept the
+  frame — a caller can retry a batch, but it cannot recover from a linked exit it did not
+  expect.
   """
-  @spec subscribe(pid(), [String.t()]) :: :ok | {:error, term()}
-  def subscribe(socket, symbols), do: send_rpc(socket, "subscribe", streams(symbols))
+  @spec subscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
+  def subscribe(socket, symbols, channel \\ :book_ticker),
+    do: send_rpc(socket, "subscribe", streams(symbols, channel))
 
-  @spec unsubscribe(pid(), [String.t()]) :: :ok | {:error, term()}
-  def unsubscribe(socket, symbols), do: send_rpc(socket, "unsubscribe", streams(symbols))
+  @spec unsubscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
+  def unsubscribe(socket, symbols, channel \\ :book_ticker),
+    do: send_rpc(socket, "unsubscribe", streams(symbols, channel))
 
-  defp streams(symbols) do
-    Enum.map(symbols, fn symbol -> "#{SymbolFormat.to_exchange_symbol(symbol)}@bookTicker" end)
+  @doc """
+  The subscription addresses for `symbols` on `channel`.
+
+  Exposed because a caller building a batch needs to know what it is about to ask for, and
+  because a channel/symbol mismatch is an error worth seeing before the frame goes out
+  rather than as silence afterwards.
+  """
+  @spec streams([String.t()], atom()) :: [String.t()]
+  def streams(symbols, channel \\ :book_ticker)
+
+  def streams([], channel) do
+    # A per-account channel has no symbols. One address, not none.
+    case WsChannels.address(channel) do
+      {:ok, address} -> [address]
+      {:error, _reason} -> []
+    end
+  end
+
+  def streams(symbols, channel) do
+    for symbol <- symbols,
+        {:ok, address} <-
+          [WsChannels.address(channel, SymbolFormat.to_exchange_symbol(symbol))],
+        do: address
   end
 
   defp send_rpc(_socket, _method, []), do: :ok
@@ -111,6 +142,43 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   def handle_frame(_other, state), do: {:ok, state}
+
+  # A `@trade` frame. **`m` is "whether the buyer is the maker", which is the opposite of
+  # the taker's side** — and the opposite of what `/v1/trades` reports under `type`. The
+  # inversion lives in `WsDecode.to_trade/2`; doing it here as well would undo it.
+  defp handle_message(%{"e" => "trade"} = message, state), do: deliver_trade(message, state)
+
+  defp handle_message(%{"t" => _tid, "p" => _p, "q" => _q} = message, state),
+    do: deliver_trade(message, state)
+
+  # A differential depth frame. **Not delivered as an OrderBook**: a diff is not a book, and
+  # handing a subscriber the changed levels under a type that means "the whole book" is the
+  # substitution this family refuses. The socket reports the gap check instead, which is the
+  # part a consumer cannot do for itself without the sequence range.
+  defp handle_message(%{"e" => "depthUpdate", "U" => _first} = message, state) do
+    if WsDecode.depth_gap?(message, state[:last_depth_update]) do
+      # The vendor's rule: discard the book and resubscribe. A consumer that keeps applying
+      # after a gap holds a book that is silently wrong from here on, with every price real.
+      notify(
+        state,
+        Notice.new(:degraded, :gemini,
+          details: %{reason: "depth sequence gap", symbol: message["s"]}
+        )
+      )
+    end
+
+    send(state.subscriber, {:dp_exchange, :gemini, {:depth_update, message}})
+    {:ok, Map.put(state, :last_depth_update, message["u"])}
+  end
+
+  # A partial-depth snapshot: absolute levels and a `lastUpdateId`, which is a book.
+  defp handle_message(%{"lastUpdateId" => _id, "bids" => _b, "asks" => _a} = message, state) do
+    symbol = SymbolFormat.to_canonical_symbol(message["s"] || "")
+
+    {:ok, book} = WsDecode.to_order_book(message, symbol, DateTime.utc_now())
+    send(state.subscriber, {:dp_exchange, :gemini, book})
+    {:ok, state}
+  end
 
   # A `bookTicker` frame is the top of the book: `s` the symbol, `b`/`a` the best bid and
   # ask, `c` the last trade price where one exists.
@@ -159,6 +227,19 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   defp handle_message(_other, state), do: {:ok, state}
+
+  defp deliver_trade(message, state) do
+    symbol = SymbolFormat.to_canonical_symbol(message["s"] || "")
+
+    case WsDecode.to_trade(message, symbol) do
+      {:ok, trade} -> send(state.subscriber, {:dp_exchange, :gemini, trade})
+      # An undated print cannot be placed on a tape. Silence beats a trade at the wrong
+      # moment.
+      {:error, _reason} -> :ok
+    end
+
+    {:ok, state}
+  end
 
   # No trade price in the frame means the book has quotes and no execution to report. That
   # is a real state and it is silence here, not a `Quote` built from a bid.

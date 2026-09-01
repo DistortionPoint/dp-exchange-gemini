@@ -22,6 +22,27 @@ acceptable changelog line.
 
 ### Added
 
+- **The socket delivers the whole channel surface, not just `bookTicker`.** `subscribe/3`
+  and `unsubscribe/3` take a channel and build the address through `WsChannels` — **the
+  interval is part of the address** for the `…Fast` and `…Snapshot` channels, and a
+  hand-assembled `"{symbol}@depthFast"` subscribes to nothing and produces silence rather
+  than an error. A per-account channel takes `[]` for symbols and yields one address.
+
+  **A `@trade` frame's side is inverted from `m`**, which the socket delegates to
+  `WsDecode.to_trade/2` rather than repeating — doing it in both places would undo it.
+
+  **A depth diff is delivered as a diff, not as an `OrderBook`.** Handing a subscriber the
+  changed levels under a type that means "the whole book" is the substitution this family
+  refuses. **A sequence gap emits a `:degraded` notice**, because the vendor's rule is
+  discard-and-resubscribe and a consumer that keeps applying holds a book that is silently
+  wrong from that frame onward with every price in it real. A partial-depth *snapshot* does
+  become an `OrderBook`, carrying `lastUpdateId` as the sequence.
+
+  **The new clauses are ordered before `bookTicker`'s**, which is load-bearing: a depth diff
+  carries `s`, `b` and `a` too, so the older clause matched it and tried to read an array of
+  levels as a price.
+
+
 - **The WebSocket surface: all twenty-two channels, their addresses, and decoders for the
   market-data frames.** From the vendor's **AsyncAPI document**, read 2026-09-01 — not the
   rendered Stream Matrix, which shows eleven families and **omits ten of these channels**:
