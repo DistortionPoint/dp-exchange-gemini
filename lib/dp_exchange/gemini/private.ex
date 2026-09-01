@@ -83,6 +83,7 @@ defmodule DpExchange.Gemini.Private do
     DepositAddress,
     Fill,
     Order,
+    Position,
     StakingBalance,
     StakingReward,
     StakingTransaction,
@@ -403,6 +404,61 @@ defmodule DpExchange.Gemini.Private do
     opts
     |> Keyword.take([:limiter, :timeout, :retry_attempts, :log_requests, :plug, :req_adapter])
     |> Keyword.merge(provider: :gemini_private, raw_status: true)
+  end
+
+  # An authenticated **GET**, where the signed `request` is the full path *including the
+  # query string*. Gemini signs a payload even on its private GETs, and the payload's
+  # `request` field is documented with the query attached — signing the bare path yields a
+  # valid signature over the wrong string, which the venue reports as a credential problem
+  # rather than a parameter one. One string, used in both places, is what keeps them equal.
+  defp signed_get(path, credentials, opts) do
+    scheme = auth_scheme(credentials, opts)
+
+    with {:ok, headers} <- Auth.headers(scheme, path, %{}, credentials, opts) do
+      case HttpClient.request(:get, base_url(opts) <> path, headers, nil, request_opts(opts)) do
+        {:ok, %{status: status, body: body, headers: response_headers}}
+        when status in 200..299 ->
+          {:ok, decode(body), response_headers}
+
+        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+          {:refused, refusal(body)}
+
+        {:ok, %{status: status, body: body}} ->
+          {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # The same call, returning the venue's bytes untouched. A spreadsheet is not JSON and
+  # decoding it would turn a real file into an empty map.
+  defp signed_get_raw(path, credentials, opts) do
+    case signed_get_bytes(path, credentials, opts) do
+      {:ok, body} -> {:ok, body}
+      other -> other
+    end
+  end
+
+  defp signed_get_bytes(path, credentials, opts) do
+    scheme = auth_scheme(credentials, opts)
+
+    with {:ok, headers} <- Auth.headers(scheme, path, %{}, credentials, opts) do
+      case HttpClient.request(:get, base_url(opts) <> path, headers, nil, request_opts(opts)) do
+        {:ok, %{status: status, body: body}} when status in 200..299 ->
+          {:ok, body}
+
+        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+          {:refused, refusal(body)}
+
+        {:ok, %{status: status, body: body}} ->
+          {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
   end
 
   # --- order mapping ------------------------------------------------------
@@ -1498,6 +1554,357 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # --- perpetuals and margin ---------------------------------------------
+
+  @doc """
+  Open positions — `POST /v1/positions`.
+
+  **Gemini sends a negative quantity for a short**, and `Types.Position` refuses to carry
+  one: `:quantity` is the size, always positive, and `:side` says which way. A sign
+  convention is a fact about one venue's JSON, not about the market, and a package that
+  passed it through would hand a caller a position that is exactly backwards while every
+  number in it stays plausible.
+
+  `notional_value` is negative for shorts too, and it is **kept as the venue sent it** —
+  that one is a signed value rather than a magnitude with a direction beside it, and
+  flipping it would change what the number means.
+
+  **Realised and unrealised P&L stay apart.** One has happened; the other is a mark-to-market
+  opinion that may never be realised.
+
+  `liquidation_price` is `nil` here: `/v1/positions` does not publish one. **That does not
+  mean the position is safe** — `get_account_margin/2` publishes
+  `estimated_liquidation_price` for the account, which is where a caller must look.
+  """
+  @spec get_positions(map(), keyword()) ::
+          {:ok, [Position.t()]} | {:error, term()} | {:refused, term()}
+  def get_positions(credentials, opts) do
+    with {:ok, body, headers} <- post("/v1/positions", %{}, credentials, opts) do
+      at = venue_time_or_nil(headers)
+      {:ok, body |> position_rows() |> Enum.map(&to_position(&1, at))}
+    end
+  end
+
+  defp position_rows(%{"openPositions" => rows}) when is_list(rows), do: rows
+  defp position_rows(rows) when is_list(rows), do: rows
+  defp position_rows(_other), do: []
+
+  defp to_position(row, at) when is_map(row) do
+    quantity = decimal(row["quantity"])
+
+    %Position{
+      symbol: row["symbol"],
+      side: position_side(quantity),
+      quantity: position_size(quantity),
+      instrument_type: row["instrument_type"],
+      average_cost: decimal(row["average_cost"]),
+      mark_price: decimal(row["mark_price"]),
+      # Signed as the venue sent it: this is a value, not a magnitude with a side beside it.
+      notional_value: decimal(row["notional_value"]),
+      realised_pnl: decimal(row["realised_pnl"]),
+      unrealised_pnl: decimal(row["unrealised_pnl"]),
+      # Not published on this endpoint. `nil` is "not stated", never "no liquidation risk".
+      liquidation_price: nil,
+      leverage: nil,
+      venue_time: at,
+      provider: :gemini
+    }
+  end
+
+  defp to_position(_row, at) do
+    %Position{
+      symbol: nil,
+      side: nil,
+      quantity: nil,
+      venue_time: at,
+      provider: :gemini
+    }
+  end
+
+  # A quantity of exactly zero has no side, and guessing one would invent a direction the
+  # venue did not state.
+  defp position_side(nil), do: nil
+
+  defp position_side(quantity) do
+    case Decimal.compare(quantity, Decimal.new(0)) do
+      :lt -> :short
+      :gt -> :long
+      :eq -> nil
+    end
+  end
+
+  defp position_size(nil), do: nil
+  defp position_size(quantity), do: Decimal.abs(quantity)
+
+  @doc """
+  The perpetuals margin account — `POST /v1/margin`.
+
+  Collateral, leverage, buying and selling power, and **the estimated liquidation price**,
+  which `get_positions/2` does not publish. A caller judging how much room is left reads it
+  here.
+
+  Returned as the venue's own map. Its eleven fields divide margin four ways — by position,
+  by open order, by buy side and by sell side — and a struct that kept only a total would
+  drop the split a caller sizing its next order needs.
+  """
+  @spec get_account_margin(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_account_margin(credentials, opts) do
+    params = put_present(%{}, "symbol", Keyword.get(opts, :symbol))
+
+    with {:ok, body, _headers} <- post("/v1/margin", params, credentials, opts) do
+      {:ok, body}
+    end
+  end
+
+  @doc """
+  Funding payments credited to or debited from this account —
+  `POST /v1/perpetuals/fundingPayment`.
+
+  **Not `get_funding/2`.** That is the contract's rate; this is what this account actually
+  paid or received. A caller reconciling a balance needs the second, and computing it from
+  the first plus a position size is this package's arithmetic rather than the venue's ledger.
+
+  Rows are the venue's own. Each carries `action` — `Credit` or `Debit` — beside a positive
+  quantity, so **the direction is in the action and not in the sign**. Normalising it into a
+  signed number here would drop the venue's own word for it.
+
+  The venue notes `instrumentSymbol` is attached only to records from 16 April 2024 onwards;
+  older rows have none, and this package does not fill one in.
+  """
+  @spec list_funding_payments(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_funding_payments(credentials, opts) do
+    with {:ok, body, _headers} <- post("/v1/perpetuals/fundingPayment", %{}, credentials, opts) do
+      {:ok, body |> List.wrap() |> List.flatten()}
+    end
+  end
+
+  @doc """
+  The funding payment report as JSON —
+  `/v1/perpetuals/fundingpaymentreport/records.json`.
+
+  **The query string is part of what is signed.** Gemini's private GETs put the *full* path,
+  query string included, in the signed `request` field; signing the bare path produces a
+  valid signature over the wrong string, and the venue reports that as a credential problem
+  rather than a parameter one. This builds the query once and uses the same string in both
+  places.
+
+  `opts[:from]` and `opts[:to]` are dates, `opts[:rows]` a count. The venue's own default is
+  **8760 rows** — a year of hourly funding — and this package does not send one, because a
+  page size chosen here would silently truncate a report the caller asked for in full.
+  """
+  @spec funding_payment_report(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def funding_payment_report(credentials, opts) do
+    path = report_path("/v1/perpetuals/fundingpaymentreport/records.json", opts)
+
+    with {:ok, body, _headers} <- signed_get(path, credentials, opts) do
+      {:ok, body |> List.wrap() |> List.flatten()}
+    end
+  end
+
+  @doc """
+  The funding **amount** report as a spreadsheet —
+  `/v1/fundingamountreport/records.xlsx`.
+
+  Returns the venue's bytes unparsed, as `{:ok, binary}`. This package ships no spreadsheet
+  reader and will not grow one: a parsed cell is a number this package chose from a layout
+  the venue can change without notice, and the file is what the venue actually issued.
+
+  `symbol` is required by the venue. `opts[:from]` and `opts[:to]` must be given **together
+  or not at all** — the venue makes each mandatory if the other is present, and sending one
+  alone is refused here rather than silently returning a differently-bounded report.
+  """
+  @spec funding_amount_report(String.t(), map(), keyword()) ::
+          {:ok, binary()} | {:error, term()} | {:refused, term()}
+  def funding_amount_report(symbol, credentials, opts) do
+    with :ok <- both_dates_or_neither(opts) do
+      path =
+        report_path(
+          "/v1/fundingamountreport/records.xlsx",
+          Keyword.put(opts, :symbol, symbol)
+        )
+
+      signed_get_raw(path, credentials, opts)
+    end
+  end
+
+  @doc """
+  The funding **payment** report as a spreadsheet —
+  `/v1/perpetuals/fundingpaymentreport/records.xlsx`.
+
+  The same bytes-not-cells rule as `funding_amount_report/3`, and the same account scope as
+  `funding_payment_report/2`. Takes no symbol: a funding payment belongs to the account, not
+  to one contract.
+  """
+  @spec funding_payment_report_file(map(), keyword()) ::
+          {:ok, binary()} | {:error, term()} | {:refused, term()}
+  def funding_payment_report_file(credentials, opts) do
+    with :ok <- both_dates_or_neither(opts) do
+      path = report_path("/v1/perpetuals/fundingpaymentreport/records.xlsx", opts)
+      signed_get_raw(path, credentials, opts)
+    end
+  end
+
+  # The venue: "Mandatory if toDate is specified, else optional", and the same in reverse.
+  # One alone comes back bounded by `numRows` instead of by the date the caller gave, which
+  # is a real report over the wrong window.
+  defp both_dates_or_neither(opts) do
+    both_dates_present(Keyword.get(opts, :from), Keyword.get(opts, :to))
+  end
+
+  defp both_dates_present(nil, nil), do: :ok
+  defp both_dates_present(nil, _to), do: {:error, :from_and_to_together}
+  defp both_dates_present(_from, nil), do: {:error, :from_and_to_together}
+  defp both_dates_present(_from, _to), do: :ok
+
+  defp report_path(path, opts) do
+    query =
+      []
+      |> maybe_param("symbol", Keyword.get(opts, :symbol))
+      |> maybe_param("fromDate", report_date(Keyword.get(opts, :from)))
+      |> maybe_param("toDate", report_date(Keyword.get(opts, :to)))
+      |> maybe_param("numRows", Keyword.get(opts, :rows))
+      |> Enum.reverse()
+
+    case query do
+      [] -> path
+      pairs -> path <> "?" <> URI.encode_query(pairs)
+    end
+  end
+
+  defp maybe_param(pairs, _name, nil), do: pairs
+  defp maybe_param(pairs, name, value), do: [{name, to_string(value)} | pairs]
+
+  defp report_date(%Date{} = date), do: Date.to_iso8601(date)
+  defp report_date(%DateTime{} = at), do: at |> DateTime.to_date() |> Date.to_iso8601()
+  defp report_date(other), do: other
+
+  @doc """
+  The **spot** margin account summary — `POST /v1/margin/account`.
+
+  Not `get_account_margin/2`: that one is the perpetuals account. These are two margin
+  systems on one venue, and their fields are named differently on purpose — this one nests
+  every amount as `%{"currency" => _, "value" => _}` where the perpetuals one sends bare
+  decimals in dollars.
+
+  Returned as the venue's own map for that reason. Flattening the currency off an amount is
+  how a caller ends up adding a BTC number to a USD one.
+  """
+  @spec get_margin_account(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_margin_account(credentials, opts) do
+    with {:ok, body, _headers} <- post("/v1/margin/account", %{}, credentials, opts) do
+      {:ok, body}
+    end
+  end
+
+  @doc """
+  Margin interest rates for every borrowable asset — `POST /v1/margin/rates`.
+
+  **Three rates per currency, and they are not three ways of saying one thing.** The venue
+  publishes `borrowRate` hourly, `borrowRateDaily` as hourly × 24 and `borrowRateAnnual` as
+  daily × 365, and all three travel: a caller that took the hourly rate for an annual one
+  would be out by four orders of magnitude, and the number would still look like a rate.
+
+  `lastUpdated` is milliseconds, and it matters — a borrow rate is a moving quote, not a
+  schedule.
+  """
+  @spec get_margin_rates(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_margin_rates(credentials, opts) do
+    with {:ok, body, _headers} <- post("/v1/margin/rates", %{}, credentials, opts) do
+      {:ok, body |> margin_rate_rows() |> List.wrap()}
+    end
+  end
+
+  defp margin_rate_rows(%{"rates" => rates}) when is_list(rates), do: rates
+  defp margin_rate_rows(rates) when is_list(rates), do: rates
+  defp margin_rate_rows(_other), do: []
+
+  @doc """
+  What a spot order would do to this account's margin — `POST /v1/margin/order/preview`.
+
+  **Places nothing.** It returns the account's margin statistics before and after the
+  hypothetical order, as `preorder` and `postorder`, and a caller reads the difference.
+
+  `symbol`, `side` and `type` are required by the venue and are not defaulted here. The
+  fourth parameter depends on the first three and the venue states which:
+  **`amount` for a limit order or a market sell, `totalSpend` for a market buy**, and
+  `price` for a limit order. Sending the wrong one is refused up front rather than sent —
+  a preview computed against a quantity the caller did not mean is a number that looks
+  right.
+  """
+  @spec preview_margin_order(map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_margin_order(request, credentials, opts) do
+    with {:ok, params} <- margin_preview_params(request) do
+      with {:ok, body, _headers} <-
+             post("/v1/margin/order/preview", params, credentials, opts) do
+        {:ok, body}
+      end
+    end
+  end
+
+  defp margin_preview_params(%{symbol: symbol, side: side, type: type} = request)
+       when is_binary(symbol) do
+    base = %{
+      "symbol" => SymbolFormat.to_exchange_symbol(symbol),
+      "side" => to_string(side),
+      "type" => to_string(type)
+    }
+
+    with {:ok, sized} <- margin_preview_size(base, to_string(type), to_string(side), request) do
+      {:ok, put_present(sized, "price", decimal_string(Map.get(request, :price)))}
+    end
+  end
+
+  defp margin_preview_params(_request), do: {:error, :missing_order_fields}
+
+  # The venue's own rule, enforced rather than discovered: a market **buy** is sized in quote
+  # currency and everything else in base. Sending `amount` on a market buy previews a
+  # different order than the caller described.
+  defp margin_preview_size(base, "market", "buy", request) do
+    case decimal_string(Map.get(request, :total_spend)) do
+      nil -> {:error, :total_spend_required}
+      spend -> {:ok, Map.put(base, "totalSpend", spend)}
+    end
+  end
+
+  defp margin_preview_size(base, "limit", _side, request) do
+    with {:ok, amount} <- required_amount(request),
+         {:ok, _price} <- required_preview_price(request) do
+      {:ok, Map.put(base, "amount", amount)}
+    end
+  end
+
+  defp margin_preview_size(base, _type, _side, request) do
+    with {:ok, amount} <- required_amount(request), do: {:ok, Map.put(base, "amount", amount)}
+  end
+
+  # Not `required_price/1` above: that one reports `{:missing_field, :price}` for an order
+  # this package is about to place, and this reports `:price_required` for a preview it is
+  # about to describe. Two callers, two vocabularies, and merging them would report a
+  # placement error on a call that places nothing.
+  defp required_preview_price(request) do
+    case decimal_string(Map.get(request, :price)) do
+      nil -> {:error, :price_required}
+      price -> {:ok, price}
+    end
+  end
+
+  defp required_amount(request) do
+    case decimal_string(Map.get(request, :amount)) do
+      nil -> {:error, :amount_required}
+      amount -> {:ok, amount}
+    end
+  end
+
+  # Full notation, never scientific: `1E-8` is not a number this venue reads.
+  defp decimal_string(nil), do: nil
+  defp decimal_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp decimal_string(value), do: to_string(value)
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do

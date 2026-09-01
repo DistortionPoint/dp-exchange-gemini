@@ -527,5 +527,149 @@ defmodule DpExchange.GeminiDelegationTest do
                  money_opts(sup, body, provider_id: "provider-a")
                )
     end
+
+    test "get_positions/1", %{opts: sup} do
+      body = %{"openPositions" => [%{"symbol" => "BTCGUSDPERP", "quantity" => "-1"}]}
+      assert {:ok, [position]} = Gemini.get_positions(money_opts(sup, body))
+      assert position.side == :short
+    end
+
+    test "get_funding/2 and get_contract_stats/2 are public", %{opts: sup} do
+      funding = %{"symbol" => "BTCGUSDPERP", "amount" => -1.5}
+
+      assert {:ok, %{symbol: "BTCGUSDPERP"}} =
+               Gemini.get_funding(
+                 "BTCGUSDPERP",
+                 Keyword.merge(money_opts(sup, funding), credentials: nil)
+               )
+
+      assert {:ok, %{mark_price: mark}} =
+               Gemini.get_contract_stats(
+                 "BTCGUSDPERP",
+                 Keyword.merge(money_opts(sup, %{"mark_price" => "1"}), credentials: nil)
+               )
+
+      assert Decimal.equal?(mark, Decimal.new("1"))
+    end
+
+    test "next_funding_timestamp/2", %{opts: sup} do
+      assert {:ok, %DateTime{}} =
+               Gemini.next_funding_timestamp(
+                 "BTCGUSDPERP",
+                 Keyword.merge(money_opts(sup, 1_787_940_001_000), credentials: nil)
+               )
+    end
+
+    test "get_account_margin/1 and list_funding_payments/1", %{opts: sup} do
+      assert {:ok, %{"leverage" => "1.5"}} =
+               Gemini.get_account_margin(money_opts(sup, %{"leverage" => "1.5"}))
+
+      assert {:ok, [_payment]} =
+               Gemini.list_funding_payments(money_opts(sup, [%{"eventType" => "x"}]))
+    end
+
+    test "the three reports", %{opts: sup} do
+      assert {:ok, []} = Gemini.funding_payment_report(money_opts(sup, []))
+
+      assert {:ok, _bytes} =
+               Gemini.funding_amount_report("BTCGUSDPERP", money_opts(sup, %{}))
+
+      assert {:ok, _bytes} = Gemini.funding_payment_report_file(money_opts(sup, %{}))
+    end
+
+    test "the spot margin trio", %{opts: sup} do
+      assert {:ok, %{"leverage" => "1.5"}} =
+               Gemini.get_margin_account(money_opts(sup, %{"leverage" => "1.5"}))
+
+      assert {:ok, [_rate]} =
+               Gemini.get_margin_rates(money_opts(sup, %{"rates" => [%{"currency" => "BTC"}]}))
+
+      assert {:ok, _preview} =
+               Gemini.preview_margin_order(
+                 %{symbol: "BTC-USD", side: :sell, type: :market, amount: Decimal.new("1")},
+                 money_opts(sup, %{"preorder" => %{}})
+               )
+    end
+  end
+
+  describe "a private call with no credentials never reaches the network" do
+    # Every one of these is called at its **shortest arity**, with no options at all — no
+    # credentials, no plug, no base URL. Each must come back as a credential error, and the
+    # absence of a plug is the assertion: if any of them built a request, the test would
+    # fail on a connection rather than on a refusal.
+    #
+    # This is also the only thing that exercises each function's defaulted-argument head. A
+    # facade function whose default `opts \\ []` was wired to the wrong helper compiles, and
+    # is never called at that arity by anything else in this suite.
+
+    test "the perpetuals and margin reads refuse" do
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_positions()
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_account_margin()
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.list_funding_payments()
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.funding_payment_report()
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_margin_account()
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_margin_rates()
+    end
+
+    test "the report files refuse" do
+      assert {:error, {:unsupported_auth_scheme, nil}} =
+               Gemini.funding_amount_report("BTCGUSDPERP")
+
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.funding_payment_report_file()
+    end
+
+    test "the margin preview refuses on its own fields before it refuses on credentials" do
+      # Order of refusal matters: a request this package cannot build is not a credential
+      # problem, and reporting it as one sends the reader to the wrong place.
+      assert {:error, :missing_order_fields} = Gemini.preview_margin_order(%{side: :buy})
+    end
+
+    test "the staking reads and writes refuse" do
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_staking_balances()
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_staking_rewards()
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_staking_history()
+      assert {:error, :missing_provider_id} = Gemini.stake("ETH", Decimal.new("1"))
+      assert {:error, :missing_provider_id} = Gemini.unstake("ETH", Decimal.new("1"))
+    end
+
+    test "the money-movement writes refuse" do
+      # Two of these refuse on a **missing argument** before they look at a credential, and
+      # that order is the point: a request this package cannot build is not an auth failure,
+      # and reporting it as one sends the reader looking at the wrong thing.
+      assert {:error, {:missing_option, :network}} = Gemini.list_approved_addresses()
+
+      assert {:error, {:missing_option, :address}} =
+               Gemini.estimate_withdrawal_fee("BTC", "bitcoin", Decimal.new("1"))
+
+      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.add_payment_method(%{})
+
+      assert {:error, {:unsupported_auth_scheme, nil}} =
+               Gemini.get_deposit_address("BTC", "bitcoin")
+
+      assert {:error, {:unsupported_auth_scheme, nil}} =
+               Gemini.withdraw("BTC", "bitcoin", Decimal.new("1"), "addr")
+
+      assert {:error, {:unsupported_auth_scheme, nil}} =
+               Gemini.transfer_internal("BTC", Decimal.new("1"), from: "a", to: "b")
+
+      assert {:error, {:unsupported_auth_scheme, nil}} =
+               Gemini.request_approved_address("ethereum", "0xabc", "label")
+
+      assert {:error, {:unsupported_auth_scheme, nil}} =
+               Gemini.remove_approved_address("ethereum", "0xabc")
+    end
+
+    test "the conversion calls refuse, and one of them on direction first" do
+      # `convert/3` cannot tell which way "BTC to USD" goes without a side, and it says so
+      # before it looks at a credential — an ambiguous conversion is not an auth failure.
+      assert {:error, {:ambiguous_conversion, "BTC", "USD"}} =
+               Gemini.convert("BTC", "USD", Decimal.new("1"))
+
+      assert {:error, {:ambiguous_conversion, "BTC", "USD"}} =
+               Gemini.quote_conversion("BTC", "USD", Decimal.new("1"))
+
+      assert {:error, {:missing_option, [:symbol, :side, :amount, :price]}} =
+               Gemini.commit_conversion("q-1")
+    end
   end
 end

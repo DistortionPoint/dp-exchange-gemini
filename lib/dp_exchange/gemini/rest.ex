@@ -46,6 +46,8 @@ defmodule DpExchange.Gemini.Rest do
 
   alias DpExchange.Core.Types.{
     Candle,
+    ContractStats,
+    Funding,
     FxRate,
     OrderBook,
     Quote,
@@ -597,6 +599,112 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp rate_pct(_row), do: nil
+
+  @doc """
+  Funding for a perpetual — `GET /v1/fundingamount/{symbol}`.
+
+  Public: funding is a property of the contract, not of an account.
+
+  **Settled and estimated are different facts and stay in different fields.** `amount` is
+  funding that has happened at a funding time that has passed; `estimatedFundingAmount` is
+  the venue's projection for the next one and moves continuously until it settles. A real
+  response carries `-1.50991` beside `-2.10595` — 40% apart — which is how wrong a caller
+  reading "the funding" would be.
+
+  **The sign is the venue's and is carried through unchanged.** It means direction between
+  longs and shorts, and normalising it here would assert a convention Gemini did not state.
+
+  Both timestamps travel: `fundingTimestampMilliSecs` is when this one settled and
+  `nextFundingTimestamp` is when the next one lands. A caller holding across that instant
+  pays or receives at it.
+  """
+  @spec get_funding(String.t(), keyword()) ::
+          {:ok, Funding.t()} | {:error, term()} | {:refused, term()}
+  def get_funding(symbol, opts) do
+    with {:ok, body} <- get_body("/v1/fundingamount/#{symbol}", opts) do
+      {:ok,
+       %Funding{
+         symbol: body["symbol"] || symbol,
+         amount: decimal(body["amount"]),
+         estimated_amount: decimal(body["estimatedFundingAmount"]),
+         funded_at: epoch_ms(body["fundingTimestampMilliSecs"]),
+         next_funding_at: epoch_ms(body["nextFundingTimestamp"]),
+         provider: :gemini
+       }}
+    end
+  end
+
+  @doc """
+  When the next funding calculation lands — `GET /v1/nextfundingtimestamp/{symbol}`.
+
+  Public, and **the venue answers with a bare integer**, not an object: milliseconds since
+  the epoch and nothing around it. `get_funding/2` carries the same value alongside the
+  amounts; this exists because a caller that only needs the schedule should not have to read
+  a funding amount to get it.
+
+  A body that is not an integer is `{:error, :unexpected_response_shape}` rather than a nil
+  timestamp — "the venue said something else" and "there is no next funding" are different
+  answers, and the second would be remarkable on a perpetual.
+  """
+  @spec next_funding_timestamp(String.t(), keyword()) ::
+          {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
+  def next_funding_timestamp(symbol, opts) do
+    with {:ok, body} <- get_body("/v1/nextfundingtimestamp/#{symbol}", opts) do
+      case epoch_ms(body) do
+        nil -> {:error, :unexpected_response_shape}
+        at -> {:ok, at}
+      end
+    end
+  end
+
+  @doc """
+  Risk statistics for a perpetual — `GET /v1/riskstats/{symbol}`.
+
+  Public. **Three prices, and none of them is the other.** `mark_price` is what Gemini marks
+  positions and computes liquidations against; `index_price` is the external reference it is
+  derived from; and neither is what the contract last traded at, which is `get_price/2`. A
+  position can be liquidated at a mark the market never printed, and that is why the two are
+  separate fields rather than one.
+
+  Open interest arrives twice — in contracts and in notional — and neither substitutes for
+  the other across instruments with different contract sizes.
+
+  `venue_time` is `nil`: this endpoint publishes no timestamp of its own, and stamping the
+  local clock would make a stale response indistinguishable from a current one.
+  """
+  @spec get_contract_stats(String.t(), keyword()) ::
+          {:ok, ContractStats.t()} | {:error, term()} | {:refused, term()}
+  def get_contract_stats(symbol, opts) do
+    with {:ok, body} <- get_body("/v1/riskstats/#{symbol}", opts) do
+      {:ok,
+       %ContractStats{
+         symbol: body["symbol"] || symbol,
+         product_type: body["product_type"],
+         mark_price: decimal(body["mark_price"]),
+         index_price: decimal(body["index_price"]),
+         open_interest: decimal(body["open_interest"]),
+         open_interest_notional: decimal(body["open_interest_notional"]),
+         venue_time: nil,
+         provider: :gemini
+       }}
+    end
+  end
+
+  defp epoch_ms(value) when is_integer(value) do
+    case DateTime.from_unix(value, :millisecond) do
+      {:ok, at} -> at
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp epoch_ms(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {millis, ""} -> epoch_ms(millis)
+      _other -> nil
+    end
+  end
+
+  defp epoch_ms(_other), do: nil
   # --- internals ----------------------------------------------------------
 
   defp get_body(path, opts) do

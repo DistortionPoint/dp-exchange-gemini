@@ -22,6 +22,54 @@ acceptable changelog line.
 
 ### Added
 
+- **Perpetuals and margin, twelve endpoints.** `get_positions/1`, `get_funding/2`,
+  `get_contract_stats/2` and `next_funding_timestamp/2`; `get_account_margin/1`,
+  `list_funding_payments/1` and the three funding reports; and the spot-margin trio
+  `get_margin_account/1`, `get_margin_rates/1` and `preview_margin_order/2`.
+
+  **Gemini sends a negative quantity for a short**, and `Types.Position` refuses to carry
+  one: `:quantity` is a positive size and `:side` says which way. A sign convention is a fact
+  about one venue's JSON, not about the market, and passing it through hands a caller a
+  position that is exactly backwards while every number in it stays plausible.
+  `notional_value` **keeps** its sign, because that one is a value rather than a magnitude
+  with a direction beside it.
+
+  **Settled funding and estimated funding stay in different fields.** A real response carries
+  `-1.50991` beside `-2.10595` — 40% apart — which is how wrong a caller reading "the
+  funding" would be. The sign is carried through unchanged: it means direction between longs
+  and shorts, and normalising it would assert a convention Gemini did not state.
+
+  **Mark, index and last trade are three prices and none is the other.** A position can be
+  liquidated at a mark the market never printed, which is why `get_contract_stats/2` carries
+  mark and index separately and neither is `get_price/2`.
+
+  **`get_positions/1` publishes no liquidation price, and `nil` there does not mean safe** —
+  `get_account_margin/1` carries `estimated_liquidation_price` for the account.
+
+  **A private GET signs the full path including its query string.** Gemini's report
+  endpoints put the query in the signed `request` field; signing the bare path yields a valid
+  signature over the wrong string, which the venue reports as a credential problem rather
+  than a parameter one. One string is built and used in both places.
+
+  **The spreadsheet reports return the venue's bytes, unparsed.** This package ships no
+  spreadsheet reader and will not grow one: a parsed cell is a number this package chose from
+  a layout the venue can change without notice. `fromDate` and `toDate` must be given
+  together or not at all — the venue makes each mandatory if the other is present, and one
+  alone comes back bounded by `numRows`, which is a real report over the wrong window.
+
+  **`preview_margin_order/2` enforces the venue's sizing rule up front**: `totalSpend` for a
+  market buy, `amount` for everything else, and a price for a limit order. Sending the wrong
+  one previews a different order than the caller described.
+
+  **Margin rates arrive three ways per currency** — hourly, daily and annual — and all three
+  travel. Taking the hourly rate for the annual one is an error of four orders of magnitude
+  that still looks like a rate.
+
+  `supported_instrument_types` gains `:perp`. The venue's perpetuals surface was always
+  there; the package's claim of `[:spot]` was a statement about the package that had stopped
+  being true.
+
+
 - **Custodial staking, all six endpoints**: `get_staking_rates/1` (public,
   `GET /v1/staking/rates`), `get_staking_balances/1`, `get_staking_rewards/1`,
   `get_staking_history/1`, `stake/3` and `unstake/3`.

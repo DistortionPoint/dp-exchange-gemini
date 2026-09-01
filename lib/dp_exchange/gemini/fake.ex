@@ -552,13 +552,61 @@ defmodule DpExchange.Gemini.Fake do
   # not offer something, the comment beside it says so.
 
   @impl true
-  def get_positions(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_positions(opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)) do
+      # A short, because the short is where the sign convention bites: the venue sends a
+      # negative quantity and a fake that only ever returned a long would never exercise it.
+      {:ok,
+       [
+         %Types.Position{
+           symbol: "BTCGUSDPERP",
+           side: :short,
+           quantity: Decimal.new("0.2"),
+           instrument_type: "perp",
+           average_cost: Decimal.new("60000"),
+           mark_price: Decimal.new("59500"),
+           notional_value: Decimal.new("-11900"),
+           realised_pnl: Decimal.new("12.5"),
+           unrealised_pnl: Decimal.new("100"),
+           # Not published on /v1/positions. `nil` is "not stated", never "no risk".
+           liquidation_price: nil,
+           leverage: nil,
+           provider: :gemini
+         }
+       ]}
+    end
+  end
 
   @impl true
-  def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_funding(symbol, _opts \\ []) do
+    # Settled and estimated differ, and by a lot — a fake that made them equal would let a
+    # consumer read either as the other and still pass.
+    {:ok,
+     %Types.Funding{
+       symbol: symbol,
+       amount: Decimal.new("-1.50991"),
+       estimated_amount: Decimal.new("-2.10595"),
+       funded_at: ~U[2026-09-01 18:00:00Z],
+       next_funding_at: ~U[2026-09-01 19:00:00Z],
+       provider: :gemini
+     }}
+  end
 
   @impl true
-  def get_contract_stats(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_contract_stats(symbol, _opts \\ []) do
+    # Mark away from index, because that divergence is the reason both are carried.
+    {:ok,
+     %Types.ContractStats{
+       symbol: symbol,
+       product_type: "PerpetualSwapContract",
+       mark_price: Decimal.new("59500"),
+       index_price: Decimal.new("59480"),
+       open_interest: Decimal.new("1240"),
+       open_interest_notional: Decimal.new("73780000"),
+       venue_time: nil,
+       provider: :gemini
+     }}
+  end
 
   @impl true
   def get_staking_rates(_opts \\ []) do

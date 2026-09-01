@@ -122,9 +122,6 @@ defmodule DpExchange.Gemini do
     # funding, conversions, admin — so `:unsupported` here is a statement about this
     # package, not about the venue. That distinction is the one Phase 1 had to correct on
     # another venue, and it is stated here so it is not made again.
-    {:get_positions, 1},
-    {:get_funding, 2},
-    {:get_contract_stats, 2},
     {:get_conversion, 2},
     {:list_portfolios, 1},
     # Gemini lists no options at all, so these are the venue's absence rather than this
@@ -210,7 +207,12 @@ defmodule DpExchange.Gemini do
     Capabilities.new(
       endpoints: endpoint_maturities(),
       supported_quotes: SymbolFormat.quotes(),
-      supported_instrument_types: [:spot],
+      # `:perp` joined on 2026-09-01, when positions, funding and risk stats landed. The
+      # venue's perpetuals surface was always there; this package's claim of `[:spot]` was a
+      # statement about the package, and it had stopped being true.
+      supported_instrument_types: [:spot, :perp],
+      # Spot short selling still needs a margin order, which this package does not place.
+      # The perpetuals book is where a short lives here, and `get_positions/1` reports one.
       supports_short_selling: false,
       # `bookTicker` delivers top-of-book; a frame carrying a last trade also delivers a
       # quote. Two kinds from one channel, and each says which it is.
@@ -628,14 +630,129 @@ defmodule DpExchange.Gemini do
   # Conformance assertion 12 checks the two agree in both directions, which is what stops
   # one being updated without the other.
 
-  @impl true
-  def get_positions(_opts \\ []), do: Venue.not_supported()
+  @doc """
+  Open positions on the perpetuals book.
 
+  See `DpExchange.Gemini.Private.get_positions/2`. Gemini sends a negative quantity for a
+  short and this returns a positive size with an explicit `:side` — a sign convention is a
+  fact about one venue's JSON, not about the market.
+  """
   @impl true
-  def get_funding(_symbol, _opts \\ []), do: Venue.not_supported()
+  def get_positions(opts \\ []),
+    do: Private.get_positions(credentials(opts), with_limiter(opts))
 
+  @doc """
+  Funding for a perpetual — settled, projected, and when the next one lands.
+
+  Public. See `DpExchange.Gemini.Rest.get_funding/2`: the settled amount and the venue's
+  estimate are different facts and stay in different fields.
+  """
   @impl true
-  def get_contract_stats(_symbol, _opts \\ []), do: Venue.not_supported()
+  def get_funding(symbol, opts \\ []), do: Rest.get_funding(symbol, with_limiter(opts))
+
+  @doc """
+  Risk statistics for a perpetual — mark, index and open interest.
+
+  Public. See `DpExchange.Gemini.Rest.get_contract_stats/2`: mark and index are separate
+  prices with separate meanings, and neither is what the contract last traded at.
+  """
+  @impl true
+  def get_contract_stats(symbol, opts \\ []),
+    do: Rest.get_contract_stats(symbol, with_limiter(opts))
+
+  @doc """
+  When the next funding calculation lands, on its own.
+
+  See `DpExchange.Gemini.Rest.next_funding_timestamp/2`. The venue answers with a bare
+  integer here; `get_funding/2` carries the same value beside the amounts.
+  """
+  @spec next_funding_timestamp(String.t(), keyword()) ::
+          {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
+  def next_funding_timestamp(symbol, opts \\ []),
+    do: Rest.next_funding_timestamp(symbol, with_limiter(opts))
+
+  @doc """
+  The perpetuals margin account — collateral, leverage, and the estimated liquidation price.
+
+  See `DpExchange.Gemini.Private.get_account_margin/2`. `get_positions/1` publishes no
+  liquidation price; this is where it lives.
+  """
+  @spec get_account_margin(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_account_margin(opts \\ []),
+    do: Private.get_account_margin(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Funding payments this account actually paid or received.
+
+  See `DpExchange.Gemini.Private.list_funding_payments/2`. **Not `get_funding/2`**, which is
+  the contract's rate rather than this account's ledger.
+  """
+  @spec list_funding_payments(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_funding_payments(opts \\ []),
+    do: Private.list_funding_payments(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The funding payment report as JSON.
+
+  See `DpExchange.Gemini.Private.funding_payment_report/2` — the query string is part of
+  what is signed.
+  """
+  @spec funding_payment_report(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def funding_payment_report(opts \\ []),
+    do: Private.funding_payment_report(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The funding amount report as a spreadsheet — the venue's bytes, unparsed.
+
+  See `DpExchange.Gemini.Private.funding_amount_report/3`.
+  """
+  @spec funding_amount_report(String.t(), keyword()) ::
+          {:ok, binary()} | {:error, term()} | {:refused, term()}
+  def funding_amount_report(symbol, opts \\ []),
+    do: Private.funding_amount_report(symbol, credentials(opts), with_limiter(opts))
+
+  @doc """
+  The funding payment report as a spreadsheet — the venue's bytes, unparsed.
+
+  See `DpExchange.Gemini.Private.funding_payment_report_file/2`.
+  """
+  @spec funding_payment_report_file(keyword()) ::
+          {:ok, binary()} | {:error, term()} | {:refused, term()}
+  def funding_payment_report_file(opts \\ []),
+    do: Private.funding_payment_report_file(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The **spot** margin account summary — a different margin system from the perpetuals one.
+
+  See `DpExchange.Gemini.Private.get_margin_account/2`.
+  """
+  @spec get_margin_account(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_margin_account(opts \\ []),
+    do: Private.get_margin_account(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Margin interest rates for every borrowable asset.
+
+  See `DpExchange.Gemini.Private.get_margin_rates/2`. Three rates per currency, and taking
+  the hourly one for the annual is an error of four orders of magnitude that still looks
+  like a rate.
+  """
+  @spec get_margin_rates(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_margin_rates(opts \\ []),
+    do: Private.get_margin_rates(credentials(opts), with_limiter(opts))
+
+  @doc """
+  What a spot order would do to this account's margin. **Places nothing.**
+
+  See `DpExchange.Gemini.Private.preview_margin_order/3`, including which of `amount` and
+  `total_spend` the venue requires for each order shape.
+  """
+  @spec preview_margin_order(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_margin_order(request, opts \\ []),
+    do: Private.preview_margin_order(request, credentials(opts), with_limiter(opts))
 
   @doc """
   What each provider pays for staking each asset.
