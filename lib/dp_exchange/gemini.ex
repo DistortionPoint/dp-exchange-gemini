@@ -180,6 +180,10 @@ defmodule DpExchange.Gemini do
     # 346 symbols, and the venue offers no bulk detail endpoint — one request per symbol
     # is not a listing, it is a rate-limit incident. `get_symbols/1` gives the catalogue
     # and `quantization/1` gives one symbol's detail on demand.
+    # `/v1/payments/methods` returns the whole set and there is no path taking a method
+    # identifier. Filtering the listing here would answer with a snapshot while looking
+    # like a read, which is the distinction `get_payment_method/3` exists to draw.
+    {:get_payment_method, 3},
     {:list_instruments, 1},
     # The venue publishes no rate-limit headers at all — measured, not assumed. Returning
     # a constant that never moves as budget is spent is worse than refusing.
@@ -464,6 +468,37 @@ defmodule DpExchange.Gemini do
   @impl true
   def get_transactions(credentials, opts),
     do: Private.get_transactions(credentials, with_limiter(opts))
+
+  @doc """
+  Every balance, each also valued in one notional currency.
+
+  See `DpExchange.Gemini.Private.get_notional_balances/3`. The quantity is the ledger; the
+  notional figure beside it is Gemini's valuation of that quantity, and reconciling a
+  position uses `get_balances/2` instead.
+  """
+  @impl true
+  def get_notional_balances(credentials, currency, opts),
+    do: Private.get_notional_balances(credentials, currency, with_limiter(opts))
+
+  @doc """
+  What Gemini charged this account for holding assets.
+
+  See `DpExchange.Gemini.Private.list_custody_fees/2`. An empty list is "nothing charged in
+  this window", never "no such fee".
+  """
+  @impl true
+  def list_custody_fees(credentials, opts),
+    do: Private.list_custody_fees(credentials, with_limiter(opts))
+
+  @doc """
+  Gemini publishes no per-method read.
+
+  `/v1/payments/methods` returns the whole set and there is no path taking a method
+  identifier. Filtering the listing here would answer with a snapshot while looking like a
+  read, which is exactly the difference `get_payment_method/3` exists to draw.
+  """
+  @impl true
+  def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def get_accounts(credentials, opts),

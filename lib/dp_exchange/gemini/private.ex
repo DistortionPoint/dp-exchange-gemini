@@ -1224,6 +1224,53 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  @doc """
+  Every balance, each also valued in one notional currency — `/v1/notionalbalances/{currency}`.
+
+  **Not `get_balances/2` in another unit.** The `amount` is the venue's ledger; the
+  `amountNotional` beside it is Gemini's own valuation of that quantity, at a rate Gemini
+  chose and does not publish here. Rows are returned as the venue sends them so the two
+  cannot be read as one number.
+
+  The currency is a path segment, not a parameter. Gemini documents `usd`; anything else is
+  sent as given and the venue answers for itself, because a package that allowed only the
+  documented one would be wrong the day a second is added.
+  """
+  @spec get_notional_balances(map(), String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_notional_balances(credentials, currency, opts) when is_binary(currency) do
+    path = "/v1/notionalbalances/" <> String.downcase(currency)
+
+    with {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
+      {:ok, body |> List.wrap() |> List.flatten()}
+    end
+  end
+
+  @doc """
+  What Gemini charged this account for *holding* assets — `/v1/custodyaccountfees`.
+
+  Custody fees come straight out of the balance with no trade behind them, so a consumer
+  reconciling balances against fills alone finds a gap this is the only explanation for.
+
+  **An empty list means nothing was charged in the window asked for.** It does not mean the
+  account holds nothing in custody, and it does not mean Gemini does not charge — an account
+  with no custody balance and an account billed nothing this period return the same thing.
+
+  `opts[:since]` and `opts[:limit]` page it, under the venue's own parameter names.
+  """
+  @spec list_custody_fees(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_custody_fees(credentials, opts) do
+    params =
+      %{}
+      |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
+      |> put_present("limit_transfers", Keyword.get(opts, :limit))
+
+    with {:ok, body, _headers} <- post("/v1/custodyaccountfees", params, credentials, opts) do
+      {:ok, body |> List.wrap() |> List.flatten()}
+    end
+  end
+
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do

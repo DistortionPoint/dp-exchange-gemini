@@ -465,5 +465,23 @@ defmodule DpExchange.GeminiDelegationTest do
 
       assert rate.source == "bcb"
     end
+
+    test "get_notional_balances/3", %{opts: sup} do
+      rows = [%{"currency" => "BTC", "amount" => "1", "amountNotional" => "40000"}]
+
+      assert {:ok, [row]} =
+               Gemini.get_notional_balances(@money_creds, "usd", money_opts(sup, rows))
+
+      assert row["amountNotional"] == "40000"
+    end
+
+    test "list_custody_fees/2", %{opts: sup} do
+      rows = [%{"currency" => "BTC", "amount" => "0.0001"}]
+      assert {:ok, [_fee]} = Gemini.list_custody_fees(@money_creds, money_opts(sup, rows))
+    end
+
+    test "get_payment_method/3 refuses rather than filtering the listing" do
+      assert {:error, :not_supported} = Gemini.get_payment_method(@money_creds, "bank-1")
+    end
   end
 end

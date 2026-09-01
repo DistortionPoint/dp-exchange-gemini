@@ -505,4 +505,90 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert payload["timestamp"] == 1_787_936_401_000
     end
   end
+
+  describe "get_notional_balances/3 — a valuation is not a balance" do
+    test "the quantity and the venue's valuation stay separate keys" do
+      # Merging them is the failure this endpoint invites: the notional figure is Gemini's
+      # own estimate at a rate it does not publish here, and the amount is the ledger.
+      rows = [
+        %{"currency" => "BTC", "amount" => "1.5", "amountNotional" => "60000.00"}
+      ]
+
+      assert {:ok, [row]} =
+               Private.get_notional_balances(@credentials, "usd",
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert row["amount"] == "1.5"
+      assert row["amountNotional"] == "60000.00"
+    end
+
+    test "the currency is a path segment, down-cased, not a parameter" do
+      me = self()
+
+      assert {:ok, _rows} =
+               Private.get_notional_balances(@credentials, "USD",
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, path}
+      assert path == "/v1/notionalbalances/usd"
+      refute Map.has_key?(payload, "currency")
+    end
+
+    test "an undocumented currency is sent as given rather than refused here" do
+      # A package that allowed only `usd` would be wrong the day a second one is added, and
+      # the venue is the thing that knows.
+      me = self()
+
+      assert {:ok, _rows} =
+               Private.get_notional_balances(@credentials, "GBP",
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, _payload, "/v1/notionalbalances/gbp"}
+    end
+  end
+
+  describe "list_custody_fees/2 — a charge with no trade behind it" do
+    test "the rows are the venue's own" do
+      rows = [%{"currency" => "BTC", "amount" => "0.00012", "timestampms" => 1_700_000_000_000}]
+
+      assert {:ok, [fee]} =
+               Private.list_custody_fees(@credentials,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert fee["currency"] == "BTC"
+      assert fee["amount"] == "0.00012"
+    end
+
+    test "an empty list is 'nothing charged', and reaches the caller as one" do
+      # The dangerous reading is "no such fee". An account billed nothing this period and an
+      # account with no custody balance return the same thing, and neither is an error.
+      assert {:ok, []} =
+               Private.list_custody_fees(@credentials, plug: responding([]), retry_attempts: 0)
+    end
+
+    test "the window goes to the venue under its own parameter names" do
+      me = self()
+
+      assert {:ok, _rows} =
+               Private.list_custody_fees(@credentials,
+                 since: ~U[2026-08-28 17:00:01Z],
+                 limit: 25,
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, path}
+      assert path == "/v1/custodyaccountfees"
+      assert payload["limit_transfers"] == 25
+      assert payload["timestamp"] == 1_787_936_401_000
+    end
+  end
 end

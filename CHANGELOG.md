@@ -22,6 +22,25 @@ acceptable changelog line.
 
 ### Added
 
+- **Notional balances and custody fees**, closing this venue's fund-management surface:
+  `get_notional_balances/3` (`/v1/notionalbalances/{currency}`) and `list_custody_fees/2`
+  (`/v1/custodyaccountfees`).
+
+  **A notional balance is not a balance in another unit.** The `amount` is Gemini's ledger;
+  the `amountNotional` beside it is Gemini's *valuation* of that quantity, at a rate it
+  chose and does not publish here. Rows are returned as the venue sends them so the two
+  numbers cannot be read as one. Reconcile a position with `get_balances/2`.
+
+  **A custody fee is a balance reduction with no trade behind it**, which is the gap a
+  consumer reconciling against fills alone cannot otherwise account for. An empty list means
+  nothing was charged in the window asked for — never that the venue does not charge.
+
+  `get_payment_method/3` is declared **absent**: `/v1/payments/methods` returns the whole
+  set and there is no path taking a method identifier. Filtering the listing here would
+  answer with a snapshot while looking like a read, which is the distinction that callback
+  exists to draw.
+
+
 - **The rest of money movement: payment methods, internal transfers, the allowlist writes
   and the transaction ledger.** `list_payment_methods/2`, `add_payment_method/2`,
   `transfer_internal/4`, `request_approved_address/4`, `remove_approved_address/3` and

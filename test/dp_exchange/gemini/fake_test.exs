@@ -472,4 +472,28 @@ defmodule DpExchange.Gemini.FakeTest do
                Fake.request_approved_address("ethereum", "0xabc", nil)
     end
   end
+
+  describe "the fake's reporting surface" do
+    test "a notional balance carries a quantity and a valuation that differ" do
+      # A fake that made them equal would let a consumer read either as the other and pass.
+      assert {:ok, [row]} = Fake.get_notional_balances(@credentials, "usd")
+      assert row["amount"] != row["amountNotional"]
+      assert row["notionalCurrency"] == "USD"
+    end
+
+    test "a custody fee has no trade behind it" do
+      assert {:ok, [fee]} = Fake.list_custody_fees(@credentials)
+      assert fee["currency"]
+      refute Map.has_key?(fee, "order_id")
+    end
+
+    test "there is no per-method read, and the fake says so rather than filtering" do
+      assert {:error, :not_supported} = Fake.get_payment_method(@credentials, "bank-1")
+    end
+
+    test "both reporting reads still need credentials" do
+      assert {:refused, :missing_credentials} = Fake.get_notional_balances(%{}, "usd")
+      assert {:refused, :missing_credentials} = Fake.list_custody_fees(%{})
+    end
+  end
 end

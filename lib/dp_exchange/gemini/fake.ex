@@ -841,6 +841,45 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @impl true
+  def get_notional_balances(credentials, currency, _opts \\ []) do
+    with :ok <- authenticated(credentials) do
+      # The quantity and its valuation are different keys and different numbers. A fake that
+      # made them equal would let a consumer read either as the other and still pass.
+      {:ok,
+       [
+         %{
+           "currency" => "BTC",
+           "amount" => "1.5",
+           "amountNotional" => "60000.00",
+           "available" => "1.5",
+           "availableNotional" => "60000.00",
+           "notionalCurrency" => String.upcase(currency)
+         }
+       ]}
+    end
+  end
+
+  @impl true
+  def list_custody_fees(credentials, _opts \\ []) do
+    with :ok <- authenticated(credentials) do
+      # A charge with no trade behind it — the gap a consumer reconciling against fills
+      # alone cannot otherwise explain.
+      {:ok,
+       [
+         %{
+           "currency" => "BTC",
+           "amount" => "0.00012",
+           "timestampms" => 1_700_000_000_000,
+           "eid" => 123_456
+         }
+       ]}
+    end
+  end
+
+  @impl true
+  def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
+
   defp fake_memo(nil, true), do: {:error, :memo_required}
   defp fake_memo(_memo, _required), do: :ok
 
