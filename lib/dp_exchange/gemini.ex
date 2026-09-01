@@ -153,6 +153,9 @@ defmodule DpExchange.Gemini do
     #
     # `preview_replace/4` follows `replace_order/4`: there is nothing to preview when
     # there is nothing to amend.
+    # Gemini places one order per request. Its multi-order surface is the cancel family,
+    # which destroys rather than creates.
+    {:place_orders, 3},
     {:preview_order, 3},
     {:preview_replace, 4},
     {:replace_order, 4},
@@ -507,6 +510,16 @@ defmodule DpExchange.Gemini do
   @impl true
   def place_order(credentials, request, opts),
     do: Private.place_order(credentials, request, with_limiter(opts))
+
+  @doc """
+  **Not supported.** Gemini places one order per request.
+
+  Its multi-order surface is `cancel_all_orders/2` and the session-scoped cancels, which
+  destroy rather than create. A caller placing several here calls `place_order/3` several
+  times and reconciles the outcomes itself.
+  """
+  @impl true
+  def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
 
   @doc """
   **Not supported.** Gemini publishes no order-preview endpoint.

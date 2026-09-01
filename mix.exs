@@ -48,7 +48,7 @@ defmodule DpExchangeGemini.MixProject do
     [
       # The contract. Three-part pin: while Core is 0.x a minor bump may break us, and
       # that is the signal it is meant to send.
-      {:dp_exchange_core, "~> 0.1.33"},
+      {:dp_exchange_core, "~> 0.1.36"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
