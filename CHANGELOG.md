@@ -22,6 +22,42 @@ acceptable changelog line.
 
 ### Added
 
+- **Money movement: `get_deposit_address/3`, `list_approved_addresses/1`,
+  `estimate_withdrawal_fee/4` and `withdraw/5`.** All four were `:unsupported`. This is the
+  group where a defect moves funds and the one that can never be tested against the live
+  venue here, so the rules matter more than the code.
+
+  **`withdraw/5` always sends an idempotency key.** The venue accepts `clientTransferId` and
+  treats it as optional; this does not. A withdrawal request that times out has an unknown
+  outcome — the funds may already be moving — and without a key the safe-looking response,
+  a retry, **sends the money again**. `opts[:client_transfer_id]` lets a caller supply its
+  own so a retry across a process restart is still the same request.
+
+  **The memo requirement is documented and not guessed.** The vendor says a memo is
+  *"required for certain networks that use memos (e.g., Solana, XRP, Cosmos)"* and publishes
+  no machine-readable list, so this package does not invent one. `opts[:memo_required]` is a
+  **caller's assertion**: passing it with no memo is refused here, where nothing has moved,
+  rather than at the venue after the transfer is accepted.
+
+  **A withdrawal comes back `:pending` unless the venue says otherwise.** The venue
+  accepting one is not the chain confirming it, and a status this package does not recognise
+  is pending rather than completed — a withdrawal the venue has not described has not
+  arrived.
+
+  **An approved address can be on the list and still unusable.** The venue reports
+  `pending-time` for one inside its time lock and publishes no activation time, so
+  `ApprovedAddress.usable?/2` answers `nil` — unknown, not "ready". A status the venue
+  invents later maps to `:pending`, because treating an unknown status as usable is the
+  direction that loses money.
+
+  **A deposit address's `memo_required` is `nil`, not `false`.** This endpoint does not say,
+  and `false` would be a claim that no memo is needed — which on Solana or XRP loses the
+  deposit.
+
+  The fee estimate carries the destination, because fees differ by address on some networks
+  and an estimate for one does not hold for another.
+
+
 - **`list_networks/2` and `list_fee_promos/1`.**
 
   **`list_networks/2` is the call that has to happen before `get_deposit_address/3`.** That

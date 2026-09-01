@@ -318,4 +318,84 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:refused, :missing_credentials} = Fake.get_trade_history(%{}, symbol: "BTC-USD")
     end
   end
+
+  describe "the fake's money-movement surface" do
+    test "a deposit address says nothing about whether a memo is needed" do
+      assert {:ok, address} =
+               Fake.get_deposit_address("BTC", "bitcoin", credentials: @credentials)
+
+      assert address.memo_required == nil
+      assert address.network == "bitcoin"
+    end
+
+    test "the approved list carries a pending address, so a consumer must handle one" do
+      # A consumer that only ever sees active addresses never handles the pending case, and
+      # a withdrawal to a pending address is refused.
+      assert {:ok, addresses} =
+               Fake.list_approved_addresses(network: "ethereum", credentials: @credentials)
+
+      assert Enum.any?(addresses, &(&1.status == :pending))
+      assert Enum.any?(addresses, &(&1.status == :active))
+
+      pending = Enum.find(addresses, &(&1.status == :pending))
+      assert Types.ApprovedAddress.usable?(pending, DateTime.utc_now()) == nil
+    end
+
+    test "the network is required for the approved list" do
+      assert {:error, {:missing_option, :network}} =
+               Fake.list_approved_addresses(credentials: @credentials)
+    end
+
+    test "a withdrawal is PENDING, never completed" do
+      # A fake that reported completion would teach a consumer the money has arrived.
+      assert {:ok, withdrawal} =
+               Fake.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc",
+                 credentials: @credentials
+               )
+
+      assert withdrawal.status == :pending
+      refute withdrawal.status == :completed
+    end
+
+    test "the caller's idempotency key is echoed" do
+      assert {:ok, withdrawal} =
+               Fake.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc",
+                 client_transfer_id: "mine",
+                 credentials: @credentials
+               )
+
+      assert withdrawal.id == "mine"
+    end
+
+    test "a required memo that is missing is refused, as in production" do
+      assert {:error, :memo_required} =
+               Fake.withdraw("USDC", "solana", Decimal.new("100"), "7Ec",
+                 memo_required: true,
+                 credentials: @credentials
+               )
+    end
+
+    test "the fee estimate needs a destination" do
+      assert {:error, {:missing_option, :address}} =
+               Fake.estimate_withdrawal_fee("ETH", "ethereum", Decimal.new("1"),
+                 credentials: @credentials
+               )
+
+      assert {:ok, estimate} =
+               Fake.estimate_withdrawal_fee("ETH", "ethereum", Decimal.new("1"),
+                 address: "0xabc",
+                 credentials: @credentials
+               )
+
+      assert estimate.address == "0xabc"
+    end
+
+    test "every money call refuses without credentials" do
+      assert {:refused, :missing_credentials} = Fake.get_deposit_address("BTC", "bitcoin")
+      assert {:refused, :missing_credentials} = Fake.list_approved_addresses(network: "eth")
+
+      assert {:refused, :missing_credentials} =
+               Fake.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc")
+    end
+  end
 end

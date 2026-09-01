@@ -75,7 +75,17 @@ defmodule DpExchange.Gemini.Private do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.{Balance, Conversion, Fill, Order}
+
+  alias DpExchange.Core.Types.{
+    ApprovedAddress,
+    Balance,
+    Conversion,
+    DepositAddress,
+    Fill,
+    Order,
+    Withdrawal
+  }
+
   alias DpExchange.Gemini.{Auth, Environment, Rest, SymbolFormat}
 
   @doc "Every currency the account holds, with what is available and what is on hold."
@@ -805,6 +815,263 @@ defmodule DpExchange.Gemini.Private do
   end
 
   def list_networks(asset, opts), do: Rest.networks_for_asset(asset, opts)
+
+  @doc """
+  A fresh deposit address for `asset` on `network` — `/v1/deposit/{network}/newAddress`.
+
+  **The network is not optional and must not be guessed.** An address generated for the
+  wrong chain still looks like an address; funds sent to it on another chain are gone.
+  `list_networks/2` is how a caller learns which networks this venue credits for an asset.
+
+  `opts[:label]` names the address at the venue. `opts[:legacy]` asks for a legacy
+  P2SH-P2PKH Litecoin address, which is the venue's own flag and defaults to false.
+
+  **`memo_required` is `nil`, not `false`.** Some networks — Solana, XRP, Cosmos — need a
+  destination tag or the deposit is unattributable, and this endpoint's response does not
+  say whether this one does. `false` would be a claim that no memo is needed; `nil` says
+  this package does not know, and a caller must check the network before sending.
+  """
+  @spec get_deposit_address(String.t(), String.t(), map(), keyword()) ::
+          {:ok, DepositAddress.t()} | {:error, term()} | {:refused, term()}
+  def get_deposit_address(asset, network, credentials, opts) do
+    params =
+      %{}
+      |> put_present("label", Keyword.get(opts, :label))
+      |> put_present("legacy", Keyword.get(opts, :legacy))
+
+    with {:ok, body, _headers} <-
+           post("/v1/deposit/#{network}/newAddress", params, credentials, opts) do
+      {:ok,
+       %DepositAddress{
+         asset: asset,
+         network: network,
+         address: body["address"],
+         memo: body["memo"],
+         # Not `false`. This endpoint does not say, and `false` would be a claim that no
+         # memo is needed — which on Solana or XRP loses the deposit.
+         memo_required: nil,
+         label: body["label"],
+         created_at: nil,
+         provider: :gemini
+       }}
+    end
+  end
+
+  @doc """
+  The addresses this account may withdraw to on `network` —
+  `/v1/approvedAddresses/account/{network}`.
+
+  **An address on this list is not necessarily usable yet.** The venue reports
+  `status: "pending-time"` for one still inside its time lock, and a withdrawal to it is
+  refused. `Core.Types.ApprovedAddress.usable?/2` answers that, and returns `nil` where the
+  venue gave a pending status with no activation time — unknown, not "ready".
+
+  `opts[:network]` selects; there is no all-networks variant, because the venue keeps a list
+  per network.
+  """
+  @spec list_approved_addresses(map(), keyword()) ::
+          {:ok, [ApprovedAddress.t()]} | {:error, term()} | {:refused, term()}
+  def list_approved_addresses(credentials, opts) do
+    case Keyword.get(opts, :network) do
+      nil ->
+        {:error, {:missing_option, :network}}
+
+      network ->
+        with {:ok, body, _headers} <-
+               post("/v1/approvedAddresses/account/#{network}", %{}, credentials, opts) do
+          {:ok,
+           body
+           |> approved_rows()
+           |> Enum.map(&to_approved_address(&1, network))}
+        end
+    end
+  end
+
+  defp approved_rows(%{"approvedAddresses" => rows}) when is_list(rows), do: rows
+  defp approved_rows(rows) when is_list(rows), do: rows
+  defp approved_rows(_other), do: []
+
+  defp to_approved_address(row, network) do
+    %ApprovedAddress{
+      address: row["address"],
+      network: row["network"] || network,
+      status: approval_status(row["status"]),
+      asset: nil,
+      label: row["label"],
+      # The venue publishes `createdAt` and no activation time. `usable?/2` therefore
+      # answers `nil` for a pending address rather than guessing when the lock lifts.
+      active_from: nil,
+      requested_at: epoch_ms_to_datetime(row["createdAt"]),
+      provider: :gemini
+    }
+  end
+
+  # The venue's own words. Anything it invents later is `:pending` rather than `:active`:
+  # treating an unknown status as usable is the direction that loses money.
+  defp approval_status("active"), do: :active
+  defp approval_status("rejected"), do: :rejected
+  defp approval_status(_pending_or_unknown), do: :pending
+
+  defp epoch_ms_to_datetime(nil), do: nil
+
+  defp epoch_ms_to_datetime(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {ms, ""} -> DateTime.from_unix!(ms, :millisecond)
+      _not_an_epoch -> nil
+    end
+  end
+
+  defp epoch_ms_to_datetime(ms) when is_integer(ms), do: DateTime.from_unix!(ms, :millisecond)
+  defp epoch_ms_to_datetime(_other), do: nil
+
+  @doc """
+  What the venue would charge to withdraw `amount` of `asset` over `network` to `address` —
+  `/v2/withdraw/{network}/{ticker}/feeEstimate`.
+
+  **The address is part of the estimate**, not decoration: fees differ by destination on
+  some networks, so an estimate for one address does not hold for another.
+
+  This moves no funds. `withdraw/6` does.
+  """
+  @spec estimate_withdrawal_fee(String.t(), String.t(), Decimal.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def estimate_withdrawal_fee(asset, network, amount, credentials, opts) do
+    with {:ok, address} <- required_address(opts) do
+      params = %{"address" => address, "amount" => to_string(amount)}
+      ticker = String.downcase(asset)
+
+      with {:ok, body, _headers} <-
+             post("/v2/withdraw/#{network}/#{ticker}/feeEstimate", params, credentials, opts) do
+        {:ok,
+         %{
+           fee: decimal(body["fee"] || body["feeAmount"]),
+           fee_currency: body["currency"] || body["feeCurrency"],
+           network: network,
+           address: address
+         }}
+      end
+    end
+  end
+
+  defp required_address(opts) do
+    case Keyword.get(opts, :address) do
+      nil -> {:error, {:missing_option, :address}}
+      address -> {:ok, address}
+    end
+  end
+
+  @doc """
+  Withdraws `amount` of `asset` over `network` to `address` — `/v2/withdraw/{network}/{ticker}`.
+
+  **This moves funds and cannot be undone.** Everything below exists because of that.
+
+  ## A retry without an idempotency key withdraws twice
+
+  The venue accepts `clientTransferId`, *"a unique UUID for idempotent withdrawals. If
+  provided, duplicate requests with the same `clientTransferId` will not create additional
+  withdrawals."* It is optional at the venue and **not optional here**: this generates one
+  when the caller gives none.
+
+  A withdrawal request that times out has an unknown outcome — the funds may already be
+  moving. Without a key, the safe-looking response (retry) is the one that sends the money
+  again. `opts[:client_transfer_id]` lets a caller supply its own so a retry across a
+  process restart is still the same request.
+
+  ## The memo is required on some networks and this package cannot tell you which
+
+  The venue: *"Required for certain networks that use memos (e.g., Solana, XRP, Cosmos)."*
+  It publishes no machine-readable list, so **this does not guess one**. A withdrawal to an
+  exchange address on a memo network without one is credited to nobody and is generally not
+  recoverable.
+
+  `opts[:memo]` is passed through. **`opts[:memo_required]` is a caller's assertion, not a
+  lookup**: passing `true` with no memo is refused here rather than sent.
+
+  ## Three preconditions the venue states
+
+  1. The account has an approved address list
+  2. **The destination is already on it** — `list_approved_addresses/2`, and note that an
+     address can be present and still time-locked
+  3. The API key carries the Fund Manager role
+
+  None can be checked from here without spending a request, and all three fail at the venue
+  with a message; they are stated so a caller can check them before it gets there.
+  """
+  @spec withdraw(String.t(), String.t(), Decimal.t(), String.t(), map(), keyword()) ::
+          {:ok, Withdrawal.t()} | {:error, term()} | {:refused, term()}
+  def withdraw(asset, network, amount, address, credentials, opts) do
+    memo = Keyword.get(opts, :memo)
+
+    with :ok <- memo_present(memo, Keyword.get(opts, :memo_required, false)) do
+      transfer_id = Keyword.get(opts, :client_transfer_id) || generate_transfer_id()
+
+      params =
+        %{
+          "address" => address,
+          "amount" => to_string(amount),
+          # Always sent. A retry without one is a second withdrawal.
+          "clientTransferId" => transfer_id
+        }
+        |> put_present("memo", memo)
+
+      ticker = String.downcase(asset)
+
+      with {:ok, body, _headers} <-
+             post("/v2/withdraw/#{network}/#{ticker}", params, credentials, opts) do
+        {:ok, to_withdrawal(body, asset, network, address, amount, memo)}
+      end
+    end
+  end
+
+  # A caller that says the network needs a memo and then sends none is stopped here, where
+  # nothing has moved, rather than at the venue after the transfer is accepted.
+  defp memo_present(nil, true), do: {:error, :memo_required}
+  defp memo_present(_memo, _required), do: :ok
+
+  # `crypto.strong_rand_bytes` rather than a counter or a timestamp: two processes retrying
+  # the same withdrawal must not generate the same id by accident, and must not generate a
+  # *different* one for what is meant to be the same request either — which is why a caller
+  # that needs a stable id across restarts passes its own.
+  defp generate_transfer_id do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
+    :io_lib.format("~8.16.0b-~4.16.0b-4~3.16.0b-~4.16.0b-~12.16.0b", [
+      a,
+      b,
+      Bitwise.band(c, 0xFFF),
+      Bitwise.bor(Bitwise.band(d, 0x3FFF), 0x8000),
+      e
+    ])
+    |> to_string()
+  end
+
+  defp to_withdrawal(body, asset, network, address, amount, memo) do
+    %Withdrawal{
+      id: to_string_or_nil(body["withdrawalId"] || body["clientTransferId"]),
+      # The venue accepting a withdrawal is not the chain confirming it. `:pending` unless
+      # the venue says otherwise, because `:completed` on an unconfirmed transfer would
+      # tell a caller the money has arrived.
+      status: withdrawal_status(body["status"]),
+      asset: asset,
+      amount: amount,
+      network: network,
+      address: address,
+      memo: memo,
+      fee: decimal(body["fee"]),
+      tx_id: body["txHash"] || body["txn_hash"],
+      requested_at: DateTime.utc_now(),
+      provider: :gemini
+    }
+  end
+
+  defp withdrawal_status("complete"), do: :completed
+  defp withdrawal_status("completed"), do: :completed
+  defp withdrawal_status("failed"), do: :failed
+  defp withdrawal_status("cancelled"), do: :cancelled
+  # Anything else, including nothing, is pending. A withdrawal the venue has not described
+  # has not arrived.
+  defp withdrawal_status(_other), do: :pending
+
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do

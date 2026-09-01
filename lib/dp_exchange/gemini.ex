@@ -133,10 +133,6 @@ defmodule DpExchange.Gemini do
     {:unstake, 3},
     {:get_conversion, 2},
     {:list_portfolios, 1},
-    {:get_deposit_address, 3},
-    {:list_approved_addresses, 1},
-    {:estimate_withdrawal_fee, 4},
-    {:withdraw, 5},
     # Gemini lists no options at all, so these are the venue's absence rather than this
     # package's backlog.
     {:get_option_chain, 2},
@@ -361,6 +357,52 @@ defmodule DpExchange.Gemini do
   @impl true
   def list_fee_promos(opts \\ []), do: Rest.list_fee_promos(with_limiter(opts))
 
+  @doc """
+  A fresh deposit address for `asset` on `network`.
+
+  See `DpExchange.Gemini.Private.get_deposit_address/4` — in particular why `memo_required`
+  comes back `nil` rather than `false`.
+  """
+  @impl true
+  def get_deposit_address(asset, network, opts \\ []),
+    do: Private.get_deposit_address(asset, network, credentials(opts), with_limiter(opts))
+
+  @doc """
+  The addresses this account may withdraw to on `opts[:network]`.
+
+  See `DpExchange.Gemini.Private.list_approved_addresses/2` — an address on the list can
+  still be time-locked.
+  """
+  @impl true
+  def list_approved_addresses(opts \\ []),
+    do: Private.list_approved_addresses(credentials(opts), with_limiter(opts))
+
+  @doc """
+  What the venue would charge to withdraw. Requires `opts[:address]`.
+
+  Moves no funds. See `DpExchange.Gemini.Private.estimate_withdrawal_fee/5`.
+  """
+  @impl true
+  def estimate_withdrawal_fee(asset, network, amount, opts \\ []),
+    do:
+      Private.estimate_withdrawal_fee(
+        asset,
+        network,
+        amount,
+        credentials(opts),
+        with_limiter(opts)
+      )
+
+  @doc """
+  **Moves funds.** Withdraws `amount` of `asset` over `network` to `address`.
+
+  See `DpExchange.Gemini.Private.withdraw/6` — in particular the idempotency key this
+  always sends, and the memo requirement this package cannot check for you.
+  """
+  @impl true
+  def withdraw(asset, network, amount, address, opts \\ []),
+    do: Private.withdraw(asset, network, amount, address, credentials(opts), with_limiter(opts))
+
   @impl true
   def get_accounts(credentials, opts),
     do: Private.get_accounts(credentials, with_limiter(opts))
@@ -477,6 +519,12 @@ defmodule DpExchange.Gemini do
     Keyword.put_new(opts, :limiter, DpExchange.Gemini.Supervisor.limiter_name(opts))
   end
 
+  # **These callbacks take no credentials argument**, so the credential arrives in `opts`.
+  # `%{}` rather than `nil` when absent: `Auth` pattern-matches on the key shape and a nil
+  # produces a match error where an empty map produces the venue's own refusal, which is
+  # the answer a caller can act on.
+  defp credentials(opts), do: Keyword.get(opts, :credentials, %{})
+
   # --- Declared but not yet implemented -----------------------------------
   #
   # Core 0.1.16 widened the facade to the surface the venues actually publish. Gemini
@@ -550,18 +598,6 @@ defmodule DpExchange.Gemini do
   def get_conversion(_id, _opts \\ []), do: Venue.not_supported()
   @impl true
   def list_portfolios(_opts \\ []), do: Venue.not_supported()
-
-  @impl true
-  def get_deposit_address(_asset, _network, _opts \\ []), do: Venue.not_supported()
-
-  @impl true
-  def list_approved_addresses(_opts \\ []), do: Venue.not_supported()
-
-  @impl true
-  def estimate_withdrawal_fee(_asset, _network, _amount, _opts \\ []), do: Venue.not_supported()
-
-  @impl true
-  def withdraw(_asset, _network, _amount, _address, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def get_option_chain(_underlying, _opts \\ []), do: Venue.not_supported()

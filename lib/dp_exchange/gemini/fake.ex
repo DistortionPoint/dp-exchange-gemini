@@ -667,19 +667,102 @@ defmodule DpExchange.Gemini.Fake do
   def list_portfolios(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_deposit_address(_asset, _network, _opts \\ []),
-    do: DpExchange.Core.Venue.not_supported()
+  def get_deposit_address(asset, network, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      {:ok,
+       %Types.DepositAddress{
+         asset: asset,
+         network: network,
+         address: "0x0000000000000000000000000000000000000000",
+         memo: nil,
+         # `nil`, as in production. `false` would tell a consumer no memo is needed, which
+         # on Solana or XRP loses the deposit.
+         memo_required: nil,
+         label: Keyword.get(opts, :label),
+         created_at: @at,
+         provider: :gemini
+       }}
+    end
+  end
 
   @impl true
-  def list_approved_addresses(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def list_approved_addresses(opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      case Keyword.get(opts, :network) do
+        nil ->
+          {:error, {:missing_option, :network}}
+
+        network ->
+          # One active and one still time-locked, because a consumer that only ever sees
+          # active addresses never handles the pending case — and a withdrawal to a pending
+          # address is refused.
+          {:ok,
+           [
+             %Types.ApprovedAddress{
+               address: "0x1111111111111111111111111111111111111111",
+               network: network,
+               status: :active,
+               label: "desk",
+               requested_at: @at,
+               provider: :gemini
+             },
+             %Types.ApprovedAddress{
+               address: "0x2222222222222222222222222222222222222222",
+               network: network,
+               status: :pending,
+               # No activation time, so `usable?/2` answers nil — unknown, not "ready".
+               active_from: nil,
+               label: "new",
+               requested_at: @at,
+               provider: :gemini
+             }
+           ]}
+      end
+    end
+  end
 
   @impl true
-  def estimate_withdrawal_fee(_asset, _network, _amount, _opts \\ []),
-    do: DpExchange.Core.Venue.not_supported()
+  def estimate_withdrawal_fee(_asset, network, _amount, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      case Keyword.get(opts, :address) do
+        nil ->
+          {:error, {:missing_option, :address}}
+
+        address ->
+          {:ok,
+           %{fee: Decimal.new("0.0005"), fee_currency: "ETH", network: network, address: address}}
+      end
+    end
+  end
 
   @impl true
-  def withdraw(_asset, _network, _amount, _address, _opts \\ []),
-    do: DpExchange.Core.Venue.not_supported()
+  def withdraw(asset, network, amount, address, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+         :ok <- fake_memo(Keyword.get(opts, :memo), Keyword.get(opts, :memo_required, false)) do
+      {:ok,
+       %Types.Withdrawal{
+         # The idempotency key the real package always sends, echoed so a consumer can
+         # assert its own was used.
+         id: Keyword.get(opts, :client_transfer_id, "fake-transfer-1"),
+         # **`:pending`, never `:completed`.** The venue accepting a withdrawal is not the
+         # chain confirming it, and a fake that reported completion would teach a consumer
+         # the money has arrived.
+         status: :pending,
+         asset: asset,
+         amount: amount,
+         network: network,
+         address: address,
+         memo: Keyword.get(opts, :memo),
+         fee: Decimal.new("0.0005"),
+         tx_id: nil,
+         requested_at: @at,
+         provider: :gemini
+       }}
+    end
+  end
+
+  defp fake_memo(nil, true), do: {:error, :memo_required}
+  defp fake_memo(_memo, _required), do: :ok
 
   @impl true
   def get_option_chain(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
