@@ -175,6 +175,12 @@ defmodule DpExchange.Gemini do
     # **The venue carries no positions to close.** Gemini's perpetuals surface is separate
     # and this package does not reach it; on spot there is no position, only a balance.
     {:close_position, 3},
+    # **This venue runs no auctions and publishes no footprints.** A crypto book trades
+    # continuously — there is no opening or closing auction to have an imbalance in — and
+    # the venue publishes no volume-at-price split. Not "unimplemented": there is nothing
+    # to implement.
+    {:get_auction_imbalance, 2},
+    {:get_volume_profile, 3},
     # 346 symbols, and the venue offers no bulk detail endpoint — one request per symbol
     # is not a listing, it is a rate-limit incident. `get_symbols/1` gives the catalogue
     # and `quantization/1` gives one symbol's detail on demand.
@@ -302,6 +308,12 @@ defmodule DpExchange.Gemini do
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()
 
+  @impl true
+  def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
+
   # --- account and trading -----------------------------------------------
   #
   # Credentials are arguments, used for one request and not kept. The host obtains them
@@ -312,6 +324,15 @@ defmodule DpExchange.Gemini do
   @impl true
   def get_balances(credentials, opts),
     do: Private.get_balances(credentials, with_limiter(opts))
+
+  @doc """
+  Recent public trades — the tape.
+
+  See `DpExchange.Gemini.Rest.get_trades/2`, including why `type` is the taker's side and
+  why broken trades are excluded unless asked for.
+  """
+  @impl true
+  def get_trades(symbol, opts \\ []), do: Rest.get_trades(symbol, with_limiter(opts))
 
   @impl true
   def get_accounts(credentials, opts),

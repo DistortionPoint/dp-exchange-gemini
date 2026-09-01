@@ -22,6 +22,24 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_trades/2` — the public tape**, `/v1/trades/{symbol}`. Not `get_trade_history/2`,
+  which is the credential's own fills.
+
+  **`type` is the taker's side**, and the venue says so explicitly: *"`buy` means that an
+  ask was removed from the book by an incoming buy order"*. That is the opposite of the
+  resting order's side, and a package reading it the other way inverts every entry on the
+  tape while every number stays real.
+
+  **Broken trades are excluded unless `opts[:include_broken]` asks for them.** A busted
+  print did not stand, and its price in a series becomes a phantom high or low in every
+  range and volatility figure built on it. The venue's own `include_breaks` is sent as well
+  as the filter being applied here — asking the venue is cheaper than filtering a page.
+
+  `opts[:since]` goes as the venue's `timestamp` in milliseconds and `since_tid` is passed
+  through alongside it: the venue states `since_tid` wins, and **that precedence is left to
+  the venue** rather than resolved here.
+
+
 - **`quote_conversion/4`, `commit_conversion/2` and `convert/4` — the Instant pair and the
   wrap endpoint.**
 

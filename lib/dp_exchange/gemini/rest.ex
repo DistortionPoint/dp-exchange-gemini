@@ -43,7 +43,7 @@ defmodule DpExchange.Gemini.Rest do
   """
 
   alias DpExchange.Core.{HttpClient, Timeframe}
-  alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook, Trade}
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
   # Canonical width => the literal Gemini accepts. Measured 2026-08-28: the venue names
@@ -280,6 +280,112 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
+  @doc """
+  Recent public trades for `symbol` — `/v1/trades/{symbol}`.
+
+  **This is the tape, not `get_trade_history/2`.** That returns the credential's own fills;
+  this returns everyone's executions.
+
+  ## `type` is the taker's side, and it is the opposite of the resting order's
+
+  The venue is explicit: *"`buy` means that an ask was removed from the book by an incoming
+  buy order"*. So `:buy` here says a buyer lifted the offer. A package that read it as the
+  maker's side would invert every entry on the tape while every number stayed real.
+
+  ## Broken trades are excluded unless asked for
+
+  The venue publishes `broken` on each print and hides them by default itself. This does
+  the same and `opts[:include_broken]` opts in: **a busted trade did not stand**, and its
+  price in a series becomes a phantom high or low in every range and volatility figure
+  built on it.
+
+  `opts[:since]` narrows the window — the venue takes it as `timestamp`, with `since_tid`
+  as the alternative and **`since_tid` wins where both are given**, which is the venue's own
+  precedence rather than one chosen here. `opts[:limit]` is the venue's `limit_trades`.
+
+  **This endpoint reaches seven calendar days**, and 90 days with a timestamp; the venue
+  states both. A caller asking for more gets what the venue serves, which is why the window
+  is worth knowing rather than discovering from a short list.
+  """
+  @spec get_trades(String.t(), keyword()) ::
+          {:ok, [Trade.t()]} | {:error, term()} | {:refused, term()}
+  def get_trades(symbol, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+
+    params =
+      []
+      |> put_param(:timestamp, timestamp_ms(Keyword.get(opts, :since)))
+      |> put_param(:since_tid, Keyword.get(opts, :since_tid))
+      |> put_param(:limit_trades, Keyword.get(opts, :limit))
+      |> put_param(:include_breaks, include_breaks(opts))
+
+    with {:ok, rows} <- get_body("/v1/trades/#{native}", Keyword.put(opts, :params, params)) do
+      rows
+      |> List.wrap()
+      |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+        case to_trade(row, symbol) do
+          {:ok, trade} -> {:cont, {:ok, [trade | acc]}}
+          error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, trades} -> {:ok, trades |> Enum.reverse() |> reject_broken(opts)}
+        error -> error
+      end
+    end
+  end
+
+  # Asked for only when the caller wants them. The venue hides broken trades by default and
+  # this does not second-guess that.
+  defp include_breaks(opts), do: if(Keyword.get(opts, :include_broken, false), do: true)
+
+  # Belt and braces: the venue's own filter is asked for above, and anything that arrives
+  # marked broken anyway is dropped here unless the caller said otherwise.
+  defp reject_broken(trades, opts) do
+    if Keyword.get(opts, :include_broken, false),
+      do: trades,
+      else: Enum.reject(trades, & &1.broken)
+  end
+
+  defp put_param(params, _key, nil), do: params
+  defp put_param(params, key, value), do: Keyword.put(params, key, value)
+
+  defp timestamp_ms(nil), do: nil
+  defp timestamp_ms(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
+  defp timestamp_ms(other), do: other
+
+  defp to_trade(row, symbol) do
+    with {:ok, timestamp} <- trade_time(row) do
+      {:ok,
+       %Trade{
+         id: row |> Map.get("tid") |> to_string(),
+         symbol: symbol,
+         # The taker's side. See the note on get_trades/2.
+         side: trade_side(Map.get(row, "type")),
+         price: decimal(Map.get(row, "price")),
+         quantity: decimal(Map.get(row, "amount")),
+         timestamp: timestamp,
+         broken: Map.get(row, "broken", false) == true,
+         provider: :gemini
+       }}
+    end
+  end
+
+  # Milliseconds where the venue sends them, seconds otherwise — the venue publishes both
+  # fields and `timestampms` is the precise one.
+  defp trade_time(%{"timestampms" => ms}) when is_integer(ms),
+    do: {:ok, DateTime.from_unix!(ms, :millisecond)}
+
+  defp trade_time(%{"timestamp" => seconds}) when is_integer(seconds),
+    do: {:ok, DateTime.from_unix!(seconds)}
+
+  # An undated print cannot be placed on a tape, and the local clock would place it wrongly
+  # while looking right.
+  defp trade_time(_row), do: {:error, :missing_venue_timestamp}
+
+  defp trade_side("buy"), do: :buy
+  defp trade_side("sell"), do: :sell
+  defp trade_side(_other), do: nil
   # --- internals ----------------------------------------------------------
 
   defp get_body(path, opts) do

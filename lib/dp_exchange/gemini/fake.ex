@@ -168,6 +168,41 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
+  def get_trades(symbol, opts \\ []) do
+    trades = [
+      %Types.Trade{
+        id: "5335307668",
+        symbol: symbol,
+        # The taker's side: a buyer lifted the offer.
+        side: :buy,
+        price: Decimal.new("3610.85"),
+        quantity: Decimal.new("0.27413495"),
+        timestamp: @at,
+        broken: false,
+        provider: :gemini
+      },
+      %Types.Trade{
+        id: "5335307669",
+        symbol: symbol,
+        side: :sell,
+        price: Decimal.new("9999.99"),
+        quantity: Decimal.new("1"),
+        timestamp: @at,
+        # A busted print. The fake carries one so a consumer's suite exercises the
+        # exclusion rather than assuming it.
+        broken: true,
+        provider: :gemini
+      }
+    ]
+
+    if Keyword.get(opts, :include_broken, false) do
+      {:ok, trades}
+    else
+      {:ok, Enum.reject(trades, & &1.broken)}
+    end
+  end
+
+  @impl true
   def get_market_overview(_opts \\ []) do
     {:ok,
      Map.new(@symbols, fn symbol ->
@@ -194,6 +229,12 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
 
   # --- account and trading, in memory -------------------------------------
   #

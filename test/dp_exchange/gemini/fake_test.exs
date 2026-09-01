@@ -298,4 +298,24 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:refused, :missing_credentials} = Fake.get_trade_volume(%{}, [])
     end
   end
+
+  describe "the tape" do
+    test "broken trades are excluded by default" do
+      assert {:ok, [only]} = Fake.get_trades("BTC-USD")
+      refute only.broken
+      assert only.side == :buy
+    end
+
+    test "asking for them includes the bust" do
+      assert {:ok, both} = Fake.get_trades("BTC-USD", include_broken: true)
+      assert length(both) == 2
+      assert Enum.any?(both, & &1.broken)
+    end
+
+    test "the tape is not the caller's own fills" do
+      # get_trade_history/2 needs a symbol and credentials; the tape needs neither.
+      assert {:ok, [_trade]} = Fake.get_trades("BTC-USD")
+      assert {:refused, :missing_credentials} = Fake.get_trade_history(%{}, symbol: "BTC-USD")
+    end
+  end
 end
