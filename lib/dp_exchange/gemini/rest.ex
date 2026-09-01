@@ -176,9 +176,9 @@ defmodule DpExchange.Gemini.Rest do
   def get_historical_prices(symbol, timeframe, range, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, time_frame} <- time_frame(timeframe),
+    with {:ok, path, time_frame} <- candles_path(native, timeframe),
          :ok <- range_within_window(timeframe, range),
-         {:ok, rows} <- get_body("/v2/candles/#{native}/#{time_frame}", opts) do
+         {:ok, rows} <- get_body("#{path}/#{native}/#{time_frame}", opts) do
       {:ok,
        rows
        |> Enum.map(&row_to_candle(&1, symbol, timeframe))
@@ -186,6 +186,34 @@ defmodule DpExchange.Gemini.Rest do
        |> Enum.sort_by(& &1.opened_at, DateTime)}
     end
   end
+
+  # **Perpetuals have their own candles endpoint, and it serves 1m only.**
+  #
+  #     spot         /v2/candles/{symbol}/{width}              the full width vocabulary
+  #     perpetual    /v2/derivatives/candles/{symbol}/1m       one width, and only one
+  #
+  # The vendor states both: the derivatives path is "available only for perpetual pairs" and
+  # its `time_frame` enum contains `1m` and nothing else.
+  #
+  # **Sending a perpetual to the spot path is the failure worth preventing.** It does not
+  # error — the symbol is well-formed and the endpoint answers — so a caller asking for
+  # 5m bars on `BTCGUSDPERP` would get something back and have no way to tell it was not
+  # the instrument it asked about. The routing is on `SymbolFormat.perpetual?/1`, which is
+  # measured against the venue's own catalogue rather than guessed from the name.
+  defp candles_path(native, timeframe) do
+    if SymbolFormat.perpetual?(native) do
+      perpetual_candles(timeframe)
+    else
+      with {:ok, time_frame} <- time_frame(timeframe), do: {:ok, "/v2/candles", time_frame}
+    end
+  end
+
+  defp perpetual_candles("1m"), do: {:ok, "/v2/derivatives/candles", "1m"}
+
+  # A width the derivatives endpoint does not serve. Falling back to the spot path would
+  # answer a question about a different instrument; falling back to 1m would relabel
+  # someone else's bars.
+  defp perpetual_candles(timeframe), do: {:error, {:unsupported_timeframe, timeframe}}
 
   # --- catalogue ----------------------------------------------------------
 

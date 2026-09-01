@@ -372,4 +372,74 @@ defmodule DpExchange.Gemini.TradesTest do
       assert Decimal.equal?(Types.FxRate.convert(rate, Decimal.new("100")), Decimal.new("69.00"))
     end
   end
+
+  describe "perpetuals have their own candles endpoint" do
+    @bars [[1_787_935_740_000, 1.0, 2.0, 0.5, 1.5, 3.0]]
+
+    test "a perpetual goes to the derivatives path" do
+      # Sending one to the spot path does not error — the symbol is well-formed and the
+      # endpoint answers — so a caller would get bars back with no way to tell they were
+      # not the instrument asked about.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(@bars)
+      end
+
+      assert {:ok, [_candle]} =
+               Rest.get_historical_prices("BTCGUSDPERP", "1m", [],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path}
+      assert path =~ "/v2/derivatives/candles/"
+    end
+
+    test "a spot pair still goes to the spot path" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(@bars)
+      end
+
+      assert {:ok, [_candle]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [], plug: plug, retry_attempts: 0)
+
+      assert_receive {:path, path}
+      assert path =~ "/v2/candles/"
+      refute path =~ "derivatives"
+    end
+
+    test "the derivatives endpoint serves 1m and NOTHING else" do
+      # Falling back to the spot path would answer about a different instrument; falling
+      # back to 1m would relabel someone else's bars.
+      exploding = fn _conn -> raise "must not ask the derivatives endpoint for 5m" end
+
+      assert {:error, {:unsupported_timeframe, "5m"}} =
+               Rest.get_historical_prices("BTCGUSDPERP", "5m", [],
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "a spot pair keeps the full width vocabulary" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(@bars)
+      end
+
+      assert {:ok, [_candle]} =
+               Rest.get_historical_prices("BTC-USD", "5m", [], plug: plug, retry_attempts: 0)
+    end
+  end
 end

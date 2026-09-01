@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_historical_prices/4` routes perpetuals to `/v2/derivatives/candles`, which serves
+  `1m` and nothing else.**
+
+  **Sending a perpetual to the spot path is the failure this prevents, and it does not
+  error.** The symbol is well-formed and the spot endpoint answers, so a caller asking for
+  5m bars on `BTCGUSDPERP` would get bars back with no way to tell they were not the
+  instrument it asked about.
+
+  A width the derivatives endpoint does not serve is `{:unsupported_timeframe, width}`:
+  falling back to the spot path would answer about a different instrument, and falling back
+  to `1m` would relabel someone else's bars. Routing is on `SymbolFormat.perpetual?/1`,
+  measured against the venue's own catalogue rather than guessed from the name.
+
+
 - **`get_fx_rate/3` — `/v2/fxrate/{pair}/{timestamp}`.**
 
   **This is not a rate the venue trades at.** The vendor: *"Gemini does not offer foreign
