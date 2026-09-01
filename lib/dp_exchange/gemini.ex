@@ -403,6 +403,68 @@ defmodule DpExchange.Gemini do
   def withdraw(asset, network, amount, address, opts \\ []),
     do: Private.withdraw(asset, network, amount, address, credentials(opts), with_limiter(opts))
 
+  @doc "The funding sources this account can move fiat through."
+  @impl true
+  def list_payment_methods(credentials, opts),
+    do: Private.list_payment_methods(credentials, with_limiter(opts))
+
+  @doc """
+  Registers a bank account. `opts[:country]` selects the endpoint — `US` or `CA`.
+
+  See `DpExchange.Gemini.Private.add_payment_method/3`: the venue verifies out of band, so
+  a successful response does not make the method usable.
+  """
+  @impl true
+  def add_payment_method(details, opts \\ []),
+    do: Private.add_payment_method(details, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Moves funds between two accounts at this venue. **Not `withdraw/5`.**
+
+  `opts[:from]` and `opts[:to]` are required.
+  """
+  @impl true
+  def transfer_internal(asset, amount, transfer_opts, opts \\ []),
+    do:
+      Private.transfer_internal(
+        asset,
+        amount,
+        transfer_opts,
+        credentials(opts),
+        with_limiter(opts)
+      )
+
+  @doc """
+  Asks the venue to allowlist `address` on `network`.
+
+  **A successful response is not permission to withdraw** — see
+  `DpExchange.Gemini.Private.request_approved_address/5`.
+  """
+  @impl true
+  def request_approved_address(network, address, label, opts \\ []),
+    do:
+      Private.request_approved_address(
+        network,
+        address,
+        label,
+        credentials(opts),
+        with_limiter(opts)
+      )
+
+  @doc "Removes `address` from the allowlist for `network`."
+  @impl true
+  def remove_approved_address(network, address, opts \\ []),
+    do: Private.remove_approved_address(network, address, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Everything that moved on this account — wider than fills and wider than transfers.
+
+  See `DpExchange.Gemini.Private.get_transactions/2`; summing it is not a balance.
+  """
+  @impl true
+  def get_transactions(credentials, opts),
+    do: Private.get_transactions(credentials, with_limiter(opts))
+
   @impl true
   def get_accounts(credentials, opts),
     do: Private.get_accounts(credentials, with_limiter(opts))

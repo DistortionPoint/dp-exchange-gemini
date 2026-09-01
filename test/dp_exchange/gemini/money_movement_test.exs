@@ -323,4 +323,186 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                )
     end
   end
+
+  describe "payment methods" do
+    test "rows come back with their status, because listed is not usable" do
+      body = %{
+        "methods" => [
+          %{"id" => "bank-1", "status" => "verified"},
+          %{"id" => "bank-2", "status" => "pending"}
+        ]
+      }
+
+      assert {:ok, methods} =
+               Private.list_payment_methods(@credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert length(methods) == 2
+      assert Enum.any?(methods, &(&1["status"] == "pending"))
+    end
+
+    test "a bare list comes back too" do
+      assert {:ok, [%{"id" => "bank-1"}]} =
+               Private.list_payment_methods(@credentials,
+                 plug: responding([%{"id" => "bank-1"}]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "the country picks the endpoint, because the details differ" do
+      # Sending Canadian details to the US endpoint would have the fields read as the other
+      # country's and the account registered wrong.
+      me = self()
+
+      assert {:ok, _method} =
+               Private.add_payment_method(%{"accountNumber" => "1"}, @credentials,
+                 plug: capturing(%{"id" => "bank-3"}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, _p1, us_path}
+      assert us_path == "/v1/payments/addbank"
+
+      assert {:ok, _ca} =
+               Private.add_payment_method(%{"transitNumber" => "1"}, @credentials,
+                 country: "CA",
+                 plug: capturing(%{"id" => "bank-4"}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, _p2, ca_path}
+      assert ca_path == "/v1/payments/addbank/cad"
+    end
+
+    test "a country this venue has no endpoint for is refused, not sent to the wrong one" do
+      exploding = fn _conn -> raise "must not register a bank on the wrong country's path" end
+
+      assert {:error, {:unsupported_country, "GB"}} =
+               Private.add_payment_method(%{"iban" => "GB…"}, @credentials,
+                 country: "GB",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "internal transfers are not withdrawals" do
+    test "both ends are required" do
+      # A transfer with one end missing is not a transfer, and defaulting either would move
+      # funds between accounts the caller did not name.
+      exploding = fn _conn -> raise "must not transfer with an end missing" end
+
+      assert {:error, {:missing_option, :from}} =
+               Private.transfer_internal("BTC", Decimal.new("1"), [to: "b"], @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:missing_option, :to}} =
+               Private.transfer_internal("BTC", Decimal.new("1"), [from: "a"], @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "no address and no network are sent — nothing leaves the venue" do
+      me = self()
+
+      assert {:ok, _transfer} =
+               Private.transfer_internal(
+                 "BTC",
+                 Decimal.new("1"),
+                 [from: "a", to: "b"],
+                 @credentials,
+                 plug: capturing(%{"ok" => true}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, path}
+      assert path == "/v1/account/transfer/btc"
+      assert payload["sourceAccount"] == "a"
+      assert payload["targetAccount"] == "b"
+      refute Map.has_key?(payload, "address")
+    end
+  end
+
+  describe "the allowlist writes" do
+    test "requesting an address sends it and any label" do
+      me = self()
+
+      assert {:ok, _requested} =
+               Private.request_approved_address("ethereum", "0xabc", "desk", @credentials,
+                 plug: capturing(%{"status" => "pending-time"}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, path}
+      assert path == "/v1/approvedAddresses/ethereum/request"
+      assert payload["address"] == "0xabc"
+      assert payload["label"] == "desk"
+    end
+
+    test "no label is sent when none is given" do
+      me = self()
+
+      assert {:ok, _requested} =
+               Private.request_approved_address("ethereum", "0xabc", nil, @credentials,
+                 plug: capturing(%{"status" => "pending-time"}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, _path}
+      refute Map.has_key?(payload, "label")
+    end
+
+    test "removal is its own endpoint" do
+      me = self()
+
+      assert {:ok, _removed} =
+               Private.remove_approved_address("ethereum", "0xabc", @credentials,
+                 plug: capturing(%{"ok" => true}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, path}
+      assert path == "/v1/approvedAddresses/ethereum/remove"
+      assert payload["address"] == "0xabc"
+    end
+  end
+
+  describe "transactions are wider than fills and transfers" do
+    test "every kind the venue sends comes back" do
+      body = [
+        %{"type" => "Trade", "amount" => "1"},
+        %{"type" => "Deposit", "amount" => "100"},
+        %{"type" => "Fee", "amount" => "-0.5"}
+      ]
+
+      assert {:ok, rows} =
+               Private.get_transactions(@credentials, plug: responding(body), retry_attempts: 0)
+
+      kinds = Enum.map(rows, & &1["type"])
+      assert "Trade" in kinds
+      assert "Fee" in kinds
+    end
+
+    test "the filters go to the venue in its own names" do
+      me = self()
+
+      assert {:ok, _rows} =
+               Private.get_transactions(@credentials,
+                 since: ~U[2026-08-28 17:00:01Z],
+                 limit: 50,
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, path}
+      assert path == "/v1/transactions"
+      assert payload["limit_transactions"] == 50
+      assert payload["timestamp"] == 1_787_936_401_000
+    end
+  end
 end

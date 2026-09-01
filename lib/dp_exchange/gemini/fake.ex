@@ -761,6 +761,86 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @impl true
+  def list_payment_methods(credentials, _opts \\ []) do
+    with :ok <- authenticated(credentials) do
+      # One verified and one pending: a consumer filtering on presence rather than status
+      # picks one the venue will refuse.
+      {:ok,
+       [
+         %{"id" => "bank-1", "type" => "bank", "status" => "verified"},
+         %{"id" => "bank-2", "type" => "bank", "status" => "pending"}
+       ]}
+    end
+  end
+
+  @impl true
+  def add_payment_method(details, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+         {:ok, _path} <- fake_country(Keyword.get(opts, :country, "US")) do
+      # **Pending, never verified.** The venue verifies out of band; a fake that returned a
+      # usable method would teach a consumer the first transfer will work.
+      {:ok, Map.merge(%{"id" => "bank-3", "status" => "pending"}, details)}
+    end
+  end
+
+  defp fake_country("US"), do: {:ok, :us}
+  defp fake_country("CA"), do: {:ok, :ca}
+  defp fake_country(country), do: {:error, {:unsupported_country, country}}
+
+  @impl true
+  def transfer_internal(asset, amount, transfer_opts, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      case {Keyword.get(transfer_opts, :from), Keyword.get(transfer_opts, :to)} do
+        {nil, _to} ->
+          {:error, {:missing_option, :from}}
+
+        {_from, nil} ->
+          {:error, {:missing_option, :to}}
+
+        {from, to} ->
+          {:ok,
+           %{
+             "asset" => asset,
+             "amount" => to_string(amount),
+             "sourceAccount" => from,
+             "targetAccount" => to
+           }}
+      end
+    end
+  end
+
+  @impl true
+  def request_approved_address(network, address, label, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      # **Pending.** A successful response is not permission to withdraw, and a fake that
+      # returned "active" would teach a consumer it is.
+      {:ok,
+       %{"network" => network, "address" => address, "label" => label, "status" => "pending-time"}}
+    end
+  end
+
+  @impl true
+  def remove_approved_address(network, address, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      {:ok, %{"network" => network, "address" => address, "status" => "removed"}}
+    end
+  end
+
+  @impl true
+  def get_transactions(credentials, _opts \\ []) do
+    with :ok <- authenticated(credentials) do
+      # Kinds that are not trades and not transfers, because that is the point of the
+      # endpoint and a fake returning only fills would hide it.
+      {:ok,
+       [
+         %{"type" => "Trade", "amount" => "1"},
+         %{"type" => "Deposit", "amount" => "100"},
+         %{"type" => "Fee", "amount" => "-0.5"}
+       ]}
+    end
+  end
+
   defp fake_memo(nil, true), do: {:error, :memo_required}
   defp fake_memo(_memo, _required), do: :ok
 

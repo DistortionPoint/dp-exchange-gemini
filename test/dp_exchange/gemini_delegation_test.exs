@@ -336,4 +336,134 @@ defmodule DpExchange.GeminiDelegationTest do
       assert Gemini.coverage(feed: feed) == %{}
     end
   end
+
+  describe "the money surface reaches the venue through the facade" do
+    @money_creds %{api_key: "account-test", api_secret: "test-secret-not-real"}
+
+    defp money_plug(body) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(body)
+      end
+    end
+
+    # The facade points at the supervisor's limiter, which the setup starts. Passing it
+    # through is what makes these exercise the real path rather than a bypass.
+    defp money_opts(sup, body, extra \\ []) do
+      Keyword.merge(
+        [
+          credentials: @money_creds,
+          plug: money_plug(body),
+          limiter: sup[:limiter],
+          retry_attempts: 0
+        ],
+        extra
+      )
+    end
+
+    test "get_deposit_address/3", %{opts: sup} do
+      assert {:ok, address} =
+               Gemini.get_deposit_address(
+                 "BTC",
+                 "bitcoin",
+                 money_opts(sup, %{"address" => "mi98"})
+               )
+
+      assert address.network == "bitcoin"
+    end
+
+    test "list_approved_addresses/1", %{opts: sup} do
+      body = %{"approvedAddresses" => [%{"address" => "0x1", "status" => "active"}]}
+
+      assert {:ok, [address]} =
+               Gemini.list_approved_addresses(money_opts(sup, body, network: "ethereum"))
+
+      assert address.status == :active
+    end
+
+    test "estimate_withdrawal_fee/4", %{opts: sup} do
+      assert {:ok, estimate} =
+               Gemini.estimate_withdrawal_fee(
+                 "ETH",
+                 "ethereum",
+                 Decimal.new("1"),
+                 money_opts(sup, %{"fee" => "0.0005"}, address: "0xabc")
+               )
+
+      assert estimate.address == "0xabc"
+    end
+
+    test "withdraw/5", %{opts: sup} do
+      assert {:ok, withdrawal} =
+               Gemini.withdraw(
+                 "ETH",
+                 "ethereum",
+                 Decimal.new("1"),
+                 "0xabc",
+                 money_opts(sup, %{"withdrawalId" => "w-1"})
+               )
+
+      assert withdrawal.status == :pending
+    end
+
+    test "list_payment_methods/2 and add_payment_method/2", %{opts: sup} do
+      assert {:ok, [_method]} =
+               Gemini.list_payment_methods(@money_creds, money_opts(sup, [%{"id" => "b-1"}]))
+
+      assert {:ok, _added} =
+               Gemini.add_payment_method(
+                 %{"accountNumber" => "1"},
+                 money_opts(sup, %{"id" => "b-2"})
+               )
+    end
+
+    test "transfer_internal/4", %{opts: sup} do
+      assert {:ok, _transfer} =
+               Gemini.transfer_internal(
+                 "BTC",
+                 Decimal.new("1"),
+                 [from: "a", to: "b"],
+                 money_opts(sup, %{"ok" => true})
+               )
+    end
+
+    test "request_approved_address/4 and remove_approved_address/3", %{opts: sup} do
+      assert {:ok, _requested} =
+               Gemini.request_approved_address(
+                 "ethereum",
+                 "0xabc",
+                 "desk",
+                 money_opts(sup, %{"status" => "pending-time"})
+               )
+
+      assert {:ok, _removed} =
+               Gemini.remove_approved_address(
+                 "ethereum",
+                 "0xabc",
+                 money_opts(sup, %{"ok" => true})
+               )
+    end
+
+    test "get_transactions/2", %{opts: sup} do
+      assert {:ok, [_row]} =
+               Gemini.get_transactions(@money_creds, money_opts(sup, [%{"type" => "Trade"}]))
+    end
+
+    test "list_networks/2 and list_fee_promos/1", %{opts: sup} do
+      assert {:ok, [_row]} = Gemini.list_networks("USDC", money_opts(sup, [%{"token" => "USDC"}]))
+
+      assert {:ok, [_promo]} =
+               Gemini.list_fee_promos(money_opts(sup, %{"symbols" => ["btcusd"]}))
+    end
+
+    test "get_fx_rate/3", %{opts: sup} do
+      body = %{"fxPair" => "AUDUSD", "rate" => "0.69", "provider" => "bcb"}
+
+      assert {:ok, rate} =
+               Gemini.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z], money_opts(sup, body))
+
+      assert rate.source == "bcb"
+    end
+  end
 end

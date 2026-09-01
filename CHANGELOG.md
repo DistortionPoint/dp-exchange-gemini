@@ -22,6 +22,28 @@ acceptable changelog line.
 
 ### Added
 
+- **The rest of money movement: payment methods, internal transfers, the allowlist writes
+  and the transaction ledger.** `list_payment_methods/2`, `add_payment_method/2`,
+  `transfer_internal/4`, `request_approved_address/4`, `remove_approved_address/3` and
+  `get_transactions/2`.
+
+  **`add_payment_method/2` has two endpoints because the details differ by country** —
+  `/v1/payments/addbank` and `/v1/payments/addbank/cad`. A country this venue has no
+  endpoint for is refused rather than sent to the wrong one, where the fields would be read
+  as the other country's and the account registered wrong.
+
+  **`transfer_internal/4` sends no address and no network** — nothing leaves the venue.
+  Both ends are required: a transfer with one missing is not a transfer, and defaulting
+  either would move funds between accounts the caller did not name.
+
+  **`request_approved_address/4` returns the venue's `pending-time`.** A successful response
+  is not permission to withdraw; the entry sits under a time lock and a withdrawal to it
+  before the lock lifts is refused.
+
+  `get_transactions/2` returns every kind the venue records — fees and adjustments alongside
+  fills and deposits.
+
+
 - **Money movement: `get_deposit_address/3`, `list_approved_addresses/1`,
   `estimate_withdrawal_fee/4` and `withdraw/5`.** All four were `:unsupported`. This is the
   group where a defect moves funds and the one that can never be tested against the live

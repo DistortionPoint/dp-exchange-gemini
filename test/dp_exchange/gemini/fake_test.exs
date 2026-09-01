@@ -398,4 +398,78 @@ defmodule DpExchange.Gemini.FakeTest do
                Fake.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc")
     end
   end
+
+  describe "the fake's payment and transfer surface" do
+    test "a payment method list carries a pending one" do
+      assert {:ok, methods} = Fake.list_payment_methods(@credentials)
+      assert Enum.any?(methods, &(&1["status"] == "pending"))
+    end
+
+    test "a newly added method is pending, never verified" do
+      # A fake returning a usable method would teach a consumer the first transfer works.
+      assert {:ok, method} =
+               Fake.add_payment_method(%{"accountNumber" => "1"},
+                 credentials: @credentials
+               )
+
+      assert method["status"] == "pending"
+    end
+
+    test "a country with no endpoint is refused" do
+      assert {:error, {:unsupported_country, "GB"}} =
+               Fake.add_payment_method(%{"iban" => "GB"},
+                 country: "GB",
+                 credentials: @credentials
+               )
+    end
+
+    test "an internal transfer needs both ends and carries no address" do
+      assert {:error, {:missing_option, :from}} =
+               Fake.transfer_internal("BTC", Decimal.new("1"), [to: "b"],
+                 credentials: @credentials
+               )
+
+      assert {:ok, transfer} =
+               Fake.transfer_internal("BTC", Decimal.new("1"), [from: "a", to: "b"],
+                 credentials: @credentials
+               )
+
+      assert transfer["sourceAccount"] == "a"
+      refute Map.has_key?(transfer, "address")
+    end
+
+    test "a requested allowlist entry is pending, not active" do
+      # A fake returning "active" would teach a consumer a successful response is permission
+      # to withdraw.
+      assert {:ok, requested} =
+               Fake.request_approved_address("ethereum", "0xabc", "desk",
+                 credentials: @credentials
+               )
+
+      assert requested["status"] == "pending-time"
+      refute requested["status"] == "active"
+    end
+
+    test "removal answers removed" do
+      assert {:ok, %{"status" => "removed"}} =
+               Fake.remove_approved_address("ethereum", "0xabc", credentials: @credentials)
+    end
+
+    test "transactions include kinds that are neither trades nor transfers" do
+      assert {:ok, rows} = Fake.get_transactions(@credentials)
+      kinds = Enum.map(rows, & &1["type"])
+
+      assert "Fee" in kinds
+      assert "Trade" in kinds
+    end
+
+    test "every one refuses without credentials" do
+      assert {:refused, :missing_credentials} = Fake.list_payment_methods(%{})
+      assert {:refused, :missing_credentials} = Fake.get_transactions(%{})
+      assert {:refused, :missing_credentials} = Fake.add_payment_method(%{})
+
+      assert {:refused, :missing_credentials} =
+               Fake.request_approved_address("ethereum", "0xabc", nil)
+    end
+  end
 end

@@ -1072,6 +1072,158 @@ defmodule DpExchange.Gemini.Private do
   # has not arrived.
   defp withdrawal_status(_other), do: :pending
 
+  @doc """
+  The funding sources this account can move fiat through — `/v1/payments/methods`.
+
+  Rows are the venue's own. **A method being listed is not the same as being usable**: a
+  bank account added through `add_payment_method/2` sits pending verification, and the
+  status is in the row.
+  """
+  @spec list_payment_methods(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_payment_methods(credentials, opts) do
+    with {:ok, body, _headers} <- post("/v1/payments/methods", %{}, credentials, opts) do
+      {:ok, body |> payment_rows() |> List.wrap()}
+    end
+  end
+
+  defp payment_rows(%{"methods" => rows}) when is_list(rows), do: rows
+  defp payment_rows(rows) when is_list(rows), do: rows
+  defp payment_rows(%{} = row), do: [row]
+  defp payment_rows(_other), do: []
+
+  @doc """
+  Registers a bank account — `/v1/payments/addbank`, or `/v1/payments/addbank/cad` for a
+  Canadian one.
+
+  **Two endpoints, because the details differ by country.** A US account is a routing and
+  account number; a Canadian one adds an institution and transit number. `opts[:country]`
+  selects, defaulting to the US endpoint — and a country this venue has no endpoint for is
+  refused rather than sent to the wrong one, where the fields would be read as the other
+  country's and the account registered wrong.
+
+  **The venue verifies out of band.** A successful response starts that; it does not finish
+  it, and the method is not usable until the venue says so — which `list_payment_methods/2`
+  reports.
+  """
+  @spec add_payment_method(map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def add_payment_method(details, credentials, opts) do
+    with {:ok, path} <- addbank_path(Keyword.get(opts, :country, "US")) do
+      with {:ok, body, _headers} <- post(path, details, credentials, opts) do
+        {:ok, body}
+      end
+    end
+  end
+
+  defp addbank_path("US"), do: {:ok, "/v1/payments/addbank"}
+  defp addbank_path("CA"), do: {:ok, "/v1/payments/addbank/cad"}
+
+  # Sending Canadian details to the US endpoint would have the fields read as the other
+  # country's and the account registered wrong.
+  defp addbank_path(country), do: {:error, {:unsupported_country, country}}
+
+  @doc """
+  Moves `amount` of `asset` between two accounts at this venue —
+  `/v1/account/transfer/{currency}`.
+
+  **Not `withdraw/5`.** Nothing leaves the venue and no chain is involved, so there is no
+  address, no network and no network fee. `opts[:from]` and `opts[:to]` are the venue's own
+  account names and both are required: a transfer with one end missing is not a transfer,
+  and defaulting either would move funds between accounts the caller did not name.
+  """
+  @spec transfer_internal(String.t(), Decimal.t(), keyword(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def transfer_internal(asset, amount, transfer_opts, credentials, opts) do
+    with {:ok, from} <- required_opt(transfer_opts, :from),
+         {:ok, to} <- required_opt(transfer_opts, :to) do
+      params = %{
+        "sourceAccount" => from,
+        "targetAccount" => to,
+        "amount" => to_string(amount)
+      }
+
+      currency = String.downcase(asset)
+
+      with {:ok, body, _headers} <-
+             post("/v1/account/transfer/#{currency}", params, credentials, opts) do
+        {:ok, body}
+      end
+    end
+  end
+
+  defp required_opt(opts, key) do
+    case Keyword.get(opts, key) do
+      nil -> {:error, {:missing_option, key}}
+      value -> {:ok, value}
+    end
+  end
+
+  @doc """
+  Asks the venue to add `address` to the withdrawal allowlist for `network` —
+  `/v1/approvedAddresses/{network}/request`.
+
+  **A successful response is not permission to withdraw.** The venue holds a new entry under
+  a time lock and reports it as `pending-time` until the lock lifts; a withdrawal to it
+  before then is refused. Read the list back with `list_approved_addresses/2` and check
+  `ApprovedAddress.usable?/2`, which answers `nil` while the venue states no activation time.
+  """
+  @spec request_approved_address(String.t(), String.t(), String.t() | nil, map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def request_approved_address(network, address, label, credentials, opts) do
+    params = put_present(%{"address" => address}, "label", label)
+
+    with {:ok, body, _headers} <-
+           post("/v1/approvedAddresses/#{network}/request", params, credentials, opts) do
+      {:ok, body}
+    end
+  end
+
+  @doc """
+  Removes `address` from the allowlist for `network` —
+  `/v1/approvedAddresses/{network}/remove`.
+
+  Generally immediate where addition is not: the venue is slow to widen what funds may reach
+  and quick to narrow it.
+  """
+  @spec remove_approved_address(String.t(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def remove_approved_address(network, address, credentials, opts) do
+    with {:ok, body, _headers} <-
+           post(
+             "/v1/approvedAddresses/#{network}/remove",
+             %{"address" => address},
+             credentials,
+             opts
+           ) do
+      {:ok, body}
+    end
+  end
+
+  @doc """
+  Everything that moved on this account — `/v1/transactions`.
+
+  **Wider than `get_trade_history/2` and wider than `get_transfers/2`**: fees, interest,
+  credits and adjustments alongside deposits and fills. Rows are the venue's own, because
+  the kinds do not share a shape.
+
+  `opts[:since]` and `opts[:limit]` narrow it, in the venue's own names.
+
+  **Summing this is not a balance.** `get_balances/2` is the authority; this explains it.
+  """
+  @spec get_transactions(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_transactions(credentials, opts) do
+    params =
+      %{}
+      |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
+      |> put_present("limit_transactions", Keyword.get(opts, :limit))
+
+    with {:ok, body, _headers} <- post("/v1/transactions", params, credentials, opts) do
+      {:ok, body |> List.wrap() |> List.flatten()}
+    end
+  end
+
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do
