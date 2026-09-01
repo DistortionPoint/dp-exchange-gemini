@@ -21,6 +21,41 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+
+- **`quote_conversion/4`, `commit_conversion/2` and `convert/4` — the Instant pair and the
+  wrap endpoint.**
+
+  `/v1/instant/quote` then `/v1/instant/execute` is the two-step form: the venue states a
+  price, a quantity, a fee and a `maxAgeMs`, and nothing moves until the commit.
+  `/v1/wrap/{symbol}` is `convert/4`, the one-step form — no rate is held and the caller
+  learns the price from the result.
+
+  **The expiry is anchored to the venue's own `Date` header, not the local clock.** A
+  window computed against a drifted client expires at the wrong moment, and a conversion
+  committed a second late fills at a rate the caller was never shown.
+
+  **The direction refuses more often than you would expect, and that is deliberate.** The
+  venue takes a symbol and a side, not a from/to pair, and `totalSpend` is `CCY2` on a buy
+  and `CCY1` on a sell. Deriving that needs to know which asset is the quote side — and
+  **this venue quotes in crypto as well as fiat**, so for `USD -> BTC` both are quote
+  currencies, both orientations parse, and only the catalogue says which pair exists. It
+  returns `{:ambiguous_conversion, from, to}` rather than picking one; choosing wrongly
+  spends the wrong asset, which is a real loss and not a wrong-looking number. Pass
+  `opts[:symbol]` and `opts[:side]`.
+
+  `commit_conversion/2` needs the terms the venue quoted against, not the id alone — the
+  execute call takes symbol, side, quantity and price, and a missing one is an error rather
+  than a value invented here.
+
+  `get_conversion/2` stays unsupported: the venue quotes and executes and does not answer
+  "what became of quote N". A caller that lost a quote re-quotes.
+
+- **`get_trade_volume/2` — `/v1/tradevolume`.** One row per symbol per day with the maker
+  and taker breakdown, under the venue's own field names. Not `get_trade_history/2` summed:
+  this venue requires a symbol on every fills request, so reproducing it is one request per
+  symbol per period and the answer would still be this package's arithmetic against the
+  venue's ledger.
+
 - **`cancel_all_orders/2`, covering both of the venue's bulk cancels.**
 
       :session  ->  POST /v1/order/cancel/session

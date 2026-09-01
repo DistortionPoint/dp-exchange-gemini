@@ -131,8 +131,6 @@ defmodule DpExchange.Gemini do
     {:get_staking_history, 1},
     {:stake, 3},
     {:unstake, 3},
-    {:quote_conversion, 4},
-    {:commit_conversion, 2},
     {:get_conversion, 2},
     {:list_portfolios, 1},
     {:get_deposit_address, 3},
@@ -470,15 +468,38 @@ defmodule DpExchange.Gemini do
   @impl true
   def unstake(_asset, _amount, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Quotes a conversion — Gemini's Instant quote. See
+  `DpExchange.Gemini.Private.quote_conversion/4`, including when it refuses to guess the
+  direction.
+  """
   @impl true
-  def quote_conversion(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
+  def quote_conversion(from, to, amount, opts \\ []),
+    do: Private.quote_conversion(from, to, amount, with_limiter(opts))
 
+  @doc "Commits a quoted conversion by its `quoteId`."
   @impl true
-  def commit_conversion(_id, _opts \\ []), do: Venue.not_supported()
+  def commit_conversion(id, opts \\ []), do: Private.commit_conversion(id, with_limiter(opts))
 
+  @doc """
+  Converts in one call — the venue's wrap endpoint.
+
+  **Not a shorthand for `quote_conversion/4` then `commit_conversion/2`**: there is no rate
+  held, and the caller learns the price from the result.
+  """
+  @impl true
+  def convert(from, to, amount, opts \\ []),
+    do: Private.convert(from, to, amount, with_limiter(opts))
+
+  @doc "The account's own traded volume, one row per symbol per day."
+  @impl true
+  def get_trade_volume(credentials, opts),
+    do: Private.get_trade_volume(credentials, with_limiter(opts))
+
+  # **No quote-status endpoint.** The venue quotes and executes; it does not answer "what
+  # became of quote N". A caller that lost a quote re-quotes.
   @impl true
   def get_conversion(_id, _opts \\ []), do: Venue.not_supported()
-
   @impl true
   def list_portfolios(_opts \\ []), do: Venue.not_supported()
 

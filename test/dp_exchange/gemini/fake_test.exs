@@ -226,4 +226,76 @@ defmodule DpExchange.Gemini.FakeTest do
       assert order.status == :filled
     end
   end
+
+  describe "conversions" do
+    test "the fake refuses the direction the real package refuses" do
+      # This venue quotes in crypto as well as fiat, so USD -> BTC is genuinely ambiguous
+      # and only the catalogue resolves it. A fake that picked one would let a consumer's
+      # suite pass on a conversion that spends the wrong asset.
+      assert {:error, {:ambiguous_conversion, "USD", "BTC"}} =
+               Fake.quote_conversion("USD", "BTC", Decimal.new("100"), credentials: @credentials)
+    end
+
+    test "an explicit symbol and side get a quote with a real window" do
+      assert {:ok, conversion} =
+               Fake.quote_conversion("USD", "BTC", Decimal.new("100"),
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 credentials: @credentials
+               )
+
+      assert conversion.status == :quoted
+      assert conversion.expires_at
+      refute Types.Conversion.expired?(conversion, conversion.venue_time)
+    end
+
+    test "committing needs the terms the venue quoted against" do
+      assert {:error, {:missing_option, [:symbol, :side, :amount, :price]}} =
+               Fake.commit_conversion("q-1", credentials: @credentials)
+    end
+
+    test "a committed conversion is settled" do
+      assert {:ok, conversion} =
+               Fake.commit_conversion("q-1",
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 amount: Decimal.new("1"),
+                 price: Decimal.new("40000"),
+                 credentials: @credentials
+               )
+
+      assert conversion.status == :settled
+    end
+
+    test "convert/4 settles in one step and holds no rate" do
+      assert {:ok, conversion} =
+               Fake.convert("GUSD", "USD", Decimal.new("1"),
+                 symbol: "GUSD-USD",
+                 side: :sell,
+                 credentials: @credentials
+               )
+
+      assert conversion.status == :settled
+      # No window, so `expired?/2` reports unknown rather than a boolean to act on.
+      assert Types.Conversion.expired?(conversion, DateTime.utc_now()) == nil
+    end
+
+    test "every conversion call refuses without credentials" do
+      assert {:refused, :missing_credentials} =
+               Fake.convert("GUSD", "USD", Decimal.new("1"), symbol: "GUSD-USD", side: :sell)
+
+      assert {:refused, :missing_credentials} = Fake.commit_conversion("q-1", [])
+    end
+  end
+
+  describe "the account's own traded volume" do
+    test "rows come back under the venue's own field names" do
+      assert {:ok, [row]} = Fake.get_trade_volume(@credentials, [])
+      assert row["symbol"] == "btcusd"
+    end
+
+    test "it refuses without credentials" do
+      assert {:refused, :missing_credentials} = Fake.get_trade_volume(%{}, [])
+    end
+  end
 end

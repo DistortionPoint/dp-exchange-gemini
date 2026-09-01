@@ -38,7 +38,7 @@ defmodule DpExchange.Gemini.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Notice, Timeframe, Types, Venue}
-  alias DpExchange.Gemini.Rest
+  alias DpExchange.Gemini.{Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
 
@@ -488,15 +488,94 @@ defmodule DpExchange.Gemini.Fake do
   def unstake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def quote_conversion(_from, _to, _amount, _opts \\ []),
-    do: DpExchange.Core.Venue.not_supported()
+  def quote_conversion(from, to, amount, opts \\ []) do
+    # The fake refuses the ambiguous direction the real package refuses. A fake that picked
+    # one would let a consumer's suite pass on a conversion that spends the wrong asset.
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+         :ok <- fake_direction(from, to, opts) do
+      {:ok,
+       %Types.Conversion{
+         id: "fake-gemini-quote-1",
+         status: :quoted,
+         from_asset: from,
+         to_asset: to,
+         from_amount: amount,
+         to_amount: Decimal.div(amount, Decimal.new("40000")),
+         rate: Decimal.new("40000"),
+         fee: Decimal.new("0.30"),
+         # A real window, so a consumer testing expiry has something to test against.
+         expires_at: DateTime.add(@at, 60, :second),
+         venue_time: @at,
+         provider: :gemini
+       }}
+    end
+  end
 
   @impl true
-  def commit_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def commit_conversion(id, opts \\ []) do
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      case Enum.reject([:symbol, :side, :amount, :price], &Keyword.has_key?(opts, &1)) do
+        [] ->
+          {:ok,
+           %Types.Conversion{
+             id: id,
+             status: :settled,
+             from_asset: "USD",
+             to_asset: "BTC",
+             rate: Decimal.new("40000"),
+             venue_time: @at,
+             provider: :gemini
+           }}
+
+        missing ->
+          # The venue's execute call needs the terms it quoted against, not the id alone.
+          {:error, {:missing_option, missing}}
+      end
+    end
+  end
+
+  @impl true
+  def convert(from, to, amount, opts \\ []) do
+    # One step and already settled — no rate was held, which is the whole difference from
+    # quote_conversion/4.
+    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+         :ok <- fake_direction(from, to, opts) do
+      {:ok,
+       %Types.Conversion{
+         id: "fake-gemini-wrap-1",
+         status: :settled,
+         from_asset: from,
+         to_asset: to,
+         from_amount: amount,
+         to_amount: amount,
+         rate: Decimal.new("1"),
+         expires_at: nil,
+         venue_time: @at,
+         provider: :gemini
+       }}
+    end
+  end
+
+  @impl true
+  def get_trade_volume(credentials, _opts \\ []) do
+    with :ok <- authenticated(credentials) do
+      {:ok, [%{"symbol" => "btcusd", "total_volume_base" => "10.5", "data_date" => "2026-08-31"}]}
+    end
+  end
+
+  defp fake_direction(from, to, opts) do
+    quotes = SymbolFormat.quotes()
+
+    cond do
+      Keyword.has_key?(opts, :symbol) and Keyword.has_key?(opts, :side) -> :ok
+      String.upcase(from) in quotes and String.upcase(to) not in quotes -> :ok
+      String.upcase(to) in quotes and String.upcase(from) not in quotes -> :ok
+      true -> {:error, {:ambiguous_conversion, from, to}}
+    end
+  end
 
   @impl true
   def get_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
-
   @impl true
   def list_portfolios(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 

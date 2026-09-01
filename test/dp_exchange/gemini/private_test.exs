@@ -2,7 +2,7 @@ defmodule DpExchange.Gemini.PrivateTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.Config
-  alias DpExchange.Core.Types.{Balance, Fill, Order}
+  alias DpExchange.Core.Types.{Balance, Conversion, Fill, Order}
   alias DpExchange.Gemini.Private
 
   @moduletag :capture_log
@@ -689,6 +689,226 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert %Order{} = order
       assert order.id == "1234"
       assert order.symbol == "BTC-USD"
+    end
+  end
+
+  describe "conversions — Instant quotes, and the direction this refuses to guess" do
+    @quote_body %{
+      "quoteId" => 20_930,
+      "maxAgeMs" => 60_000,
+      "pair" => "BTCUSD",
+      "price" => "6445.07",
+      "priceCurrency" => "USD",
+      "side" => "buy",
+      "quantity" => "0.01505181",
+      "quantityCurrency" => "BTC",
+      "fee" => "2.9900309233",
+      "feeCurrency" => "USD",
+      "totalSpend" => "100",
+      "totalSpendCurrency" => "USD"
+    }
+
+    test "a quote-currency-to-base conversion is a buy of the base's pair" do
+      me = self()
+
+      assert {:ok, _conversion} =
+               Private.quote_conversion("USD", "DOGE", Decimal.new("100"),
+                 credentials: @credentials,
+                 plug: capturing(@quote_body, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      assert payload["symbol"] == "dogeusd"
+      assert payload["side"] == "buy"
+      assert payload["totalSpend"] == "100"
+    end
+
+    test "a crypto-to-fiat conversion is a sell of the same pair" do
+      # The venue's rule: totalSpend is CCY2 on a buy and CCY1 on a sell. Getting this
+      # backwards spends the wrong asset, which is a real loss rather than a wrong number.
+      me = self()
+
+      assert {:ok, _conversion} =
+               Private.quote_conversion("DOGE", "USD", Decimal.new("1"),
+                 credentials: @credentials,
+                 plug: capturing(@quote_body, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      assert payload["symbol"] == "dogeusd"
+      assert payload["side"] == "sell"
+    end
+
+    test "two quote currencies is refused, not resolved" do
+      # GUSD -> USD is a real pair in both directions. Picking one spends the wrong asset.
+      exploding = fn _conn -> raise "must not guess a conversion direction" end
+
+      assert {:error, {:ambiguous_conversion, "GUSD", "USD"}} =
+               Private.quote_conversion("GUSD", "USD", Decimal.new("1"),
+                 credentials: @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an explicit symbol and side settle an ambiguous pair" do
+      me = self()
+
+      assert {:ok, _conversion} =
+               Private.quote_conversion("GUSD", "USD", Decimal.new("1"),
+                 symbol: "GUSD-USD",
+                 side: :sell,
+                 credentials: @credentials,
+                 plug: capturing(@quote_body, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      assert payload["symbol"] == "gusdusd"
+      assert payload["side"] == "sell"
+    end
+
+    test "half an override is an error rather than half a guess" do
+      exploding = fn _conn -> raise "must not send a half-specified conversion" end
+
+      assert {:error, {:missing_option, [:symbol, :side]}} =
+               Private.quote_conversion("GUSD", "USD", Decimal.new("1"),
+                 symbol: "GUSD-USD",
+                 credentials: @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "the quote carries the venue's numbers and a real expiry" do
+      assert {:ok, conversion} =
+               Private.quote_conversion("USD", "BTC", Decimal.new("100"),
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 credentials: @credentials,
+                 plug: responding(@quote_body),
+                 retry_attempts: 0
+               )
+
+      assert conversion.id == "20930"
+      assert conversion.status == :quoted
+      assert Decimal.equal?(conversion.rate, Decimal.new("6445.07"))
+      assert Decimal.equal?(conversion.fee, Decimal.new("2.9900309233"))
+      # maxAgeMs measured from the venue's own Date header, not the local clock: a window
+      # computed against a drifted client expires at the wrong moment, and a conversion
+      # committed a second late fills at a rate the caller was never shown.
+      assert DateTime.compare(conversion.expires_at, ~U[2026-08-28 17:01:01Z]) == :eq
+    end
+
+    test "a quote is :quoted, which is not a conversion that happened" do
+      assert {:ok, conversion} =
+               Private.quote_conversion("USD", "BTC", Decimal.new("100"),
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 credentials: @credentials,
+                 plug: responding(@quote_body),
+                 retry_attempts: 0
+               )
+
+      refute conversion.status == :settled
+
+      assert Conversion.expired?(conversion, ~U[2026-08-28 17:00:30Z]) ==
+               false
+
+      assert Conversion.expired?(conversion, ~U[2026-08-28 17:02:00Z])
+    end
+
+    test "committing needs the terms the venue quoted against, not the id alone" do
+      exploding = fn _conn -> raise "must not execute without the quoted terms" end
+
+      assert {:error, {:missing_option, [:symbol, :side, :amount, :price]}} =
+               Private.commit_conversion("20930",
+                 credentials: @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "a commit sends the id and the terms, and comes back settled" do
+      me = self()
+
+      assert {:ok, conversion} =
+               Private.commit_conversion("20930",
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 amount: Decimal.new("0.015"),
+                 price: Decimal.new("6445.07"),
+                 credentials: @credentials,
+                 plug: capturing(@quote_body, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      assert payload["quoteId"] == "20930"
+      assert payload["symbol"] == "btcusd"
+      assert conversion.status == :settled
+    end
+  end
+
+  describe "wrap is the one-step conversion" do
+    test "it goes to the wrap path and comes back settled, with no rate held" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(%{
+          "orderId" => "77",
+          "price" => "1.00",
+          "quantity" => "1",
+          "quantityCurrency" => "USD",
+          "totalSpend" => "1",
+          "totalSpendCurrency" => "GUSD"
+        })
+      end
+
+      assert {:ok, conversion} =
+               Private.convert("GUSD", "USD", Decimal.new("1"),
+                 symbol: "GUSD-USD",
+                 side: :sell,
+                 credentials: @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, "/v1/wrap/gusdusd"}
+      assert conversion.status == :settled
+      # No quote was held, so there is no window and `expired?/2` reports unknown rather
+      # than a boolean a caller could act on.
+      assert conversion.expires_at == nil
+    end
+  end
+
+  describe "the account's own traded volume" do
+    test "rows come back as the venue sends them, flattened from its nesting" do
+      body = [
+        [
+          %{"symbol" => "btcusd", "total_volume_base" => "10.5", "data_date" => "2026-08-31"},
+          %{"symbol" => "btcusd", "total_volume_base" => "3.1", "data_date" => "2026-08-30"}
+        ]
+      ]
+
+      assert {:ok, rows} =
+               Private.get_trade_volume(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert length(rows) == 2
+      # The venue's own field names, unrenamed: a caller reading buy_maker_notional wants
+      # the venue's number under the venue's name.
+      assert hd(rows)["total_volume_base"] == "10.5"
+    end
+
+    test "no volume is an empty list, not an error" do
+      assert {:ok, []} =
+               Private.get_trade_volume(@credentials, plug: responding([]), retry_attempts: 0)
     end
   end
 end

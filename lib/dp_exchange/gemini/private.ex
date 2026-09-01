@@ -75,7 +75,7 @@ defmodule DpExchange.Gemini.Private do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.{Balance, Fill, Order}
+  alias DpExchange.Core.Types.{Balance, Conversion, Fill, Order}
   alias DpExchange.Gemini.{Auth, Environment, SymbolFormat}
 
   @doc "Every currency the account holds, with what is available and what is on hold."
@@ -550,6 +550,225 @@ defmodule DpExchange.Gemini.Private do
   defp liquidity(true), do: :taker
   defp liquidity(false), do: :maker
   defp liquidity(_other), do: nil
+
+  @doc """
+  Quotes a conversion between two assets, holding a rate the caller may then commit.
+
+  This is Gemini's **Instant** pair, `/v1/instant/quote` then `/v1/instant/execute`. The
+  venue states the price, the quantity, the fee and a `maxAgeMs`, and holds that rate for
+  the window — typically 60 seconds. Nothing has moved until `commit_conversion/2`.
+
+  ## Which of the two assets is the pair, and why this refuses more often than you expect
+
+  The venue takes a symbol and a side, not a from/to pair, and the two are not
+  interchangeable: `totalSpend` is `CCY2` on a buy and `CCY1` on a sell. So `DAI -> BTC` is
+  *buy BTCDAI spending DAI*, and `BTC -> DAI` is *sell BTCDAI spending BTC*.
+
+  Deriving that needs to know which of the two is the pair's quote side, and **this venue
+  quotes in crypto as well as fiat** — `SymbolFormat.quotes/0` lists BTC, ETH, SOL and FIL
+  alongside USD and the stablecoins. So for `USD -> BTC` both assets are quote currencies,
+  both orientations parse, and only the venue's catalogue says which pair exists.
+
+  **It refuses with `{:ambiguous_conversion, from, to}` rather than picking one**, and that
+  includes the common `USD -> BTC`. Choosing wrongly spends the wrong asset, which is a
+  real loss rather than a wrong-looking number, and this package will not resolve it by
+  fetching a catalogue behind the caller's back.
+
+  So pass `opts[:symbol]` and `opts[:side]`. Derivation is the convenience for the case
+  where exactly one side is a quote currency, not the main path.
+
+  The expiry comes from the venue's `maxAgeMs` measured from the response's own `Date`
+  header, not from the local clock. A quote whose window is computed against a clock the
+  venue does not share is a quote that expires at the wrong time.
+  """
+  @spec quote_conversion(String.t(), String.t(), Decimal.t(), keyword()) ::
+          {:ok, Conversion.t()} | {:error, term()} | {:refused, term()}
+  def quote_conversion(from, to, amount, opts) do
+    credentials = Keyword.get(opts, :credentials, %{})
+
+    with {:ok, symbol, side} <- instant_pair(from, to, opts) do
+      params = %{
+        "symbol" => symbol,
+        "side" => side,
+        "totalSpend" => to_string(amount)
+      }
+
+      with {:ok, body, headers} <- post("/v1/instant/quote", params, credentials, opts) do
+        to_conversion(body, from, to, :quoted, headers)
+      end
+    end
+  end
+
+  @doc """
+  Commits a quote by its `quoteId`, moving the assets.
+
+  `/v1/instant/execute`. **A quote past its window does not fill at the quoted rate** —
+  see `Core.Types.Conversion`, whose `expires_at` exists for exactly this. Ask
+  `Conversion.expired?/2` before committing; the venue is still the authority on whether
+  a commit succeeds.
+  """
+  @spec commit_conversion(String.t(), keyword()) ::
+          {:ok, Conversion.t()} | {:error, term()} | {:refused, term()}
+  def commit_conversion(id, opts) do
+    credentials = Keyword.get(opts, :credentials, %{})
+
+    with {:ok, params} <- execute_params(id, opts),
+         {:ok, body, headers} <- post("/v1/instant/execute", params, credentials, opts) do
+      to_conversion(body, nil, nil, :settled, headers)
+    end
+  end
+
+  # The venue needs the same symbol, side and spend it quoted against, alongside the id —
+  # `/v1/instant/execute` does not take the quote id alone. A caller holding the
+  # `Conversion` this package returned has all of them, so they come from `opts` and a
+  # missing one is an error rather than a value invented here.
+  defp execute_params(id, opts) do
+    required = [:symbol, :side, :amount, :price]
+
+    case Enum.reject(required, &Keyword.has_key?(opts, &1)) do
+      [] ->
+        {:ok,
+         %{
+           "quoteId" => id,
+           "symbol" => SymbolFormat.to_exchange_symbol(Keyword.fetch!(opts, :symbol)),
+           "side" => opts |> Keyword.fetch!(:side) |> to_string(),
+           "quantity" => to_string(Keyword.fetch!(opts, :amount)),
+           "price" => to_string(Keyword.fetch!(opts, :price)),
+           "fee" => to_string(Keyword.get(opts, :fee, "0"))
+         }}
+
+      missing ->
+        {:error, {:missing_option, missing}}
+    end
+  end
+
+  defp instant_pair(from, to, opts) do
+    case {Keyword.get(opts, :symbol), Keyword.get(opts, :side)} do
+      {nil, nil} ->
+        derive_instant_pair(from, to)
+
+      {symbol, side} when is_binary(symbol) and side in [:buy, :sell] ->
+        {:ok, SymbolFormat.to_exchange_symbol(symbol), to_string(side)}
+
+      _partial ->
+        {:error, {:missing_option, [:symbol, :side]}}
+    end
+  end
+
+  defp derive_instant_pair(from, to) do
+    quotes = SymbolFormat.quotes()
+    from_quote? = String.upcase(from) in quotes
+    to_quote? = String.upcase(to) in quotes
+
+    cond do
+      from_quote? and not to_quote? ->
+        {:ok, SymbolFormat.to_exchange_symbol("#{to}-#{from}"), "buy"}
+
+      to_quote? and not from_quote? ->
+        {:ok, SymbolFormat.to_exchange_symbol("#{from}-#{to}"), "sell"}
+
+      true ->
+        # Both or neither. This venue quotes in crypto too, so `USD -> BTC` lands here:
+        # both are quote currencies and only the catalogue says which pair exists. Picking
+        # one spends the wrong asset — a real loss, not a wrong-looking number.
+        {:error, {:ambiguous_conversion, from, to}}
+    end
+  end
+
+  # The venue's own window, anchored to the venue's own clock. `maxAgeMs` measured from the
+  # local clock would expire at the wrong moment on any client whose time has drifted, and
+  # a conversion committed a second late fills at a rate the caller was never shown.
+  defp to_conversion(%{} = body, from, to, status, headers) do
+    {:ok,
+     %Conversion{
+       id: body |> Map.get("quoteId") |> to_string_or_nil(),
+       status: status,
+       from_asset: from || Map.get(body, "totalSpendCurrency"),
+       to_asset: to || Map.get(body, "quantityCurrency"),
+       from_amount: decimal(Map.get(body, "totalSpend")),
+       to_amount: decimal(Map.get(body, "quantity")),
+       rate: decimal(Map.get(body, "price")),
+       fee: decimal(Map.get(body, "fee")),
+       expires_at: expires_at(Map.get(body, "maxAgeMs"), headers),
+       venue_time: venue_date(headers),
+       provider: :gemini
+     }}
+  end
+
+  defp to_conversion(_body, _from, _to, _status, _headers),
+    do: {:error, :unexpected_response_shape}
+
+  defp expires_at(nil, _headers), do: nil
+
+  defp expires_at(max_age_ms, headers) when is_integer(max_age_ms) do
+    case venue_date(headers) do
+      nil -> nil
+      at -> DateTime.add(at, max_age_ms, :millisecond)
+    end
+  end
+
+  defp expires_at(_other, _headers), do: nil
+
+  defp to_string_or_nil(nil), do: nil
+  defp to_string_or_nil(value), do: to_string(value)
+
+  # `venue_time/1` returns a result tuple because its callers need to fail on a missing
+  # date. Here a missing date costs the expiry window and nothing else, so it degrades to
+  # `nil` — which `Conversion.expired?/2` reports as *unknown*, not as "still valid".
+  defp venue_date(headers) do
+    case venue_time(headers) do
+      {:ok, at} -> at
+      _no_date -> nil
+    end
+  end
+
+  @doc """
+  Wraps or unwraps in one call — the venue's `/v1/wrap/{symbol}`.
+
+  **This is `convert/4`'s one-step form and not the Instant pair.** There is no quote to
+  accept: the venue executes at its own price and reports the rate in the result. A caller
+  that must see a price first uses `quote_conversion/4` instead.
+
+  The direction comes from the two assets, exactly as it does for Instant, and it refuses
+  the same way when neither orientation is determinable — pass `opts[:symbol]` and
+  `opts[:side]` to say which.
+
+  Returns a `Conversion` already `:settled`. It has happened.
+  """
+  @spec convert(String.t(), String.t(), Decimal.t(), keyword()) ::
+          {:ok, Conversion.t()} | {:error, term()} | {:refused, term()}
+  def convert(from, to, amount, opts) do
+    credentials = Keyword.get(opts, :credentials, %{})
+
+    with {:ok, symbol, side} <- instant_pair(from, to, opts) do
+      params = %{"amount" => to_string(amount), "side" => side}
+
+      with {:ok, body, headers} <- post("/v1/wrap/#{symbol}", params, credentials, opts) do
+        to_conversion(body, from, to, :settled, headers)
+      end
+    end
+  end
+
+  @doc """
+  The account's own traded volume, as the venue aggregates it — `/v1/tradevolume`.
+
+  One row per symbol per day, with the maker and taker breakdown the venue's fee tiers are
+  computed from. **Not `get_trade_history/2` summed**: this venue requires a symbol on every
+  fills request, so reproducing this means one request per symbol per period, and the answer
+  would still be this package's arithmetic against the venue's ledger.
+
+  Rows come back as the venue sends them. The fields differ enough between venues that a
+  normalised struct would be mostly `nil`, and a caller reading `buy_maker_notional` wants
+  the venue's number under the venue's name.
+  """
+  @spec get_trade_volume(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_trade_volume(credentials, opts) do
+    with {:ok, rows, _headers} <- post("/v1/tradevolume", %{}, credentials, opts) do
+      # The venue nests one list per symbol inside the outer list.
+      {:ok, rows |> List.wrap() |> List.flatten()}
+    end
+  end
 
   # --- shared helpers -----------------------------------------------------
 
