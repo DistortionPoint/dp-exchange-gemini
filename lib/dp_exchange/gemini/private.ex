@@ -191,11 +191,29 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  @doc "Every order currently resting on the book for this account."
+  @doc """
+  Orders for this account — resting by default, closed with `history: true`.
+
+  **Two endpoints, not one with a filter.** `/v1/orders` returns what is still on the book;
+  `/v1/orders/history` returns what is not. A caller asking for "orders" without saying
+  which gets the resting ones, the set that can still change.
+
+  History accepts `symbol:` and `limit:` (the venue's `limit_orders`, default 50, max 500)
+  and a `since:` `DateTime`. The venue's own default applies where the caller gives none —
+  this does not substitute one of its own, because a page size chosen here would silently
+  become the caller's answer.
+  """
   @spec get_orders(map(), keyword()) ::
           {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
-    with {:ok, rows, _headers} <- post("/v1/orders", %{}, credentials, opts) do
+    {path, params} =
+      if Keyword.get(opts, :history, false) do
+        {"/v1/orders/history", history_params(opts)}
+      else
+        {"/v1/orders", %{}}
+      end
+
+    with {:ok, rows, _headers} <- post(path, params, credentials, opts) do
       rows
       |> List.wrap()
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
@@ -210,6 +228,74 @@ defmodule DpExchange.Gemini.Private do
       end
     end
   end
+
+  defp history_params(opts) do
+    %{}
+    |> put_present("symbol", symbol_param(Keyword.get(opts, :symbol)))
+    |> put_present("limit_orders", Keyword.get(opts, :limit))
+    |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
+  end
+
+  defp symbol_param(nil), do: nil
+  defp symbol_param(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
+
+  # The venue's own unit. Milliseconds, because that is what its examples show and what its
+  # own responses carry in `timestampms`.
+  defp timestamp_param(nil), do: nil
+  defp timestamp_param(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
+  defp timestamp_param(other), do: other
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
+
+  @doc """
+  Cancels open orders in bulk, at the scope the caller states.
+
+  Gemini publishes both scopes as separate endpoints:
+
+      :session  ->  /v1/order/cancel/session
+      :account  ->  /v1/order/cancel/all
+
+  **`opts[:scope]` is required.** The account scope reaches orders no API key placed —
+  including ones a person entered through the web interface, which the venue says
+  explicitly — and picking it for a caller who meant the session would cancel work nobody
+  asked about. Gemini's own documentation recommends the session scope; that is guidance
+  for the caller, not licence to choose here.
+
+  Returns the venue's own two lists. **A non-empty `rejected` is not a failure of this
+  call** — the venue answered, and some of those orders were already gone. Reporting an
+  error would tell a caller nothing was cancelled when most of it was.
+  """
+  @spec cancel_all_orders(map(), keyword()) ::
+          {:ok, %{cancelled: [String.t()], rejected: [String.t()]}}
+          | {:error, term()}
+          | {:refused, term()}
+  def cancel_all_orders(credentials, opts) do
+    with {:ok, path} <- cancel_scope(Keyword.get(opts, :scope)),
+         {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
+      cancel_all_result(body)
+    end
+  end
+
+  defp cancel_scope(:session), do: {:ok, "/v1/order/cancel/session"}
+  defp cancel_scope(:account), do: {:ok, "/v1/order/cancel/all"}
+  defp cancel_scope(nil), do: {:error, :scope_required}
+  defp cancel_scope(other), do: {:error, {:unsupported_scope, other}}
+
+  defp cancel_all_result(%{"details" => details}) when is_map(details) do
+    {:ok,
+     %{
+       cancelled: ids(details["cancelledOrders"]),
+       rejected: ids(details["cancelRejects"])
+     }}
+  end
+
+  defp cancel_all_result(_body), do: {:error, :unexpected_response_shape}
+
+  # The venue sends integers; every other order id in this package is a string, and a
+  # caller holding both should not have to know which call produced which.
+  defp ids(list) when is_list(list), do: Enum.map(list, &to_string/1)
+  defp ids(_absent), do: []
 
   @doc """
   Past fills for a symbol.

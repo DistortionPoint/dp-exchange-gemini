@@ -157,11 +157,26 @@ defmodule DpExchange.Gemini do
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},
-    # Neither exists on this venue. `preview_order/3` has no endpoint at all;
-    # `replace_order/4` means a caller cancels and re-places, which is NOT equivalent —
-    # it opens a window in which no order is live.
+    # **`replace_order/4` has no endpoint here — checked against the venue's published
+    # specification on 2026-09-01, not assumed.** A caller cancels and re-places, which is
+    # NOT equivalent: it opens a window in which no order is live.
+    #
+    # **`preview_order/3` is narrower than "no endpoint at all", which this said before.**
+    # Gemini publishes `POST /v1/margin/order/preview` — a *margin impact* preview, giving
+    # pre- and post-order risk statistics for a hypothetical spot order. That is not what
+    # `preview_order/3` asks, which is what the order would cost, and answering the cost
+    # question with margin statistics is precisely the nearby substitute §0 refuses. It is
+    # a real endpoint with a real capability and it is scheduled on its own (Phase 11 of
+    # the coverage plan), not folded into this one.
+    #
+    # `preview_replace/4` follows `replace_order/4`: there is nothing to preview when
+    # there is nothing to amend.
     {:preview_order, 3},
+    {:preview_replace, 4},
     {:replace_order, 4},
+    # **The venue carries no positions to close.** Gemini's perpetuals surface is separate
+    # and this package does not reach it; on spot there is no position, only a balance.
+    {:close_position, 3},
     # 346 symbols, and the venue offers no bulk detail endpoint — one request per symbol
     # is not a listing, it is a rate-limit incident. `get_symbols/1` gives the catalogue
     # and `quantization/1` gives one symbol's detail on demand.
@@ -334,8 +349,23 @@ defmodule DpExchange.Gemini do
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
+  def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
   def cancel_order(credentials, order_id, opts),
     do: Private.cancel_order(credentials, order_id, with_limiter(opts))
+
+  @doc """
+  Cancels open orders in bulk. `opts[:scope]` is required — `:session` or `:account`.
+
+  See `DpExchange.Gemini.Private.cancel_all_orders/2`, including why there is no default.
+  """
+  @impl true
+  def cancel_all_orders(credentials, opts),
+    do: Private.cancel_all_orders(credentials, with_limiter(opts))
 
   @impl true
   def get_order(credentials, order_id, opts),

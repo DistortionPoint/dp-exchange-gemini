@@ -511,4 +511,184 @@ defmodule DpExchange.Gemini.PrivateTest do
                Private.get_balances(@credentials, auth_scheme: :oauth, retry_attempts: 0)
     end
   end
+
+  describe "bulk cancel — the scope is the caller's to state" do
+    @cancel_all %{
+      "result" => "ok",
+      "details" => %{"cancelledOrders" => [330_429_106, 330_429_079], "cancelRejects" => []}
+    }
+
+    test "no scope is an error, and nothing is sent" do
+      # The account scope reaches orders no API key placed — the venue says so explicitly,
+      # including ones a person entered at the web interface. Choosing for a caller who
+      # meant the session would cancel work nobody asked about.
+      exploding = fn _conn -> raise "must not bulk-cancel without a scope" end
+
+      assert {:error, :scope_required} =
+               Private.cancel_all_orders(@credentials, plug: exploding, retry_attempts: 0)
+    end
+
+    test "a scope this venue does not have is an error, not the nearest one" do
+      exploding = fn _conn -> raise "must not bulk-cancel on an unknown scope" end
+
+      assert {:error, {:unsupported_scope, :everything}} =
+               Private.cancel_all_orders(@credentials,
+                 scope: :everything,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "the two scopes are two different endpoints" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(@cancel_all)
+      end
+
+      assert {:ok, _session} =
+               Private.cancel_all_orders(@credentials,
+                 scope: :session,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, session_path}
+      assert session_path == "/v1/order/cancel/session"
+
+      assert {:ok, _account} =
+               Private.cancel_all_orders(@credentials,
+                 scope: :account,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, account_path}
+      assert account_path == "/v1/order/cancel/all"
+    end
+
+    test "the venue's ids come back as strings, like every other order id here" do
+      assert {:ok, %{cancelled: cancelled, rejected: []}} =
+               Private.cancel_all_orders(@credentials,
+                 scope: :session,
+                 plug: responding(@cancel_all),
+                 retry_attempts: 0
+               )
+
+      assert cancelled == ["330429106", "330429079"]
+    end
+
+    test "a rejected order is reported, not turned into a failed call" do
+      # The venue answered and some orders were already gone. An error here would tell a
+      # caller nothing was cancelled when most of it was.
+      body = %{
+        "result" => "ok",
+        "details" => %{"cancelledOrders" => [1], "cancelRejects" => [2, 3]}
+      }
+
+      assert {:ok, %{cancelled: ["1"], rejected: ["2", "3"]}} =
+               Private.cancel_all_orders(@credentials,
+                 scope: :account,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a body with no details is unreadable, not an empty cancellation" do
+      assert {:error, :unexpected_response_shape} =
+               Private.cancel_all_orders(@credentials,
+                 scope: :session,
+                 plug: responding(%{"result" => "ok"}),
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "order history is a different endpoint, not a filter" do
+    test "without history: the resting orders come from /v1/orders" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json([])
+      end
+
+      assert {:ok, []} = Private.get_orders(@credentials, plug: plug, retry_attempts: 0)
+      assert_receive {:path, "/v1/orders"}
+    end
+
+    test "with history: the closed ones come from /v1/orders/history" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json([])
+      end
+
+      assert {:ok, []} =
+               Private.get_orders(@credentials, history: true, plug: plug, retry_attempts: 0)
+
+      assert_receive {:path, "/v1/orders/history"}
+    end
+
+    test "history filters are sent to the venue in the venue's own names" do
+      me = self()
+
+      assert {:ok, _orders} =
+               Private.get_orders(@credentials,
+                 history: true,
+                 symbol: "BTC-USD",
+                 limit: 100,
+                 since: ~U[2026-08-28 17:00:01Z],
+                 plug: capturing([@order], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      assert payload["symbol"] == "btcusd"
+      assert payload["limit_orders"] == 100
+      # Milliseconds, which is the unit the venue's own examples and responses use.
+      assert payload["timestamp"] == 1_787_936_401_000
+    end
+
+    test "no filters means no filters — the venue's own defaults apply" do
+      # A page size chosen here would silently become the caller's answer.
+      me = self()
+
+      assert {:ok, _orders} =
+               Private.get_orders(@credentials,
+                 history: true,
+                 plug: capturing([@order], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      refute Map.has_key?(payload, "limit_orders")
+      refute Map.has_key?(payload, "symbol")
+      refute Map.has_key?(payload, "timestamp")
+    end
+
+    test "history rows decode with the same reader the resting ones use" do
+      assert {:ok, [order]} =
+               Private.get_orders(@credentials,
+                 history: true,
+                 plug: responding([@order]),
+                 retry_attempts: 0
+               )
+
+      assert %Order{} = order
+      assert order.id == "1234"
+      assert order.symbol == "BTC-USD"
+    end
+  end
 end

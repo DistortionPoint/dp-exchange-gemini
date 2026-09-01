@@ -43,7 +43,7 @@ defmodule DpExchange.Gemini.Rest do
   """
 
   alias DpExchange.Core.{HttpClient, Timeframe}
-  alias DpExchange.Core.Types.{OrderBook, Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook}
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
   # Canonical width => the literal Gemini accepts. Measured 2026-08-28: the venue names
@@ -183,7 +183,7 @@ defmodule DpExchange.Gemini.Rest do
        rows
        |> Enum.map(&row_to_candle(&1, symbol, timeframe))
        |> Enum.filter(&within?(&1, range))
-       |> Enum.sort_by(& &1.timestamp, DateTime)}
+       |> Enum.sort_by(& &1.opened_at, DateTime)}
     end
   end
 
@@ -452,10 +452,10 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp row_to_candle([time_ms, open, high, low, close, volume], symbol, timeframe) do
-    %{
+    %Candle{
       symbol: symbol,
       timeframe: timeframe,
-      timestamp: DateTime.from_unix!(to_integer(time_ms), :millisecond),
+      opened_at: DateTime.from_unix!(to_integer(time_ms), :millisecond),
       open: decimal(open),
       high: decimal(high),
       low: decimal(low),
@@ -471,10 +471,10 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp after_start?(_candle, nil), do: true
-  defp after_start?(candle, start), do: DateTime.compare(candle.timestamp, start) != :lt
+  defp after_start?(candle, start), do: DateTime.compare(candle.opened_at, start) != :lt
 
   defp before_end?(_candle, nil), do: true
-  defp before_end?(candle, finish), do: DateTime.compare(candle.timestamp, finish) != :gt
+  defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) != :gt
 
   # `/v1/pubticker` reports volume keyed by currency code, so the base asset's key has to
   # be recovered from the symbol rather than assumed to be first.

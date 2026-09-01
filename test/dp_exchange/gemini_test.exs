@@ -127,6 +127,7 @@ defmodule DpExchange.GeminiTest do
   defp resolve_arg(:one), do: Decimal.new("1")
   defp resolve_arg(other), do: other
 
+  defp generic_args(4), do: [resolve_arg(:credentials), "id", %{}, []]
   defp generic_args(3), do: [resolve_arg(:credentials), "id", []]
   defp generic_args(2), do: [resolve_arg(:credentials), []]
   defp generic_args(1), do: [[]]

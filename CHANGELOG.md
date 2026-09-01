@@ -20,6 +20,44 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+- **`cancel_all_orders/2`, covering both of the venue's bulk cancels.**
+
+      :session  ->  POST /v1/order/cancel/session
+      :account  ->  POST /v1/order/cancel/all
+
+  **`opts[:scope]` is required and there is no default.** The account scope reaches orders
+  no API key placed — the venue says so explicitly, including ones a person entered through
+  its web interface — so choosing it for a caller who meant the session would cancel work
+  nobody asked about, and choosing the session for a caller who meant the account would
+  leave orders running. Gemini's own documentation recommends the session scope; that is
+  guidance for the caller, not licence to pick here.
+
+  Returns `%{cancelled: [id], rejected: [id]}`, ids as strings like every other order id in
+  this package. **A non-empty `rejected` is not a failed call** — the venue answered, and
+  some of those orders were already gone.
+
+- **`get_orders/2` reaches `/v1/orders/history`.** Resting and closed orders are two
+  endpoints, not one with a filter, and only the resting half was implemented. `history:
+  true` asks for the other; a caller who does not say gets the resting ones, the set that
+  can still change. `symbol:`, `limit:` and `since:` are passed through in the venue's own
+  names, and **no default page size is substituted** — one chosen here would silently
+  become the caller's answer.
+
+### Fixed
+- **BREAKING: `get_historical_prices/4` returns `Core.Types.Candle` with `:opened_at`.** It
+  returned bare maps keyed on `:timestamp`, a name that does not say which end of the
+  interval it is. A caller reading it as the close is off by exactly one interval, in a
+  value that looks entirely reasonable. The fake carried the same shape.
+
+- **The `@unsupported` note claimed `preview_order/3` "has no endpoint at all".** Gemini
+  publishes `POST /v1/margin/order/preview` — a *margin impact* preview returning pre- and
+  post-order risk statistics. That is not what `preview_order/3` asks, which is what the
+  order would cost, so it is still not implemented as one; answering the cost question with
+  margin statistics is exactly the nearby substitute this family refuses. But the endpoint
+  is real, it is a real capability, and the note now says so instead of denying it.
+
+
 ### Changed
 - **`get_transfers/2` calls `/v2/transfers`** (D6). The v1 path is absent from Gemini's
   published OpenAPI document, and v2's own description states *"The v1 transfers endpoint is

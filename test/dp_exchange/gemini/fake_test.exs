@@ -1,8 +1,17 @@
 defmodule DpExchange.Gemini.FakeTest do
   use ExUnit.Case, async: true
 
+  alias DpExchange.Core.Types
   alias DpExchange.Core.Types.{OrderBook, Quote}
   alias DpExchange.Gemini.Fake
+
+  @credentials %{api_key: "k", api_secret: "s"}
+
+  # Inside the visibility window the real endpoint enforces, so a candle assertion is not
+  # accidentally testing the window check.
+  defp within_window do
+    [start: DateTime.add(DateTime.utc_now(), -60 * 60, :second), end: DateTime.utc_now()]
+  end
 
   describe "less capable is allowed; differently capable is not" do
     test "it declares the REAL venue's capabilities" do
@@ -114,8 +123,6 @@ defmodule DpExchange.Gemini.FakeTest do
   end
 
   describe "order lifecycle in memory" do
-    @credentials %{api_key: "k", api_secret: "s"}
-
     test "get_order/3 answers with the id it was asked about" do
       assert {:ok, order} = Fake.get_order(@credentials, "abc-123", [])
       assert order.id == "abc-123"
@@ -147,6 +154,76 @@ defmodule DpExchange.Gemini.FakeTest do
       assert order.symbol == "ETH-USD"
       assert order.side == :sell
       assert Decimal.equal?(order.price, Decimal.new("3000"))
+    end
+  end
+
+  describe "it refuses exactly what the real venue refuses" do
+    test "every endpoint declared :unsupported returns the atom" do
+      # This is the sweep. Without it the fake can drift from the declaration one callback
+      # at a time, and each drift is a consumer's suite passing on a call that cannot be
+      # made — which is what a fake is for preventing.
+      unsupported =
+        for {{name, arity}, :unsupported} <- DpExchange.Gemini.capabilities().endpoints,
+            name not in [:child_spec, :start_link],
+            do: {name, arity}
+
+      refute unsupported == []
+
+      for {name, arity} <- unsupported do
+        assert apply(Fake, name, fake_args(arity)) == {:error, :not_supported},
+               "Fake.#{name}/#{arity} does not refuse, and the declaration says it should"
+      end
+    end
+  end
+
+  defp fake_args(1), do: [[]]
+  defp fake_args(2), do: [@credentials, []]
+  defp fake_args(3), do: [@credentials, "id", []]
+  defp fake_args(4), do: [@credentials, "id", %{}, []]
+  defp fake_args(5), do: [@credentials, "id", "network", Decimal.new("1"), []]
+
+  describe "candles are bars, not quotes" do
+    test "a candle carries all four prices" do
+      assert {:ok, [bar]} = Fake.get_historical_prices("BTC-USD", "1m", within_window())
+
+      assert %Types.Candle{} = bar
+      assert bar.timeframe == "1m"
+      assert Types.Candle.coherent?(bar)
+      assert bar.provider == :gemini
+    end
+  end
+
+  describe "bulk cancel" do
+    test "no scope is an error, as it is on the real venue" do
+      assert {:error, :scope_required} = Fake.cancel_all_orders(@credentials, [])
+    end
+
+    test "a scope the venue does not have is an error" do
+      assert {:error, {:unsupported_scope, :everything}} =
+               Fake.cancel_all_orders(@credentials, scope: :everything)
+    end
+
+    test "either scope answers with the venue's two lists" do
+      assert {:ok, %{cancelled: [_id], rejected: []}} =
+               Fake.cancel_all_orders(@credentials, scope: :session)
+
+      assert {:ok, %{cancelled: [_id2], rejected: []}} =
+               Fake.cancel_all_orders(@credentials, scope: :account)
+    end
+
+    test "it refuses without credentials, as every account call does" do
+      assert {:refused, :missing_credentials} = Fake.cancel_all_orders(%{}, scope: :session)
+    end
+  end
+
+  describe "orders: resting and closed are different questions" do
+    test "asking without saying gets the resting ones" do
+      assert {:ok, []} = Fake.get_orders(@credentials, [])
+    end
+
+    test "asking for history gets closed ones" do
+      assert {:ok, [order]} = Fake.get_orders(@credentials, history: true)
+      assert order.status == :filled
     end
   end
 end

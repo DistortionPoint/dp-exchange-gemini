@@ -267,6 +267,12 @@ defmodule DpExchange.Gemini.Fake do
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
+  def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
   def cancel_order(credentials, order_id, _opts \\ []) do
     with :ok <- authenticated(credentials) do
       {:ok, %{order(%{}) | id: order_id, status: :cancelled}}
@@ -281,8 +287,32 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def get_orders(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials), do: {:ok, []}
+  def get_orders(credentials, opts \\ []) do
+    # Open and historical are two endpoints on this venue, not one with a filter, and the
+    # fake says so rather than answering the same empty list to both.
+    with :ok <- authenticated(credentials) do
+      if Keyword.get(opts, :history, false),
+        do: {:ok, [%{order(%{}) | status: :filled}]},
+        else: {:ok, []}
+    end
+  end
+
+  @impl true
+  def cancel_all_orders(credentials, opts \\ []) do
+    # The fake enforces the contract's rule, so a consumer's suite cannot go green on a
+    # bulk cancel that never said which orders it meant.
+    with :ok <- authenticated(credentials) do
+      case Keyword.get(opts, :scope) do
+        scope when scope in [:session, :account] ->
+          {:ok, %{cancelled: ["fake-gemini-order-1"], rejected: []}}
+
+        nil ->
+          {:error, :scope_required}
+
+        other ->
+          {:error, {:unsupported_scope, other}}
+      end
+    end
   end
 
   @impl true
@@ -394,10 +424,10 @@ defmodule DpExchange.Gemini.Fake do
   defp candle(symbol, timeframe) do
     price = Decimal.new(@price[symbol])
 
-    %{
+    %Types.Candle{
       symbol: symbol,
       timeframe: timeframe,
-      timestamp: @at,
+      opened_at: @at,
       open: price,
       high: price,
       low: price,

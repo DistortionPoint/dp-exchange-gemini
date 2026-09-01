@@ -199,14 +199,14 @@ defmodule DpExchange.Gemini.RestTest do
                  retry_attempts: 0
                )
 
-      assert candle.timestamp == DateTime.from_unix!(newest, :millisecond)
+      assert candle.opened_at == DateTime.from_unix!(newest, :millisecond)
     end
 
     test "candles come back oldest-first with Decimal numerics" do
       assert {:ok, [first, second]} =
                Rest.get_historical_prices("BTC-USD", "1m", [], plug: responding(@candles))
 
-      assert DateTime.compare(first.timestamp, second.timestamp) == :lt
+      assert DateTime.compare(first.opened_at, second.opened_at) == :lt
       assert Decimal.equal?(first.open, Decimal.from_float(77_950.54))
       assert first.provider == :gemini
     end

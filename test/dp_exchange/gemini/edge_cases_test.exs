@@ -145,7 +145,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                  retry_attempts: 0
                )
 
-      assert candle.timestamp == DateTime.from_unix!(1_787_935_740_000, :millisecond)
+      assert candle.opened_at == DateTime.from_unix!(1_787_935_740_000, :millisecond)
     end
 
     test "a 5xx is an error the caller may retry" do
@@ -545,7 +545,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                  retry_attempts: 0
                )
 
-      assert candle.timestamp == DateTime.from_unix!(1_787_935_680_000, :millisecond)
+      assert candle.opened_at == DateTime.from_unix!(1_787_935_680_000, :millisecond)
     end
 
     test "a market overview with an integer price still yields a Decimal" do
