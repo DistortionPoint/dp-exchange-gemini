@@ -1088,11 +1088,38 @@ defmodule DpExchange.Gemini.Fake do
   def get_screener(_name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def create_account(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def create_account(opts \\ []) do
+    case Keyword.get(opts, :name) do
+      name when is_binary(name) ->
+        with :ok <- authenticated(fake_credentials(opts)) do
+          # The venue answers with a kebab-cased shortname, not the name that was sent —
+          # a fake that echoed the name would let a consumer address the wrong thing.
+          {:ok,
+           %{
+             "account" => name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-"),
+             "type" => Keyword.get(opts, :type, "exchange")
+           }}
+        end
+
+      _missing ->
+        {:error, :name_required}
+    end
+  end
 
   @impl true
-  def rename_account(_id, _name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def rename_account(id, name, opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)) do
+      # Only the fields that changed come back, as the venue documents.
+      {:ok, %{"name" => name, "account" => id}}
+    end
+  end
 
   @impl true
-  def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_roles(opts \\ []) do
+    with :ok <- authenticated(fake_credentials(opts)) do
+      # Trader and Fund Manager combined, and Auditor false — the combination the venue
+      # allows. One role field would not be able to say this.
+      {:ok, %{"isAuditor" => false, "isFundManager" => true, "isTrader" => true}}
+    end
+  end
 end

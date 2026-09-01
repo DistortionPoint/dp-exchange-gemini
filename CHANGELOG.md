@@ -22,6 +22,41 @@ acceptable changelog line.
 
 ### Added
 
+- **Account administration and the OAuth token lifecycle** — `create_account/1`,
+  `rename_account/3`, `list_accounts/1`, `get_roles/1`, `refresh_access_token/3` and
+  `revoke_access_token/1`.
+
+  **The name you send is not the name you address by.** `/v1/account/create` takes a display
+  name and answers with a kebab-cased *shortname*, and that shortname is what every other
+  endpoint's `account` parameter takes. A caller that kept what it sent would address the
+  wrong subaccount, or nothing.
+
+  **`rename_account` touches two different things.** `opts[:name]` is the display name;
+  `opts[:shortname]` is the string other endpoints address by, and changing it changes how
+  the account is reached. Neither given is `{:error, :nothing_to_rename}` rather than a call
+  that changes nothing and reports success.
+
+  **`list_accounts/1` caps at 500 and does not paginate** — the venue's `limit_accounts` is
+  both maximum and default, and a larger group comes back truncated with nothing to say it
+  was. There is no cursor to follow, so it is stated rather than worked around.
+
+  **`get_roles/1` answers with three booleans, not one role**, because `Fund Manager` and
+  `Trader` combine and `Auditor` combines with nothing.
+
+  **`refresh_access_token/3` is credential use, not consent.** The browser redirect that
+  obtains the first code belongs to the host; refreshing a token the host already holds is
+  the same category as Schwab's `Auth.refresh/2`. It posts a **form** to
+  `exchange.gemini.com/auth/token` — a different host from every other endpoint, and the same
+  URL the host's initial exchange posts to, separated only by `grant_type`. That is the
+  concrete case for why the package/host split cannot be read off a path.
+
+  **The response rotates the refresh token**: a new one comes back and the old stops working,
+  so a caller that stores only the access token has a session that ends at the next refresh.
+
+  `revoke_access_token/1` **requires an OAuth token** and refuses an API key — an
+  API-key-signed call there would revoke nothing and come back shaped like success.
+
+
 - **Clearing, all eight endpoints**: `create_clearing_order/2`,
   `create_broker_clearing_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`,
   `confirm_clearing_order/3`, `list_clearing_orders/1`, `list_clearing_brokers/1` and

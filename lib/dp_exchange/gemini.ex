@@ -139,9 +139,6 @@ defmodule DpExchange.Gemini do
     {:get_filings, 2},
     {:get_news, 1},
     {:get_screener, 2},
-    {:create_account, 1},
-    {:rename_account, 3},
-    {:get_roles, 1},
     # **`replace_order/4` has no endpoint here — checked against the venue's published
     # specification on 2026-09-01, not assumed.** A caller cancels and re-places, which is
     # NOT equivalent: it opens a window in which no order is live.
@@ -981,12 +978,76 @@ defmodule DpExchange.Gemini do
   @impl true
   def get_screener(_name, _opts \\ []), do: Venue.not_supported()
 
-  @impl true
-  def create_account(_opts \\ []), do: Venue.not_supported()
+  @doc """
+  Creates a subaccount. `opts[:name]` is required.
 
+  See `DpExchange.Gemini.Private.create_account/3`. **The venue answers with a kebab-cased
+  shortname, and that is what every other endpoint's `account` parameter takes** — not the
+  name that was sent.
+  """
   @impl true
-  def rename_account(_id, _name, _opts \\ []), do: Venue.not_supported()
+  def create_account(opts \\ []) do
+    case Keyword.get(opts, :name) do
+      name when is_binary(name) ->
+        Private.create_account(name, credentials(opts), with_limiter(opts))
 
+      _missing ->
+        {:error, :name_required}
+    end
+  end
+
+  @doc """
+  Renames a subaccount.
+
+  **`id` is the subaccount's shortname and `name` is its new display name.** To change the
+  shortname itself — which changes how the account is addressed — pass
+  `opts[:shortname]`; see `DpExchange.Gemini.Private.rename_account/2`.
+  """
   @impl true
-  def get_roles(_opts \\ []), do: Venue.not_supported()
+  def rename_account(id, name, opts \\ []) do
+    Private.rename_account(
+      credentials(opts),
+      opts |> with_limiter() |> Keyword.merge(account: id, name: name)
+    )
+  end
+
+  @doc """
+  Every subaccount in the group.
+
+  Venue-specific. See `DpExchange.Gemini.Private.list_accounts/2` — the venue caps this at
+  500 and does not paginate.
+  """
+  @spec list_accounts(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_accounts(opts \\ []),
+    do: Private.list_accounts(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The roles this API key carries.
+
+  See `DpExchange.Gemini.Private.get_roles/2`. Three booleans rather than one role, because
+  `Fund Manager` and `Trader` combine and `Auditor` does not combine with anything.
+  """
+  @impl true
+  def get_roles(opts \\ []), do: Private.get_roles(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Exchanges a refresh token for a new access token. **Credential use, not consent.**
+
+  Venue-specific. See `DpExchange.Gemini.Private.refresh_access_token/3` — a different host
+  from every other endpoint, and **the response carries a new refresh token that replaces
+  the one sent**.
+  """
+  @spec refresh_access_token(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def refresh_access_token(client_id, refresh_token, opts \\ []),
+    do: Private.refresh_access_token(client_id, refresh_token, with_limiter(opts))
+
+  @doc """
+  Revokes an access token. **Only reachable with an OAuth token**, not an API key.
+
+  Venue-specific. See `DpExchange.Gemini.Private.revoke_access_token/2`.
+  """
+  @spec revoke_access_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def revoke_access_token(opts \\ []),
+    do: Private.revoke_access_token(credentials(opts), with_limiter(opts))
 end

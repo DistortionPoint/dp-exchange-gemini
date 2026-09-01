@@ -1913,6 +1913,184 @@ defmodule DpExchange.Gemini.Private do
   defp decimal_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
   defp decimal_string(value), do: to_string(value)
 
+  # --- account administration ---------------------------------------------
+
+  @doc """
+  Creates a subaccount — `POST /v1/account/create`.
+
+  **`name` is a display name and the venue answers with a different string.** It returns
+  `account`, a kebab-cased shortname derived from the name — spaces to hyphens, symbols
+  removed, lower-cased — and **that shortname is what every other endpoint's `account`
+  parameter takes**. A caller that kept the name it sent would address the wrong thing, or
+  nothing.
+
+  `opts[:type]` is `"exchange"` or `"custody"`, and the venue's own default when it is
+  omitted is `exchange`. This package does not send one: choosing between an exchange
+  account and a custody account for a caller who did not is choosing what the account can do.
+
+  Requires the **Administrator** role.
+  """
+  @spec create_account(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_account(name, credentials, opts) when is_binary(name) do
+    params = put_present(%{"name" => name}, "type", Keyword.get(opts, :type))
+
+    with {:ok, body, _headers} <- post("/v1/account/create", params, credentials, opts),
+         do: {:ok, body}
+  end
+
+  @doc """
+  Renames a subaccount — `POST /v1/account/rename`.
+
+  **Two different things can be renamed and they are not the same field.** `opts[:name]` is
+  the display name; `opts[:shortname]` is the kebab-cased `account` string every other
+  endpoint addresses by. Changing the second **changes how the account is addressed**, and a
+  caller with a stored shortname will stop finding it.
+
+  Either or both; neither is `{:error, :nothing_to_rename}` rather than a call that changes
+  nothing and reports success. The venue returns only the fields that changed.
+
+  `opts[:account]` names which subaccount to rename and is required on a master key.
+  """
+  @spec rename_account(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def rename_account(credentials, opts) do
+    params =
+      %{}
+      |> put_present("account", Keyword.get(opts, :account))
+      |> put_present("newName", Keyword.get(opts, :name))
+      |> put_present("newAccount", Keyword.get(opts, :shortname))
+
+    if Map.has_key?(params, "newName") or Map.has_key?(params, "newAccount") do
+      with {:ok, body, _headers} <- post("/v1/account/rename", params, credentials, opts),
+           do: {:ok, body}
+    else
+      {:error, :nothing_to_rename}
+    end
+  end
+
+  @doc """
+  Every subaccount in the group — `POST /v1/account/list`.
+
+  **The venue caps this at 500 and does not paginate.** `limit_accounts` is both the maximum
+  and the default, so a group with more than 500 subaccounts returns a truncated list with
+  nothing to say it was truncated. This package sends no limit unless asked, and states the
+  cap here because there is no cursor to follow.
+
+  Each row's `account` is the kebab-cased shortname other endpoints address by; `name` is
+  the display name. `counterparty_id` is `None` on a custody account — the venue's own
+  string, not `nil`.
+  """
+  @spec list_accounts(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_accounts(credentials, opts) do
+    params =
+      %{}
+      |> put_present("limit_accounts", Keyword.get(opts, :limit))
+      |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
+
+    with {:ok, body, _headers} <- post("/v1/account/list", params, credentials, opts) do
+      {:ok, body |> List.wrap() |> List.flatten()}
+    end
+  end
+
+  @doc """
+  The roles this API key carries — `POST /v1/roles`.
+
+  Returns the venue's own booleans: `isAuditor`, `isFundManager`, `isTrader`. **`Auditor`
+  cannot be combined with the others**, and `Fund Manager` and `Trader` can — which is why
+  three booleans rather than one role.
+
+  This is the call that answers "will the venue let this key do that", and asking it is
+  cheaper than discovering a missing role from a refused withdrawal.
+  """
+  @spec get_roles(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_roles(credentials, opts) do
+    with {:ok, body, _headers} <- post("/v1/roles", %{}, credentials, opts), do: {:ok, body}
+  end
+
+  # --- OAuth token lifecycle ----------------------------------------------
+
+  @doc """
+  Exchanges a refresh token for a new access token —
+  `POST https://exchange.gemini.com/auth/token`.
+
+  **This is credential *use*, not consent.** The browser redirect that obtains the first
+  authorization code belongs to the host and is not here; refreshing a token the host
+  already holds is the same category as Schwab's `Auth.refresh/2`, and a package that could
+  not do it would leave a consumer unable to keep a session alive.
+
+  **A different host from every other endpoint** — `exchange.gemini.com`, not
+  `api.gemini.com` — and a form body rather than Gemini's signed payload. It is the same URL
+  the host's initial code exchange posts to, separated only by `grant_type`, which is why
+  the package/host split cannot be read off a path.
+
+  **The response carries a *new* refresh token and the old one stops working.** A caller
+  that stores the access token and keeps the old refresh token has a session that ends at
+  the next refresh.
+
+  `client_secret` is sent only when given: the venue documents it for confidential clients
+  and says public clients must not send it.
+  """
+  @spec refresh_access_token(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def refresh_access_token(client_id, refresh_token, opts)
+      when is_binary(client_id) and is_binary(refresh_token) do
+    form =
+      %{
+        "client_id" => client_id,
+        "refresh_token" => refresh_token,
+        "grant_type" => "refresh_token"
+      }
+      |> put_present("client_secret", Keyword.get(opts, :client_secret))
+
+    url = Keyword.get(opts, :auth_url, "https://exchange.gemini.com") <> "/auth/token"
+    headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
+
+    case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        {:ok, decode(body)}
+
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+        {:refused, body}
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Revokes an access token — `POST /v1/oauth/revokeByToken`.
+
+  **Only reachable with an OAuth token**, not with an API key: the endpoint revokes the
+  token that authenticates the call. A credential map without `access_token` is refused here
+  rather than sent, because an API-key-signed call would revoke nothing and report success
+  shape.
+
+  Once revoked the token cannot be used again, and neither can any request already in
+  flight that had not reached the venue.
+  """
+  @spec revoke_access_token(map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def revoke_access_token(credentials, opts) do
+    case credentials do
+      %{access_token: token} when is_binary(token) ->
+        with {:ok, body, _headers} <-
+               post(
+                 "/v1/oauth/revokeByToken",
+                 %{},
+                 credentials,
+                 Keyword.put(opts, :auth_scheme, :oauth)
+               ),
+             do: {:ok, body}
+
+      _other ->
+        {:error, :oauth_token_required}
+    end
+  end
+
   # --- clearing -----------------------------------------------------------
 
   @doc """
