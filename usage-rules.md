@@ -268,3 +268,98 @@ want to be politer than required, say so.
 **Gemini publishes no rate-limit headers.** Measured: no `x-ratelimit-*`, no `cb-*`, no
 `retry-after`. `get_rate_limit_status/2` is `:unsupported` rather than returning a
 constant that never moves.
+
+## Perpetuals: a short is a positive size with a side
+
+`get_positions/1` reads `/v1/positions`. **Gemini sends a negative quantity for a short and
+this package will not pass it through**: `:quantity` is the size and `:side` says which way.
+A sign convention is a fact about one venue's JSON, not about the market, and a caller
+handed a raw negative has a position that is exactly backwards while every number in it
+stays plausible.
+
+`notional_value` **keeps** its sign — that one is a value, not a magnitude with a direction
+beside it.
+
+**`liquidation_price` is `nil` here, and that is not safety.** `/v1/positions` publishes
+none; `get_account_margin/1` carries `estimated_liquidation_price` for the account, and that
+is where a caller judging room reads.
+
+**Settled and estimated funding are different facts.** A real response carries `-1.50991`
+beside `-2.10595` — 40% apart — so `get_funding/2` keeps `:amount` and `:estimated_amount`
+separate, and the sign is carried through unchanged because it means direction between longs
+and shorts.
+
+**Mark, index and last trade are three prices.** `get_contract_stats/2` gives the first two;
+`get_price/2` gives the third. A position can be liquidated at a mark the market never
+printed, which is why they are not one field.
+
+## Staking: read the unit before you read the number
+
+Gemini publishes `rate` in **basis points**, `ratePct` as a percentage and `apyPct`
+annualised — three numbers for one position, differing by 100× and by compounding.
+`get_staking_rates/1` returns **percentages only**, both named, and **never derives
+`:apy_pct` from `:rate_pct`**: that needs a compounding frequency the venue did not state.
+
+**A staked position is three amounts.** The real shape is `balance: 10`, `available: 0`,
+`availableForWithdrawal: 10` — redeemable in full, tradable not at all. Read one "available"
+and you will size an order against ten and place it against zero.
+
+**An unstake returns before it completes.** `:amount_remaining` is non-zero for as long as
+the asset is unbonding; treating the return value as settled spends an asset you do not have
+yet.
+
+`provider_id` is **required** on `stake/3` and `unstake/3`. The same asset stakes with
+several providers at different rates, and this package will not pick one for you.
+
+## Clearing is not the order book
+
+A clearing order is one half of a trade agreed with a named counterparty and **does nothing
+until that counterparty confirms**. Read `is_confirmed`, not `status`.
+
+`confirm_clearing_order/3` **re-states every term** — symbol, amount, price, side — and this
+package fills none of them in from the order being confirmed. That is the whole point of the
+check: reading them back from the venue would confirm whatever the venue had.
+
+The broker form names **both** counterparties and `side` belongs to the *source*. Passing the
+two the wrong way round produces a valid order in which each side trades the direction the
+other meant.
+
+## Administration: the name you send is not the name you address by
+
+`create_account/1` takes a display name and the venue answers with a kebab-cased
+**shortname** — and that shortname is what every other endpoint's `account` parameter takes.
+Keep what came back, not what you sent.
+
+`list_accounts/1` **caps at 500 and does not paginate.** A larger group comes back truncated
+with nothing to say it was; there is no cursor to follow.
+
+`get_roles/1` answers with three booleans rather than one role, because `Fund Manager` and
+`Trader` combine and `Auditor` combines with nothing.
+
+## OAuth: refreshing rotates the refresh token
+
+`refresh_access_token/3` posts a **form** to `exchange.gemini.com/auth/token` — a different
+host from every other call here, and the same URL your own initial code exchange posts to,
+separated only by `grant_type`.
+
+**The response carries a new refresh token and the old one stops working.** Store both. A
+caller that keeps only the access token has a session that ends at the next refresh.
+
+`revoke_access_token/1` needs an OAuth token and refuses an API key: an API-key-signed call
+there would revoke nothing and come back shaped like success.
+
+## The spreadsheet reports are bytes
+
+`funding_amount_report/2` and `funding_payment_report_file/1` return the venue's file
+unparsed. This package ships no spreadsheet reader and will not grow one: a parsed cell is a
+number this package chose from a layout the venue can change without notice.
+
+`from` and `to` must be given **together or not at all** — the venue makes each mandatory if
+the other is present, and one alone comes back bounded by `numRows` instead, which is a real
+report over the wrong window.
+
+## Every negative here is audited
+
+`docs/reference/gemini/negative-claims.md` lists each one with the source and date consulted.
+This venue is also where the family learned that **positives go stale too** — a socket URL
+the vendor still published had stopped working, and only a live check said so.

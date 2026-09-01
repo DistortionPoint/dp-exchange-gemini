@@ -20,6 +20,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Every negative this package makes is audited** —
+  `docs/reference/gemini/negative-claims.md`, thirteen claims with the source and date
+  consulted for each. All hold, including the two that are the venue's own words: no market
+  orders ("they provide you with no price protection") and no plain stops.
+
+  **This venue is where the family learned the rule's other half.** Every other package
+  learned to check negatives; Gemini is where a *documented, positive* claim — a socket URL
+  the vendor still published — turned out to be false. A claim about a venue is only as
+  current as the last time someone looked, whichever way it points.
+
+  The audit also records a divergence worth keeping: Gemini's own error table lists
+  `MissingApikeyHeader` at **400**, and the live environment returns **401**
+  `MissingSecurityHeaders` (measured 2026-08-28).
+
+- **`supported_instrument_types` gains `:perp`.** The venue's perpetuals surface was always
+  there; the package's claim of `[:spot]` was a statement about the package that had stopped
+  being true.
+
+- **`usage-rules.md` gains everything this release added** — the sign convention on a short,
+  the three staking numbers and which two survive, clearing's confirm-restates-everything
+  rule, the shortname that is not the name you sent, the refresh token that rotates, and why
+  the spreadsheet reports come back as bytes.
+
+- **`AGENTS.md` gains a pointer** to this package's own `usage-rules.md`.
+
 ### Changed
 
 - **Core dependency moves to `~> 0.1.36`**, and `place_orders/3` is declared **absent with
