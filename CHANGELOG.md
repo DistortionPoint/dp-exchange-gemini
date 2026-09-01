@@ -22,6 +22,40 @@ acceptable changelog line.
 
 ### Added
 
+- **The WebSocket surface: all twenty-two channels, their addresses, and decoders for the
+  market-data frames.** From the vendor's **AsyncAPI document**, read 2026-09-01 — not the
+  rendered Stream Matrix, which shows eleven families and **omits ten of these channels**:
+  the whole `requestForQuote` family, `connection`, both `…Snapshot` channels and the four
+  `…Fast` depth variants.
+
+  **Three rules in that document produce a plausible wrong answer if missed, and each is now
+  guarded by a test.**
+
+  **`m` is "whether the buyer is the maker" — the opposite of the REST tape's `type`.** The
+  same venue reports the trade side two different ways on two transports: `/v1/trades`
+  gives the *taker's* side directly, while `@trade` gives the maker flag. `m: true` means
+  the buyer was resting and the **seller** aggressed. Carrying it through as a buy would
+  invert every trade on the socket while agreeing with the REST field name, which is exactly
+  how such a bug survives review.
+
+  **Timestamps are nanoseconds.** `E` is documented as nanoseconds and the vendor notes the
+  values exceed JavaScript's safe integer range. Read as milliseconds an event lands about
+  fifty thousand years out; read as seconds it still looks like a date, which is worse.
+
+  **`depth` and `depthFast` are differential, and `U..u` is the only way to know none were
+  missed.** The vendor: *"if a frame's `U` skips ahead of the last applied `u`, discard the
+  book and resubscribe to resync."* `depth_gap?/2` is that check, and a frame with no `U` is
+  treated as a gap because continuing would apply it blind. **A quantity of zero deletes the
+  level** rather than setting it to zero, so `depth_changes/1` returns it rather than
+  filtering — filtering would drop the deletion and leave a level nobody quotes standing.
+
+  Addresses are built rather than guessed: **the interval is part of the address**
+  (`{symbol}@depth@100ms`, `balances@account@1s`), a per-symbol channel with no symbol is an
+  error, and a per-account channel given one is too — `orders@account` with a symbol
+  appended is not a channel the venue has, and subscribing to it produces silence rather
+  than a refusal.
+
+
 - **`get_trades/2` — the public tape**, `/v1/trades/{symbol}`. Not `get_trade_history/2`,
   which is the credential's own fills.
 
