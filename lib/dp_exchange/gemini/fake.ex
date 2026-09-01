@@ -203,6 +203,29 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
+  def get_fx_rate(pair, at, _opts \\ []) do
+    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
+
+    # The fourteen pairs the venue serves, refused the same way the real package refuses:
+    # its 404 for an unsupported pair reads the same as one for a bad timestamp.
+    if native in ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
+                    SGDUSD KRWUSD JPYUSD CNYUSD) do
+      {:ok,
+       %Types.FxRate{
+         pair: native,
+         rate: Decimal.new("0.69"),
+         as_of: at,
+         # The institution that computed it — not the venue, which is `provider`.
+         source: "bcb",
+         benchmark: "Spot",
+         provider: :gemini
+       }}
+    else
+      {:error, {:unsupported_fx_pair, native}}
+    end
+  end
+
+  @impl true
   def get_market_overview(_opts \\ []) do
     {:ok,
      Map.new(@symbols, fn symbol ->

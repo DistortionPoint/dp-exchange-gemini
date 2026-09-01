@@ -43,7 +43,7 @@ defmodule DpExchange.Gemini.Rest do
   """
 
   alias DpExchange.Core.{HttpClient, Timeframe}
-  alias DpExchange.Core.Types.{Candle, OrderBook, Quote, TopOfBook, Trade}
+  alias DpExchange.Core.Types.{Candle, FxRate, OrderBook, Quote, TopOfBook, Trade}
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
   # Canonical width => the literal Gemini accepts. Measured 2026-08-28: the venue names
@@ -386,6 +386,67 @@ defmodule DpExchange.Gemini.Rest do
   defp trade_side("buy"), do: :buy
   defp trade_side("sell"), do: :sell
   defp trade_side(_other), do: nil
+
+  # The pairs the venue serves, from its own documentation. **Enumerated rather than passed
+  # through** because an unsupported pair returns a 404 the caller cannot distinguish from
+  # a bad timestamp, and the list is short and stated.
+  @fx_pairs ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
+               SGDUSD KRWUSD JPYUSD CNYUSD)
+
+  @doc """
+  A foreign-exchange reference rate for `pair` at `at` — `/v2/fxrate/{symbol}/{timestamp}`.
+
+  **This is not a rate the venue trades at.** Gemini's own documentation: *"Gemini does not
+  offer foreign exchange services. This endpoint is for historical reference only and does
+  not provide any guarantee of future exchange rates."* The number comes from a third party
+  the venue names in `provider`, which this package carries as `Types.FxRate`'s `:source` —
+  `:provider` stays `:gemini`, the venue relaying it.
+
+  **Requires the Auditor role**, which the vendor states on the endpoint.
+
+  Fourteen pairs are served and they are all `…USD`; a pair outside the list is refused here
+  rather than sent, because the venue's 404 for an unsupported pair reads the same as one
+  for a bad timestamp.
+
+  `at` is the instant, sent as milliseconds.
+  """
+  @spec get_fx_rate(String.t(), DateTime.t(), keyword()) ::
+          {:ok, FxRate.t()} | {:error, term()} | {:refused, term()}
+  def get_fx_rate(pair, %DateTime{} = at, opts) do
+    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
+
+    with :ok <- fx_pair(native) do
+      timestamp = DateTime.to_unix(at, :millisecond)
+
+      with {:ok, body} <- get_body("/v2/fxrate/#{native}/#{timestamp}", opts) do
+        to_fx_rate(body, native, at)
+      end
+    end
+  end
+
+  defp fx_pair(pair) when pair in @fx_pairs, do: :ok
+  defp fx_pair(pair), do: {:error, {:unsupported_fx_pair, pair}}
+
+  defp to_fx_rate(%{"rate" => rate} = body, native, requested_at) do
+    {:ok,
+     %FxRate{
+       pair: body["fxPair"] || native,
+       rate: decimal(rate),
+       # The venue echoes the instant in `asOf`. Where it does, that is the authority —
+       # the venue may answer for a nearby moment and its own word is what happened.
+       as_of: as_of(body["asOf"], requested_at),
+       # The institution that computed the rate. Named `provider` by the venue and carried
+       # as `source` here, because `provider` in this contract means the venue.
+       source: body["provider"],
+       benchmark: body["benchmark"],
+       provider: :gemini
+     }}
+  end
+
+  defp to_fx_rate(_body, _native, _requested_at), do: {:error, :unexpected_response_shape}
+
+  defp as_of(ms, _requested_at) when is_integer(ms), do: DateTime.from_unix!(ms, :millisecond)
+  defp as_of(_absent, requested_at), do: requested_at
   # --- internals ----------------------------------------------------------
 
   defp get_body(path, opts) do

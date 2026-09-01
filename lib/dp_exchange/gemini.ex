@@ -334,6 +334,15 @@ defmodule DpExchange.Gemini do
   @impl true
   def get_trades(symbol, opts \\ []), do: Rest.get_trades(symbol, with_limiter(opts))
 
+  @doc """
+  A foreign-exchange reference rate for `pair` at `at`.
+
+  See `DpExchange.Gemini.Rest.get_fx_rate/3` — including why this is not a rate the venue
+  trades at, and why the source is carried separately from the provider.
+  """
+  @impl true
+  def get_fx_rate(pair, at, opts \\ []), do: Rest.get_fx_rate(pair, at, with_limiter(opts))
+
   @impl true
   def get_accounts(credentials, opts),
     do: Private.get_accounts(credentials, with_limiter(opts))

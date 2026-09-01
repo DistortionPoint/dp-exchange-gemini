@@ -22,6 +22,23 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_fx_rate/3` — `/v2/fxrate/{pair}/{timestamp}`.**
+
+  **This is not a rate the venue trades at.** The vendor: *"Gemini does not offer foreign
+  exchange services. This endpoint is for historical reference only."* The number comes
+  from a third party the venue names under `provider`, which this package carries as
+  `Types.FxRate`'s **`:source`** — `:provider` stays `:gemini`, the venue relaying it.
+  Collapsing the two would make a relayed BCB rate indistinguishable from one Gemini
+  computed itself.
+
+  **Fourteen pairs are served and a pair outside them is refused before the request**,
+  because the venue's 404 for an unsupported pair reads the same as one for a bad timestamp
+  — a caller sent there cannot tell which it got wrong.
+
+  The venue's own `asOf` wins over the instant asked for: it may answer for a nearby moment,
+  and its word is what happened. Requires the Auditor role, which the vendor states.
+
+
 - **The socket delivers the whole channel surface, not just `bookTicker`.** `subscribe/3`
   and `unsubscribe/3` take a channel and build the address through `WsChannels` — **the
   interval is part of the address** for the `…Fast` and `…Snapshot` channels, and a

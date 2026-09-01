@@ -234,4 +234,142 @@ defmodule DpExchange.Gemini.TradesTest do
       assert query =~ "timestamp="
     end
   end
+
+  describe "the FX rate is relayed, not traded" do
+    @fx %{
+      "fxPair" => "AUDUSD",
+      "rate" => "0.69",
+      "asOf" => 1_594_651_859_000,
+      "provider" => "bcb",
+      "benchmark" => "Spot"
+    }
+
+    test "the source is the institution and the provider is the venue" do
+      # Collapsing them makes a Gemini-relayed BCB rate indistinguishable from one Gemini
+      # computed itself, and only the second would be the venue's own claim.
+      assert {:ok, %Types.FxRate{} = rate} =
+               Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 plug: responding(@fx),
+                 retry_attempts: 0
+               )
+
+      assert rate.source == "bcb"
+      assert rate.provider == :gemini
+      assert rate.benchmark == "Spot"
+      assert Decimal.equal?(rate.rate, Decimal.new("0.69"))
+    end
+
+    test "the venue's own asOf wins over the instant asked for" do
+      # The venue may answer for a nearby moment, and its word is what happened.
+      assert {:ok, rate} =
+               Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 plug: responding(@fx),
+                 retry_attempts: 0
+               )
+
+      assert rate.as_of == DateTime.from_unix!(1_594_651_859_000, :millisecond)
+    end
+
+    test "no asOf falls back to the instant requested, which is still a time" do
+      assert {:ok, rate} =
+               Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 plug: responding(Map.delete(@fx, "asOf")),
+                 retry_attempts: 0
+               )
+
+      assert rate.as_of == ~U[2020-07-13 15:30:59Z]
+    end
+
+    test "the instant is sent as milliseconds in the path" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(@fx)
+      end
+
+      assert {:ok, _rate} =
+               Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path}
+      # 2020-07-13T15:30:59Z in milliseconds. The venue's doc example uses a different
+      # instant; this asserts the conversion, not the example.
+      assert path == "/v2/fxrate/AUDUSD/1594654259000"
+    end
+
+    test "a hyphenated pair is normalised to the venue's form" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(@fx)
+      end
+
+      assert {:ok, _rate} =
+               Rest.get_fx_rate("aud-usd", ~U[2020-07-13 15:30:59Z],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path}
+      assert path =~ "/AUDUSD/"
+    end
+
+    test "a pair the venue does not serve is refused BEFORE the request" do
+      # The venue's 404 for an unsupported pair reads the same as one for a bad timestamp,
+      # so a caller sent there cannot tell which it got wrong.
+      exploding = fn _conn -> raise "must not ask for a pair the venue does not serve" end
+
+      assert {:error, {:unsupported_fx_pair, "USDJPY"}} =
+               Rest.get_fx_rate("USDJPY", ~U[2020-07-13 15:30:59Z],
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "all fourteen documented pairs are accepted" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json(@fx)
+      end
+
+      for pair <- ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
+                     SGDUSD KRWUSD JPYUSD CNYUSD) do
+        assert {:ok, _rate} =
+                 Rest.get_fx_rate(pair, ~U[2020-07-13 15:30:59Z],
+                   plug: plug,
+                   retry_attempts: 0
+                 ),
+               "#{pair} was refused"
+      end
+    end
+
+    test "a body with no rate is unreadable, not a rate of nothing" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 plug: responding(%{}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "convert applies the rate without rounding" do
+      assert {:ok, rate} =
+               Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 plug: responding(@fx),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(Types.FxRate.convert(rate, Decimal.new("100")), Decimal.new("69.00"))
+    end
+  end
 end
