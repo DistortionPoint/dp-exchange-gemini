@@ -86,6 +86,26 @@ defmodule DpExchange.Gemini.TradesTest do
       assert sell.side == :sell
     end
 
+    test "a non-numeric price refuses the whole page rather than delivering price: nil" do
+      # Decimal.new/1 used to raise here. The fix must not trade a crash for a Trade whose
+      # required :price is silently nil — same substitution, different shape. reduce_while
+      # already halts the page on the first bad row (see the timestamp case above), so
+      # refusing here is consistent with existing behaviour, not new.
+      assert {:error, {:invalid_decimal, :price, "null"}} =
+               Rest.get_trades("BTC-USD",
+                 plug: responding([trade(%{"price" => "null"})]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a non-numeric amount refuses the whole page" do
+      assert {:error, {:invalid_decimal, :quantity, ""}} =
+               Rest.get_trades("BTC-USD",
+                 plug: responding([trade(%{"amount" => ""})]),
+                 retry_attempts: 0
+               )
+    end
+
     test "a side the package does not know is nil, not the nearer of the two" do
       assert {:ok, [t]} =
                Rest.get_trades("BTC-USD",

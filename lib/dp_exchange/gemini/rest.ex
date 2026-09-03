@@ -111,11 +111,12 @@ defmodule DpExchange.Gemini.Rest do
 
     with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts),
          {:ok, last} <- quoted_price(body),
+         {:ok, price} <- required_decimal(last, :price),
          {:ok, timestamp} <- venue_time(headers) do
       {:ok,
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
-         price: decimal(last),
+         price: price,
          volume: base_volume(body, native),
          timestamp: timestamp,
          provider: :gemini
@@ -395,15 +396,17 @@ defmodule DpExchange.Gemini.Rest do
   defp timestamp_ms(other), do: other
 
   defp to_trade(row, symbol) do
-    with {:ok, timestamp} <- trade_time(row) do
+    with {:ok, timestamp} <- trade_time(row),
+         {:ok, price} <- required_decimal(Map.get(row, "price"), :price),
+         {:ok, quantity} <- required_decimal(Map.get(row, "amount"), :quantity) do
       {:ok,
        %Trade{
          id: row |> Map.get("tid") |> to_string(),
          symbol: symbol,
          # The taker's side. See the note on get_trades/2.
          side: trade_side(Map.get(row, "type")),
-         price: decimal(Map.get(row, "price")),
-         quantity: decimal(Map.get(row, "amount")),
+         price: price,
+         quantity: quantity,
          timestamp: timestamp,
          broken: Map.get(row, "broken", false) == true,
          provider: :gemini
@@ -468,19 +471,21 @@ defmodule DpExchange.Gemini.Rest do
   defp fx_pair(pair), do: {:error, {:unsupported_fx_pair, pair}}
 
   defp to_fx_rate(%{"rate" => rate} = body, native, requested_at) do
-    {:ok,
-     %FxRate{
-       pair: body["fxPair"] || native,
-       rate: decimal(rate),
-       # The venue echoes the instant in `asOf`. Where it does, that is the authority —
-       # the venue may answer for a nearby moment and its own word is what happened.
-       as_of: as_of(body["asOf"], requested_at),
-       # The institution that computed the rate. Named `provider` by the venue and carried
-       # as `source` here, because `provider` in this contract means the venue.
-       source: body["provider"],
-       benchmark: body["benchmark"],
-       provider: :gemini
-     }}
+    with {:ok, parsed_rate} <- required_decimal(rate, :rate) do
+      {:ok,
+       %FxRate{
+         pair: body["fxPair"] || native,
+         rate: parsed_rate,
+         # The venue echoes the instant in `asOf`. Where it does, that is the authority —
+         # the venue may answer for a nearby moment and its own word is what happened.
+         as_of: as_of(body["asOf"], requested_at),
+         # The institution that computed the rate. Named `provider` by the venue and
+         # carried as `source` here, because `provider` in this contract means the venue.
+         source: body["provider"],
+         benchmark: body["benchmark"],
+         provider: :gemini
+       }}
+    end
   end
 
   defp to_fx_rate(_body, _native, _requested_at), do: {:error, :unexpected_response_shape}
@@ -917,9 +922,36 @@ defmodule DpExchange.Gemini.Rest do
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+
+  # `Decimal.new/1` raises on a string the venue did not actually send a number in —
+  # measured live at production scale against `wss://ws.gemini.com` for the socket's own
+  # copy of this helper, which is where this was found. `Decimal.parse/1`, requiring the
+  # whole string be consumed (`{d, ""}`), is what this package already does in
+  # `ws_decode.ex`; every copy of this helper now matches it.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
+
+  # A garbage or missing value in a field this contract requires must not become a `nil`
+  # carried into `@enforce_keys` — a struct's own field list does not check that a value
+  # is non-nil, only that the key was given, so `decimal/1`'s lenient `nil` would sail
+  # straight through and out to a subscriber as a `Quote` or `Trade` with no price. Refuse
+  # the record instead; `field` names which value failed, for the caller reading the error.
+  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
+
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
+    end
+  end
 
   defp to_integer(value) when is_integer(value), do: value
   defp to_integer(value) when is_float(value), do: trunc(value)

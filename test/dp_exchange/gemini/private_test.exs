@@ -304,6 +304,28 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       assert balance.hold == nil
     end
+
+    test "a non-numeric available leaves hold nil rather than raising or subtracting garbage" do
+      body = [%{"currency" => "USD", "amount" => "100.00", "available" => "null"}]
+
+      assert {:ok, [balance]} =
+               Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert balance.hold == nil
+    end
+
+    test "a non-numeric amount does not raise; balance comes back nil for that currency" do
+      # Decimal.new/1 used to raise here. balance is required by the type but this
+      # package already tolerates nil there when the venue omits the field outright —
+      # a malformed one is treated the same way rather than crashing the whole page.
+      body = [%{"currency" => "USD", "amount" => "not-a-number", "available" => "90.00"}]
+
+      assert {:ok, [balance]} =
+               Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert balance.balance == nil
+      assert balance.hold == nil
+    end
   end
 
   describe "trade history" do

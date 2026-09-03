@@ -20,6 +20,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Decimal.new/1` raised on a malformed venue field, and it was reproducible in
+  production.** `dp_crypto_management` filed the same defect against `dp_exchange_webull`
+  (issue #3); auditing every copy of the pattern in this package found it live and
+  triggerable here too. A 347-symbol subscribe against production `wss://ws.gemini.com` —
+  this package's own venue socket, at the scale a real consumer runs — crashed the
+  connection within seconds on a `bookTicker` frame carrying `""` for a bid.
+
+  Every `decimal/1` helper (`rest.ex`, `socket.ex`, `private.ex`) now parses with
+  `Decimal.parse/1`, requiring the whole string be consumed, matching the idiom
+  `ws_decode.ex` already used. Re-ran the same 347-symbol live subscribe after the fix:
+  **347 of 347 delivered, zero crashes, in 20 seconds.**
+
+- **A second, quieter defect the first fix would otherwise have introduced**: the lenient
+  parse turning a malformed price into `nil` instead of raising would have let a `Quote`
+  with `price: nil` reach a subscriber — `@enforce_keys` does not check that a value is
+  non-nil, only that the key was given. `get_price/2`, `get_trades/2`, `get_fx_rate/3` and
+  the socket's own last-trade delivery now refuse the record instead
+  (`{:error, {:invalid_decimal, field, value}}`), rather than silently delivering a Quote,
+  Trade or FxRate with a fabricated-looking `nil` in a field the type promises is real.
+
 ### Documentation
 
 - **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 22 endpoints

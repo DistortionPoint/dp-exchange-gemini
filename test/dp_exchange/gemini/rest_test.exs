@@ -88,6 +88,23 @@ defmodule DpExchange.Gemini.RestTest do
       assert Decimal.equal?(quote_struct.volume, Decimal.new("183.72081422"))
     end
 
+    test "a non-numeric last price refuses the quote rather than delivering price: nil" do
+      # Decimal.new/1 used to raise here; the fix must not trade a crash for a Quote whose
+      # required :price is silently nil, which is the same substitution wearing a
+      # different shape.
+      body = %{@ticker | "last" => "null"}
+
+      assert {:error, {:invalid_decimal, :price, "null"}} =
+               Rest.get_price("BTC-USD", plug: responding(body), retry_attempts: 0)
+    end
+
+    test "an empty-string last price refuses the quote" do
+      body = %{@ticker | "last" => ""}
+
+      assert {:error, {:invalid_decimal, :price, ""}} =
+               Rest.get_price("BTC-USD", plug: responding(body), retry_attempts: 0)
+    end
+
     test "a response with NO Date header fails rather than substituting now" do
       # The failure this family is built to refuse. Gemini publishes no quote timestamp in
       # the payload at all, so the header is the only venue-supplied time available — and
@@ -342,6 +359,20 @@ defmodule DpExchange.Gemini.RestTest do
       assert {:refused, :invalid_symbol} =
                Rest.get_order_book("NOPE-USD",
                  plug: responding(body, status: 400),
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "get_fx_rate/3 refuses a non-numeric rate rather than delivering rate: nil" do
+    test "Decimal.new/1 used to raise here; now the record is refused" do
+      body = %{"rate" => "null", "fxPair" => "GBPUSD"}
+
+      assert {:error, {:invalid_decimal, :rate, "null"}} =
+               Rest.get_fx_rate(
+                 "GBP-USD",
+                 ~U[2026-08-28 17:00:01Z],
+                 plug: responding(body),
                  retry_attempts: 0
                )
     end

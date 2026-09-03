@@ -247,18 +247,26 @@ defmodule DpExchange.Gemini.Socket do
   defp deliver_last_trade("", _symbol, _timestamp, _state), do: :ok
 
   defp deliver_last_trade(last, symbol, timestamp, state) do
-    send(
-      state.subscriber,
-      {:dp_exchange, :gemini,
-       %Quote{
-         symbol: symbol,
-         price: decimal(last),
-         volume: nil,
-         timestamp: timestamp,
-         provider: :gemini
-       }}
-    )
+    # `Quote.price` is required and must be a real traded price — a `Quote` with `price:
+    # nil` is the same substitution the family's own `Quote.price` typespec exists to
+    # rule out. `"null"` (an unparsable last-trade string) is the same case as `""`
+    # above: nothing traded, not a zero and not a missing-but-real price.
+    case decimal(last) do
+      nil ->
+        :ok
+
+      price ->
+        deliver(state, %Quote{
+          symbol: symbol,
+          price: price,
+          volume: nil,
+          timestamp: timestamp,
+          provider: :gemini
+        })
+    end
   end
+
+  defp deliver(state, payload), do: send(state.subscriber, {:dp_exchange, :gemini, payload})
 
   # Nanoseconds. Absent, and nothing is emitted — a quote whose freshness cannot be
   # stated must not be delivered, and on a stream that means dropping the frame rather
@@ -272,5 +280,19 @@ defmodule DpExchange.Gemini.Socket do
   defp notify(state, notice), do: send(state.subscriber, {:dp_exchange, :gemini, notice})
 
   defp decimal(nil), do: nil
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
+
+  # `Decimal.new/1` raises on a string that is not a number. **Reproduced live**: a
+  # 347-symbol subscribe against production `wss://ws.gemini.com` crashed this socket
+  # within seconds on a `bookTicker` frame carrying `""` for a bid/ask field — a single
+  # symbol's test, which is what shipped before, never sends enough traffic to hit it.
+  # `Decimal.parse/1`, requiring the whole string be consumed, is what `ws_decode.ex`
+  # already does for the same shape of field.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
 end

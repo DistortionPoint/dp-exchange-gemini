@@ -62,6 +62,31 @@ defmodule DpExchange.Gemini.SocketTest do
       assert timestamp.year == 2026
     end
 
+    test "an empty-string bid/ask does not crash the socket — reproduced live 2026-09-04" do
+      # A 347-symbol subscribe against production wss://ws.gemini.com crashed this socket
+      # within seconds: one frame carried "" for a bid, and Decimal.new/1 raised, taking
+      # the whole connection down. A single-symbol test never sends enough traffic to hit
+      # this — that is exactly why it shipped. `Decimal.parse/1` is nil-safe instead.
+      frame = %{@book_ticker | "b" => "", "a" => "", "B" => "", "A" => ""}
+
+      assert {:ok, _state} = deliver(frame)
+
+      assert_receive {:dp_exchange, :gemini, %TopOfBook{} = top}
+      assert top.bid == nil
+      assert top.ask == nil
+      assert top.bid_size == nil
+      assert top.ask_size == nil
+    end
+
+    test "\"null\" in place of a price does not crash the socket" do
+      frame = %{@book_ticker | "c" => "null"}
+
+      assert {:ok, _state} = deliver(frame)
+
+      assert_receive {:dp_exchange, :gemini, %TopOfBook{}}
+      refute_receive {:dp_exchange, :gemini, %Quote{}}
+    end
+
     test "price is the last trade when the book has traded" do
       assert {:ok, _state} = deliver(@book_ticker)
 

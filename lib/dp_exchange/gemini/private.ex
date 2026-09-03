@@ -595,10 +595,16 @@ defmodule DpExchange.Gemini.Private do
   # a zero that would read as "nothing on hold".
   defp hold(%{"amount" => amount, "available" => available})
        when is_binary(amount) and is_binary(available) do
-    Decimal.sub(Decimal.new(amount), Decimal.new(available))
+    # Both fields go through the safe parser now, not `Decimal.new/1` directly — a
+    # malformed side must not raise, and it must not produce a fabricated hold either.
+    subtract_hold(decimal(amount), decimal(available))
   end
 
   defp hold(_row), do: nil
+
+  defp subtract_hold(nil, _available), do: nil
+  defp subtract_hold(_amount, nil), do: nil
+  defp subtract_hold(amount, available), do: Decimal.sub(amount, available)
 
   defp to_fill(row, symbol) do
     %Fill{
@@ -2399,7 +2405,18 @@ defmodule DpExchange.Gemini.Private do
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+
+  # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
+  # the whole string be consumed (`{d, ""}`), is what this package already does in
+  # `ws_decode.ex`; every copy of this helper now matches it.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
 end
