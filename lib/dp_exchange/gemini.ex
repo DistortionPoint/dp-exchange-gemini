@@ -116,14 +116,10 @@ defmodule DpExchange.Gemini do
   # rotation — is venue strategy and belongs here.
   #
   # Only two things are genuinely unsupported, and neither is about authentication:
-  @unsupported [
-    # Core 0.1.16 widened the facade; these are declared and not yet implemented, and each
-    # is a Phase 3–13 item. **Gemini publishes most of them** — staking, positions,
-    # funding, conversions, admin — so `:unsupported` here is a statement about this
-    # package, not about the venue. That distinction is the one Phase 1 had to correct on
-    # another venue, and it is stated here so it is not made again.
-    {:get_conversion, 2},
-    {:list_portfolios, 1},
+  # The venue serves none of these. **That is a claim about Gemini, not about how far this
+  # package got** — and the two are worth telling apart, because both answer a caller
+  # identically and only the second can ever change.
+  @venue_does_not_serve [
     # Gemini lists no options at all, so these are the venue's absence rather than this
     # package's backlog.
     {:get_option_chain, 2},
@@ -168,18 +164,26 @@ defmodule DpExchange.Gemini do
     # to implement.
     {:get_auction_imbalance, 2},
     {:get_volume_profile, 3},
-    # 346 symbols, and the venue offers no bulk detail endpoint — one request per symbol
-    # is not a listing, it is a rate-limit incident. `get_symbols/1` gives the catalogue
-    # and `quantization/1` gives one symbol's detail on demand.
     # `/v1/payments/methods` returns the whole set and there is no path taking a method
     # identifier. Filtering the listing here would answer with a snapshot while looking
     # like a read, which is the distinction `get_payment_method/3` exists to draw.
     {:get_payment_method, 3},
-    {:list_instruments, 1},
     # The venue publishes no rate-limit headers at all — measured, not assumed. Returning
     # a constant that never moves as budget is spent is worse than refusing.
     {:get_rate_limit_status, 2}
   ]
+
+  # Not ported yet. **The venue serves these**; this package does not implement them.
+  @not_ported [
+    {:get_conversion, 2},
+    {:list_portfolios, 1},
+    # 346 symbols, and the venue offers no bulk detail endpoint — one request per symbol
+    # is not a listing, it is a rate-limit incident. `get_symbols/1` gives the catalogue
+    # and `quantization/1` gives one symbol's detail on demand.
+    {:list_instruments, 1}
+  ]
+
+  @unsupported @venue_does_not_serve ++ @not_ported
 
   # --- lifecycle ---------------------------------------------------------
 
@@ -198,6 +202,19 @@ defmodule DpExchange.Gemini do
 
   @impl true
   def runtime_id, do: :gemini
+
+  @doc """
+  Endpoints the **venue** does not serve, as distinct from ones this package has not ported.
+
+  Both answer `{:error, :not_supported}`, and a caller acts the same way on either — but
+  they mean different things to anyone deciding what to build next, so they are told apart
+  here rather than flattened into one list.
+
+  Every entry is recorded with its source and the date consulted in
+  `docs/reference/gemini/negative-claims.md`.
+  """
+  @spec venue_does_not_serve() :: [{atom(), arity()}]
+  def venue_does_not_serve, do: @venue_does_not_serve
 
   @impl true
   def asset_classes, do: [:crypto]

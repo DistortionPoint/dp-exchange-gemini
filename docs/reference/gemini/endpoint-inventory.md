@@ -7,28 +7,33 @@ only.**
 
 ## Counts
 
-| group | endpoints | in this package |
+**Re-checked 2026-09-03.** This section read "18%" until this release, from a capture that
+was accurate at the time and stopped being accurate as this package grew. The vendor-side
+counts below have not moved; what changed is this package's coverage of them, and that is
+recorded through `capabilities/0` rather than re-derived here from a page count.
+
+**Current, from `capabilities/0`, checked 2026-09-03**: 62 of 87 contract callbacks
+`:experimental`, 25 `:unsupported`, of which 22 are the venue's own absence — see
+`negative-claims.md` — and 3 remain not yet ported (`get_conversion/2`,
+`list_portfolios/1`, `list_instruments/1`).
+
+| group | endpoints (vendor) | in this package |
 |---|---|---|
-| fund management | 16 | 1 |
-| orders | 12 | 6 |
-| market data | 12 | 2 |
-| derivatives | 9 | 0 |
-| clearing | 8 | 0 |
-| staking | 6 | 0 |
-| margin | 3 | 0 |
-| instant orders | 2 | 0 |
-| **total** | **68** | **12** |
+| fund management | 16 | most — deposit address, networks, allowlist, withdraw, payment methods, internal transfer; see `usage-rules/money-movement.md` |
+| orders | 12 | most — place, cancel, get, list, cancel-all, active orders |
+| market data | 12 | quotes, top of book, candles, trades, order book |
+| derivatives | 9 | perpetuals surface — funding, positions, contract stats |
+| clearing | 8 | confirm/reject/list |
+| staking | 6 | rates, balances, rewards, history, stake, unstake |
+| margin | 3 | not this package's scope on spot |
+| instant orders | 2 | not ported |
+| **total** | **68** | **62 declared `:experimental`, per `capabilities/0`** |
 
-Plus `rest-api/common`: **5 admin + 2 package-side oauth = 7 in scope**, for **75** total.
-See the `rest-api/common` table below for paths.
+Plus `rest-api/common`: 5 admin + 2 package-side OAuth, all implemented — see
+`usage-rules/auth.md` for the refresh and revoke pair.
 
-Best-covered crypto venue in the family, and still at 18%.
-
-**These group counts come from reading pages. The authoritative totals are the vendor's
-published specifications — see "Gemini publishes machine-readable specifications" below.**
-
-**Fund management is the largest group** and is where withdrawals live — the one group in
-this family where a defect moves money.
+**Best-covered crypto venue in the family**, and no longer close: 62 of the contract's 87
+callbacks against Coinbase's 46 and Webull's 44.
 
 ## Endpoints
 

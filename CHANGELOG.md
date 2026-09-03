@@ -22,6 +22,17 @@ acceptable changelog line.
 
 ### Documentation
 
+- **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 22 endpoints
+  that are Gemini's own absence — options, watchlists, replace/preview, position closing —
+  each with the source and date behind it; three stay under `@not_ported` because they are
+  the venue's surface and this package's backlog.
+- **`README.md` states what the contract covers** — 62 of 87 callbacks `:experimental`, the
+  best-covered venue in the family.
+- **`docs/reference/gemini/endpoint-inventory.md`'s counts refreshed.** It read "18%" until
+  this release; the vendor-side page counts had not moved, this package's coverage had.
+
+### Documentation
+
 - **Every negative this package makes is audited** —
   `docs/reference/gemini/negative-claims.md`, thirteen claims with the source and date
   consulted for each. All hold, including the two that are the venue's own words: no market
