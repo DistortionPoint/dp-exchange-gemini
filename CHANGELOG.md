@@ -20,6 +20,22 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`Fake` wired to `Core.FakeInjection` — DpCryptoManagement's issue #14.** Every
+  function with a real success path (not an unconditional `Venue.not_supported()`) now
+  checks a queued or always-set outcome first: `get_price/2`, `get_top_of_book/2`,
+  `get_order_book/2`, `get_trades/2`, `quantization/1`, `get_funding/2` and
+  `get_contract_stats/2` support per-symbol targeting; the remaining 34 functions with
+  real logic — balances, orders, staking, conversion, transfers, withdrawal, custody and
+  account management among them — support whole-call injection. `authenticated/1` also
+  honours `FakeInjection.credentials_bypassed?/1`, letting a wiring-only test skip the
+  venue-faithful `{:refused, :missing_credentials}` default without changing it for
+  anyone who doesn't opt in. `subscribe/2`, `unsubscribe/2` and `update_symbols/2` are
+  deliberately not wired — each takes a symbol list in one call, which whole-call
+  injection cannot express partial failure for. Follows the reference implementation
+  shipped in `dp_exchange_robinhood`.
+
 ### Fixed
 
 - **`Decimal.new/1` raised on a malformed venue field, and it was reproducible in

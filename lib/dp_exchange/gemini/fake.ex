@@ -33,11 +33,25 @@ defmodule DpExchange.Gemini.Fake do
 
   That last one is this venue's distinctive failure mode, and a consumer that has not
   handled it will find out here rather than in production.
+
+  ## Failure injection and anonymous mode
+
+  Every function below that has a real success path (not an unconditional
+  `Venue.not_supported()`) checks `DpExchange.Core.FakeInjection.next_outcome/1` or `/2`
+  first — a queued or always-set outcome from `FakeInjection.queue_failures/2,3` or
+  `fail_always/2,3` short-circuits the fake's normal logic and is returned as-is.
+  `authenticated/1` also checks `FakeInjection.credentials_bypassed?/1` before its normal
+  `{:refused, :missing_credentials}` path. Neither changes anything for a test that never
+  calls `FakeInjection` — see that module for the full contract.
+
+  `subscribe/2`, `unsubscribe/2` and `update_symbols/2` are NOT wired: each takes a list
+  of symbols in one call, and "this one symbol in the batch fails, the rest succeed" is a
+  case whole-call injection cannot express — see `FakeInjection`'s own moduledoc.
   """
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Notice, Timeframe, Types, Venue}
+  alias DpExchange.Core.{FakeInjection, Notice, Timeframe, Types, Venue}
   alias DpExchange.Gemini.{Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
@@ -86,191 +100,213 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_price(symbol, _opts \\ []) do
-    case Map.fetch(@price, symbol) do
-      {:ok, price} ->
-        {:ok,
-         %Types.Quote{
-           symbol: symbol,
-           price: Decimal.new(price),
-           volume: Decimal.new("183.72"),
-           timestamp: @at,
-           provider: :gemini
-         }}
+    with_injection(symbol, fn ->
+      case Map.fetch(@price, symbol) do
+        {:ok, price} ->
+          {:ok,
+           %Types.Quote{
+             symbol: symbol,
+             price: Decimal.new(price),
+             volume: Decimal.new("183.72"),
+             timestamp: @at,
+             provider: :gemini
+           }}
 
-      :error ->
-        {:refused, :not_listed}
-    end
+        :error ->
+          {:refused, :not_listed}
+      end
+    end)
   end
 
   @impl true
   def get_top_of_book(symbol, _opts \\ []) do
-    case Map.fetch(@price, symbol) do
-      {:ok, price} ->
-        {:ok,
-         %Types.TopOfBook{
-           symbol: symbol,
-           # A spread around the fake's price. The bid is deliberately *not* equal to the
-           # price: a test that passes only when they coincide is not testing the split
-           # this type exists to enforce.
-           bid: Decimal.sub(Decimal.new(price), Decimal.new("0.31")),
-           ask: Decimal.add(Decimal.new(price), Decimal.new("0.69")),
-           bid_size: nil,
-           ask_size: nil,
-           venue_time: @at,
-           observed_at: @at,
-           provider: :gemini
-         }}
+    with_injection(symbol, fn ->
+      case Map.fetch(@price, symbol) do
+        {:ok, price} ->
+          {:ok,
+           %Types.TopOfBook{
+             symbol: symbol,
+             # A spread around the fake's price. The bid is deliberately *not* equal to the
+             # price: a test that passes only when they coincide is not testing the split
+             # this type exists to enforce.
+             bid: Decimal.sub(Decimal.new(price), Decimal.new("0.31")),
+             ask: Decimal.add(Decimal.new(price), Decimal.new("0.69")),
+             bid_size: nil,
+             ask_size: nil,
+             venue_time: @at,
+             observed_at: @at,
+             provider: :gemini
+           }}
 
-      :error ->
-        {:refused, :not_listed}
-    end
+        :error ->
+          {:refused, :not_listed}
+      end
+    end)
   end
 
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], _opts \\ []) do
-    cond do
-      symbol not in @symbols ->
-        {:refused, :not_listed}
+    with_injection(symbol, fn ->
+      cond do
+        symbol not in @symbols ->
+          {:refused, :not_listed}
 
-      timeframe not in Rest.timeframes() ->
-        # Includes `2h`, `4h` and `12h` — modelled by the vocabulary, not served here.
-        {:error, {:unsupported_timeframe, timeframe}}
+        timeframe not in Rest.timeframes() ->
+          # Includes `2h`, `4h` and `12h` — modelled by the vocabulary, not served here.
+          {:error, {:unsupported_timeframe, timeframe}}
 
-      before_window?(timeframe, range) ->
-        {:error, {:range_unavailable, timeframe, earliest: earliest(timeframe)}}
+        before_window?(timeframe, range) ->
+          {:error, {:range_unavailable, timeframe, earliest: earliest(timeframe)}}
 
-      true ->
-        {:ok, [candle(symbol, timeframe)]}
-    end
+        true ->
+          {:ok, [candle(symbol, timeframe)]}
+      end
+    end)
   end
 
   @impl true
-  def get_symbols(_opts \\ []), do: {:ok, @symbols}
+  def get_symbols(_opts \\ []) do
+    with_injection(fn -> {:ok, @symbols} end)
+  end
 
   @impl true
   def get_order_book(symbol, _opts \\ []) do
-    case Map.fetch(@price, symbol) do
-      {:ok, price} ->
-        bid = Decimal.new(price)
+    with_injection(symbol, fn ->
+      case Map.fetch(@price, symbol) do
+        {:ok, price} ->
+          bid = Decimal.new(price)
 
-        {:ok,
-         %Types.OrderBook{
-           symbol: symbol,
-           bids: [{bid, Decimal.new("0.0031")}],
-           asks: [{Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")}],
-           timestamp: @at,
-           provider: :gemini
-         }}
+          {:ok,
+           %Types.OrderBook{
+             symbol: symbol,
+             bids: [{bid, Decimal.new("0.0031")}],
+             asks: [{Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")}],
+             timestamp: @at,
+             provider: :gemini
+           }}
 
-      :error ->
-        {:refused, :not_listed}
-    end
+        :error ->
+          {:refused, :not_listed}
+      end
+    end)
   end
 
   @impl true
   def get_trades(symbol, opts \\ []) do
-    trades = [
-      %Types.Trade{
-        id: "5335307668",
-        symbol: symbol,
-        # The taker's side: a buyer lifted the offer.
-        side: :buy,
-        price: Decimal.new("3610.85"),
-        quantity: Decimal.new("0.27413495"),
-        timestamp: @at,
-        broken: false,
-        provider: :gemini
-      },
-      %Types.Trade{
-        id: "5335307669",
-        symbol: symbol,
-        side: :sell,
-        price: Decimal.new("9999.99"),
-        quantity: Decimal.new("1"),
-        timestamp: @at,
-        # A busted print. The fake carries one so a consumer's suite exercises the
-        # exclusion rather than assuming it.
-        broken: true,
-        provider: :gemini
-      }
-    ]
+    with_injection(symbol, fn ->
+      trades = [
+        %Types.Trade{
+          id: "5335307668",
+          symbol: symbol,
+          # The taker's side: a buyer lifted the offer.
+          side: :buy,
+          price: Decimal.new("3610.85"),
+          quantity: Decimal.new("0.27413495"),
+          timestamp: @at,
+          broken: false,
+          provider: :gemini
+        },
+        %Types.Trade{
+          id: "5335307669",
+          symbol: symbol,
+          side: :sell,
+          price: Decimal.new("9999.99"),
+          quantity: Decimal.new("1"),
+          timestamp: @at,
+          # A busted print. The fake carries one so a consumer's suite exercises the
+          # exclusion rather than assuming it.
+          broken: true,
+          provider: :gemini
+        }
+      ]
 
-    if Keyword.get(opts, :include_broken, false) do
-      {:ok, trades}
-    else
-      {:ok, Enum.reject(trades, & &1.broken)}
-    end
+      if Keyword.get(opts, :include_broken, false) do
+        {:ok, trades}
+      else
+        {:ok, Enum.reject(trades, & &1.broken)}
+      end
+    end)
   end
 
   @impl true
   def get_fx_rate(pair, at, _opts \\ []) do
-    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
+    with_injection(fn ->
+      native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
 
-    # The fourteen pairs the venue serves, refused the same way the real package refuses:
-    # its 404 for an unsupported pair reads the same as one for a bad timestamp.
-    if native in ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
-                    SGDUSD KRWUSD JPYUSD CNYUSD) do
-      {:ok,
-       %Types.FxRate{
-         pair: native,
-         rate: Decimal.new("0.69"),
-         as_of: at,
-         # The institution that computed it — not the venue, which is `provider`.
-         source: "bcb",
-         benchmark: "Spot",
-         provider: :gemini
-       }}
-    else
-      {:error, {:unsupported_fx_pair, native}}
-    end
+      # The fourteen pairs the venue serves, refused the same way the real package refuses:
+      # its 404 for an unsupported pair reads the same as one for a bad timestamp.
+      if native in ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
+                      SGDUSD KRWUSD JPYUSD CNYUSD) do
+        {:ok,
+         %Types.FxRate{
+           pair: native,
+           rate: Decimal.new("0.69"),
+           as_of: at,
+           # The institution that computed it — not the venue, which is `provider`.
+           source: "bcb",
+           benchmark: "Spot",
+           provider: :gemini
+         }}
+      else
+        {:error, {:unsupported_fx_pair, native}}
+      end
+    end)
   end
 
   @impl true
   def list_networks(asset, opts \\ []) do
-    case {asset, Keyword.get(opts, :network)} do
-      {nil, nil} ->
-        {:error, :asset_or_network_required}
+    with_injection(fn ->
+      case {asset, Keyword.get(opts, :network)} do
+        {nil, nil} ->
+          {:error, :asset_or_network_required}
 
-      {nil, network} ->
-        # Scoped to the credential on the real venue, so the fake requires one: an empty
-        # answer means this account cannot move anything on that network, not that the
-        # network carries nothing.
-        with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-          {:ok, [%{"network" => network, "assets" => ["USDC", "USDT"]}]}
-        end
+        {nil, network} ->
+          # Scoped to the credential on the real venue, so the fake requires one: an empty
+          # answer means this account cannot move anything on that network, not that the
+          # network carries nothing.
+          with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+            {:ok, [%{"network" => network, "assets" => ["USDC", "USDT"]}]}
+          end
 
-      {asset, _network} ->
-        # The public direction takes no credential.
-        {:ok, [%{"asset" => asset, "networks" => ["ethereum", "solana"]}]}
-    end
+        {asset, _network} ->
+          # The public direction takes no credential.
+          {:ok, [%{"asset" => asset, "networks" => ["ethereum", "solana"]}]}
+      end
+    end)
   end
 
   @impl true
-  def list_fee_promos(_opts \\ []), do: {:ok, [%{"symbol" => "btcusd"}]}
+  def list_fee_promos(_opts \\ []) do
+    with_injection(fn -> {:ok, [%{"symbol" => "btcusd"}]} end)
+  end
 
   @impl true
   def get_market_overview(_opts \\ []) do
-    {:ok,
-     Map.new(@symbols, fn symbol ->
-       {symbol, %{price: Decimal.new(@price[symbol]), change_24h: Decimal.new("-0.0424")}}
-     end)}
+    with_injection(fn ->
+      {:ok,
+       Map.new(@symbols, fn symbol ->
+         {symbol, %{price: Decimal.new(@price[symbol]), change_24h: Decimal.new("-0.0424")}}
+       end)}
+    end)
   end
 
   @impl true
   def quantization(symbol) do
-    case Map.fetch(@price, symbol) do
-      {:ok, _price} ->
-        {:ok,
-         %{
-           price_increment: Decimal.new("0.01"),
-           quantity_increment: Decimal.new("0.00000001"),
-           min_quantity: Decimal.new("0.00001"),
-           status: "open"
-         }}
+    with_injection(symbol, fn ->
+      case Map.fetch(@price, symbol) do
+        {:ok, _price} ->
+          {:ok,
+           %{
+             price_increment: Decimal.new("0.01"),
+             quantity_increment: Decimal.new("0.00000001"),
+             min_quantity: Decimal.new("0.00001"),
+             status: "open"
+           }}
 
-      :error ->
-        {:refused, :not_listed}
-    end
+        :error ->
+          {:refused, :not_listed}
+      end
+    end)
   end
 
   @impl true
@@ -290,59 +326,69 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_balances(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      {:ok,
-       [
-         %Types.Balance{
-           currency: "USD",
-           balance: Decimal.new("100000.00"),
-           available_balance: Decimal.new("99000.00"),
-           hold: Decimal.new("1000.00"),
-           timestamp: @at,
-           provider: :gemini
-         },
-         %Types.Balance{
-           currency: "BTC",
-           balance: Decimal.new("1000.00000000"),
-           available_balance: Decimal.new("1000.00000000"),
-           hold: Decimal.new("0E-8"),
-           timestamp: @at,
-           provider: :gemini
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        {:ok,
+         [
+           %Types.Balance{
+             currency: "USD",
+             balance: Decimal.new("100000.00"),
+             available_balance: Decimal.new("99000.00"),
+             hold: Decimal.new("1000.00"),
+             timestamp: @at,
+             provider: :gemini
+           },
+           %Types.Balance{
+             currency: "BTC",
+             balance: Decimal.new("1000.00000000"),
+             available_balance: Decimal.new("1000.00000000"),
+             hold: Decimal.new("0E-8"),
+             timestamp: @at,
+             provider: :gemini
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
   def get_accounts(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      {:ok, [%{"account" => "primary", "type" => "exchange"}]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        {:ok, [%{"account" => "primary", "type" => "exchange"}]}
+      end
+    end)
   end
 
   @impl true
   def get_fees(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      {:ok, %{"api_maker_fee_bps" => 10, "api_taker_fee_bps" => 35}}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        {:ok, %{"api_maker_fee_bps" => 10, "api_taker_fee_bps" => 35}}
+      end
+    end)
   end
 
   @impl true
   def get_transfers(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials), do: {:ok, []}
+    with_injection(fn ->
+      with :ok <- authenticated(credentials), do: {:ok, []}
+    end)
   end
 
   @impl true
   def place_order(credentials, request, _opts \\ []) do
-    # The refusals matter more than the success. A fake where every order works proves
-    # only that the happy path compiles.
-    with :ok <- authenticated(credentials),
-         :ok <- supported_order_type(Map.get(request, :order_type, :limit)),
-         :ok <- supported_tif(Map.get(request, :time_in_force, :gtc)),
-         :ok <- priced(request),
-         :ok <- listed(Map.get(request, :symbol)) do
-      {:ok, order(request)}
-    end
+    with_injection(fn ->
+      # The refusals matter more than the success. A fake where every order works proves
+      # only that the happy path compiles.
+      with :ok <- authenticated(credentials),
+           :ok <- supported_order_type(Map.get(request, :order_type, :limit)),
+           :ok <- supported_tif(Map.get(request, :time_in_force, :gtc)),
+           :ok <- priced(request),
+           :ok <- listed(Map.get(request, :symbol)) do
+        {:ok, order(request)}
+      end
+    end)
   end
 
   @impl true
@@ -364,62 +410,87 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def cancel_order(credentials, order_id, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      {:ok, %{order(%{}) | id: order_id, status: :cancelled}}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        {:ok, %{order(%{}) | id: order_id, status: :cancelled}}
+      end
+    end)
   end
 
   @impl true
   def get_order(credentials, order_id, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      {:ok, %{order(%{}) | id: order_id}}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        {:ok, %{order(%{}) | id: order_id}}
+      end
+    end)
   end
 
   @impl true
   def get_orders(credentials, opts \\ []) do
-    # Open and historical are two endpoints on this venue, not one with a filter, and the
-    # fake says so rather than answering the same empty list to both.
-    with :ok <- authenticated(credentials) do
-      if Keyword.get(opts, :history, false),
-        do: {:ok, [%{order(%{}) | status: :filled}]},
-        else: {:ok, []}
-    end
+    with_injection(fn ->
+      # Open and historical are two endpoints on this venue, not one with a filter, and the
+      # fake says so rather than answering the same empty list to both.
+      with :ok <- authenticated(credentials) do
+        if Keyword.get(opts, :history, false),
+          do: {:ok, [%{order(%{}) | status: :filled}]},
+          else: {:ok, []}
+      end
+    end)
   end
 
   @impl true
   def cancel_all_orders(credentials, opts \\ []) do
-    # The fake enforces the contract's rule, so a consumer's suite cannot go green on a
-    # bulk cancel that never said which orders it meant.
-    with :ok <- authenticated(credentials) do
-      case Keyword.get(opts, :scope) do
-        scope when scope in [:session, :account] ->
-          {:ok, %{cancelled: ["fake-gemini-order-1"], rejected: []}}
+    with_injection(fn ->
+      # The fake enforces the contract's rule, so a consumer's suite cannot go green on a
+      # bulk cancel that never said which orders it meant.
+      with :ok <- authenticated(credentials) do
+        case Keyword.get(opts, :scope) do
+          scope when scope in [:session, :account] ->
+            {:ok, %{cancelled: ["fake-gemini-order-1"], rejected: []}}
 
-        nil ->
-          {:error, :scope_required}
+          nil ->
+            {:error, :scope_required}
 
-        other ->
-          {:error, {:unsupported_scope, other}}
+          other ->
+            {:error, {:unsupported_scope, other}}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def get_trade_history(credentials, opts) do
-    # The real adapter requires a symbol — Gemini offers no all-symbols variant — so the
-    # fake requires one too. Less capable is allowed; differently capable is not.
-    with :ok <- authenticated(credentials) do
-      case Keyword.get(opts, :symbol) do
-        nil -> {:error, {:missing_option, :symbol}}
-        _symbol -> {:ok, []}
+    with_injection(fn ->
+      # The real adapter requires a symbol — Gemini offers no all-symbols variant — so the
+      # fake requires one too. Less capable is allowed; differently capable is not.
+      with :ok <- authenticated(credentials) do
+        case Keyword.get(opts, :symbol) do
+          nil -> {:error, {:missing_option, :symbol}}
+          _symbol -> {:ok, []}
+        end
       end
+    end)
+  end
+
+  defp authenticated(credentials) do
+    if FakeInjection.credentials_bypassed?(:gemini) do
+      :ok
+    else
+      authenticated_venue_faithful(credentials)
     end
   end
 
-  defp authenticated(%{api_key: _key, api_secret: _secret}), do: :ok
-  defp authenticated(%{access_token: _token}), do: :ok
-  defp authenticated(_other), do: {:refused, :missing_credentials}
+  defp authenticated_venue_faithful(%{api_key: _key, api_secret: _secret}), do: :ok
+  defp authenticated_venue_faithful(%{access_token: _token}), do: :ok
+  defp authenticated_venue_faithful(_other), do: {:refused, :missing_credentials}
+
+  defp with_injection(symbol \\ nil, fun) do
+    case FakeInjection.next_outcome(:gemini, symbol) do
+      {:override, outcome} -> outcome
+      :none -> fun.()
+    end
+  end
 
   # The staking callbacks carry no credentials argument; the fake finds them where the
   # facade does, so a consumer wiring them wrong fails here rather than in production.
@@ -505,13 +576,17 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def test_connection(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials), do: {:ok, %{reachable: true}}
+    with_injection(fn ->
+      with :ok <- authenticated(credentials), do: {:ok, %{reachable: true}}
+    end)
   end
 
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
   @impl true
-  def market_status(_opts), do: {:ok, :open}
+  def market_status(_opts) do
+    with_injection(fn -> {:ok, :open} end)
+  end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
 
@@ -556,183 +631,201 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_positions(opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)) do
-      # A short, because the short is where the sign convention bites: the venue sends a
-      # negative quantity and a fake that only ever returned a long would never exercise it.
-      {:ok,
-       [
-         %Types.Position{
-           symbol: "BTCGUSDPERP",
-           side: :short,
-           quantity: Decimal.new("0.2"),
-           instrument_type: :perp,
-           average_cost: Decimal.new("60000"),
-           mark_price: Decimal.new("59500"),
-           notional_value: Decimal.new("-11900"),
-           realised_pnl: Decimal.new("12.5"),
-           unrealised_pnl: Decimal.new("100"),
-           # Not published on /v1/positions. `nil` is "not stated", never "no risk".
-           liquidation_price: nil,
-           leverage: nil,
-           provider: :gemini
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)) do
+        # A short, because the short is where the sign convention bites: the venue sends a
+        # negative quantity and a fake that only ever returned a long would never exercise it.
+        {:ok,
+         [
+           %Types.Position{
+             symbol: "BTCGUSDPERP",
+             side: :short,
+             quantity: Decimal.new("0.2"),
+             instrument_type: :perp,
+             average_cost: Decimal.new("60000"),
+             mark_price: Decimal.new("59500"),
+             notional_value: Decimal.new("-11900"),
+             realised_pnl: Decimal.new("12.5"),
+             unrealised_pnl: Decimal.new("100"),
+             # Not published on /v1/positions. `nil` is "not stated", never "no risk".
+             liquidation_price: nil,
+             leverage: nil,
+             provider: :gemini
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
   def get_funding(symbol, _opts \\ []) do
-    # Settled and estimated differ, and by a lot — a fake that made them equal would let a
-    # consumer read either as the other and still pass.
-    {:ok,
-     %Types.Funding{
-       symbol: symbol,
-       amount: Decimal.new("-1.50991"),
-       estimated_amount: Decimal.new("-2.10595"),
-       funded_at: ~U[2026-09-01 18:00:00Z],
-       next_funding_at: ~U[2026-09-01 19:00:00Z],
-       provider: :gemini
-     }}
+    with_injection(symbol, fn ->
+      # Settled and estimated differ, and by a lot — a fake that made them equal would let a
+      # consumer read either as the other and still pass.
+      {:ok,
+       %Types.Funding{
+         symbol: symbol,
+         amount: Decimal.new("-1.50991"),
+         estimated_amount: Decimal.new("-2.10595"),
+         funded_at: ~U[2026-09-01 18:00:00Z],
+         next_funding_at: ~U[2026-09-01 19:00:00Z],
+         provider: :gemini
+       }}
+    end)
   end
 
   @impl true
   def get_contract_stats(symbol, _opts \\ []) do
-    # Mark away from index, because that divergence is the reason both are carried.
-    {:ok,
-     %Types.ContractStats{
-       symbol: symbol,
-       product_type: "PerpetualSwapContract",
-       mark_price: Decimal.new("59500"),
-       index_price: Decimal.new("59480"),
-       open_interest: Decimal.new("1240"),
-       open_interest_notional: Decimal.new("73780000"),
-       venue_time: nil,
-       provider: :gemini
-     }}
+    with_injection(symbol, fn ->
+      # Mark away from index, because that divergence is the reason both are carried.
+      {:ok,
+       %Types.ContractStats{
+         symbol: symbol,
+         product_type: "PerpetualSwapContract",
+         mark_price: Decimal.new("59500"),
+         index_price: Decimal.new("59480"),
+         open_interest: Decimal.new("1240"),
+         open_interest_notional: Decimal.new("73780000"),
+         venue_time: nil,
+         provider: :gemini
+       }}
+    end)
   end
 
   @impl true
   def get_staking_rates(_opts \\ []) do
-    # Two providers for one asset, at different rates. One rate would hide the reason
-    # `provider_id` is required on stake/3 and unstake/3.
-    {:ok,
-     [
-       %Types.StakingRate{
-         asset: "ETH",
-         provider_id: "provider-a",
-         rate_pct: Decimal.new("4.0"),
-         apy_pct: Decimal.new("4.07"),
-         provider: :gemini
-       },
-       %Types.StakingRate{
-         asset: "ETH",
-         provider_id: "provider-b",
-         rate_pct: Decimal.new("3.5"),
-         # APY absent where the venue publishes none — never derived from the rate above it.
-         apy_pct: nil,
-         provider: :gemini
-       }
-     ]}
+    with_injection(fn ->
+      # Two providers for one asset, at different rates. One rate would hide the reason
+      # `provider_id` is required on stake/3 and unstake/3.
+      {:ok,
+       [
+         %Types.StakingRate{
+           asset: "ETH",
+           provider_id: "provider-a",
+           rate_pct: Decimal.new("4.0"),
+           apy_pct: Decimal.new("4.07"),
+           provider: :gemini
+         },
+         %Types.StakingRate{
+           asset: "ETH",
+           provider_id: "provider-b",
+           rate_pct: Decimal.new("3.5"),
+           # APY absent where the venue publishes none — never derived from the rate above it.
+           apy_pct: nil,
+           provider: :gemini
+         }
+       ]}
+    end)
   end
 
   @impl true
   def get_staking_balances(opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)) do
-      # The whole position redeemable and none of it tradable — the real shape that breaks
-      # a caller reading a single "available".
-      {:ok,
-       [
-         %Types.StakingBalance{
-           asset: "ETH",
-           staked: Decimal.new("10"),
-           available_to_trade: Decimal.new("0"),
-           available_for_withdrawal: Decimal.new("10"),
-           by_provider: %{},
-           provider: :gemini
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)) do
+        # The whole position redeemable and none of it tradable — the real shape that breaks
+        # a caller reading a single "available".
+        {:ok,
+         [
+           %Types.StakingBalance{
+             asset: "ETH",
+             staked: Decimal.new("10"),
+             available_to_trade: Decimal.new("0"),
+             available_for_withdrawal: Decimal.new("10"),
+             by_provider: %{},
+             provider: :gemini
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
   def get_staking_rewards(opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)) do
-      {:ok,
-       [
-         %Types.StakingReward{
-           asset: "ETH",
-           amount: Decimal.new("0.0031"),
-           provider_id: "provider-a",
-           apy_pct: Decimal.new("4.07"),
-           accrual_count: 7,
-           period_start: ~U[2026-08-25 00:00:00Z],
-           period_end: ~U[2026-09-01 00:00:00Z],
-           provider: :gemini
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)) do
+        {:ok,
+         [
+           %Types.StakingReward{
+             asset: "ETH",
+             amount: Decimal.new("0.0031"),
+             provider_id: "provider-a",
+             apy_pct: Decimal.new("4.07"),
+             accrual_count: 7,
+             period_start: ~U[2026-08-25 00:00:00Z],
+             period_end: ~U[2026-09-01 00:00:00Z],
+             provider: :gemini
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
   def get_staking_history(opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)) do
-      # A redemption mid-unbond: requested, part paid, part outstanding. A fake whose rows
-      # all settled would never exercise the field this type exists for.
-      {:ok,
-       [
-         %Types.StakingTransaction{
-           id: "stk-1",
-           type: :unstake,
-           venue_type: "Redeem",
-           asset: "ETH",
-           amount: Decimal.new("10"),
-           amount_paid_so_far: Decimal.new("4"),
-           amount_remaining: Decimal.new("6"),
-           provider_id: "provider-a",
-           provider: :gemini
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)) do
+        # A redemption mid-unbond: requested, part paid, part outstanding. A fake whose rows
+        # all settled would never exercise the field this type exists for.
+        {:ok,
+         [
+           %Types.StakingTransaction{
+             id: "stk-1",
+             type: :unstake,
+             venue_type: "Redeem",
+             asset: "ETH",
+             amount: Decimal.new("10"),
+             amount_paid_so_far: Decimal.new("4"),
+             amount_remaining: Decimal.new("6"),
+             provider_id: "provider-a",
+             provider: :gemini
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
   def stake(asset, amount, opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)),
-         {:ok, provider_id} <- fake_provider_id(opts) do
-      {:ok,
-       %Types.StakingTransaction{
-         id: "stk-new",
-         type: :stake,
-         venue_type: "Deposit",
-         asset: String.upcase(asset),
-         amount: amount,
-         amount_paid_so_far: nil,
-         amount_remaining: nil,
-         provider_id: provider_id,
-         provider: :gemini
-       }}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)),
+           {:ok, provider_id} <- fake_provider_id(opts) do
+        {:ok,
+         %Types.StakingTransaction{
+           id: "stk-new",
+           type: :stake,
+           venue_type: "Deposit",
+           asset: String.upcase(asset),
+           amount: amount,
+           amount_paid_so_far: nil,
+           amount_remaining: nil,
+           provider_id: provider_id,
+           provider: :gemini
+         }}
+      end
+    end)
   end
 
   @impl true
   def unstake(asset, amount, opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)),
-         {:ok, provider_id} <- fake_provider_id(opts) do
-      # Nothing has arrived yet. A fake reporting the full amount paid would teach a
-      # consumer to spend an asset that is still unbonding.
-      {:ok,
-       %Types.StakingTransaction{
-         id: "stk-redeem",
-         type: :unstake,
-         venue_type: "Redeem",
-         asset: String.upcase(asset),
-         amount: amount,
-         amount_paid_so_far: Decimal.new("0"),
-         amount_remaining: amount,
-         provider_id: provider_id,
-         provider: :gemini
-       }}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)),
+           {:ok, provider_id} <- fake_provider_id(opts) do
+        # Nothing has arrived yet. A fake reporting the full amount paid would teach a
+        # consumer to spend an asset that is still unbonding.
+        {:ok,
+         %Types.StakingTransaction{
+           id: "stk-redeem",
+           type: :unstake,
+           venue_type: "Redeem",
+           asset: String.upcase(asset),
+           amount: amount,
+           amount_paid_so_far: Decimal.new("0"),
+           amount_remaining: amount,
+           provider_id: provider_id,
+           provider: :gemini
+         }}
+      end
+    end)
   end
 
   defp fake_provider_id(opts) do
@@ -744,78 +837,87 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do
-    # The fake refuses the ambiguous direction the real package refuses. A fake that picked
-    # one would let a consumer's suite pass on a conversion that spends the wrong asset.
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
-         :ok <- fake_direction(from, to, opts) do
-      {:ok,
-       %Types.Conversion{
-         id: "fake-gemini-quote-1",
-         status: :quoted,
-         from_asset: from,
-         to_asset: to,
-         from_amount: amount,
-         to_amount: Decimal.div(amount, Decimal.new("40000")),
-         rate: Decimal.new("40000"),
-         fee: Decimal.new("0.30"),
-         # A real window, so a consumer testing expiry has something to test against.
-         expires_at: DateTime.add(@at, 60, :second),
-         venue_time: @at,
-         provider: :gemini
-       }}
-    end
+    with_injection(fn ->
+      # The fake refuses the ambiguous direction the real package refuses. A fake that picked
+      # one would let a consumer's suite pass on a conversion that spends the wrong asset.
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+           :ok <- fake_direction(from, to, opts) do
+        {:ok,
+         %Types.Conversion{
+           id: "fake-gemini-quote-1",
+           status: :quoted,
+           from_asset: from,
+           to_asset: to,
+           from_amount: amount,
+           to_amount: Decimal.div(amount, Decimal.new("40000")),
+           rate: Decimal.new("40000"),
+           fee: Decimal.new("0.30"),
+           # A real window, so a consumer testing expiry has something to test against.
+           expires_at: DateTime.add(@at, 60, :second),
+           venue_time: @at,
+           provider: :gemini
+         }}
+      end
+    end)
   end
 
   @impl true
   def commit_conversion(id, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-      case Enum.reject([:symbol, :side, :amount, :price], &Keyword.has_key?(opts, &1)) do
-        [] ->
-          {:ok,
-           %Types.Conversion{
-             id: id,
-             status: :settled,
-             from_asset: "USD",
-             to_asset: "BTC",
-             rate: Decimal.new("40000"),
-             venue_time: @at,
-             provider: :gemini
-           }}
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+        case Enum.reject([:symbol, :side, :amount, :price], &Keyword.has_key?(opts, &1)) do
+          [] ->
+            {:ok,
+             %Types.Conversion{
+               id: id,
+               status: :settled,
+               from_asset: "USD",
+               to_asset: "BTC",
+               rate: Decimal.new("40000"),
+               venue_time: @at,
+               provider: :gemini
+             }}
 
-        missing ->
-          # The venue's execute call needs the terms it quoted against, not the id alone.
-          {:error, {:missing_option, missing}}
+          missing ->
+            # The venue's execute call needs the terms it quoted against, not the id alone.
+            {:error, {:missing_option, missing}}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def convert(from, to, amount, opts \\ []) do
-    # One step and already settled — no rate was held, which is the whole difference from
-    # quote_conversion/4.
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
-         :ok <- fake_direction(from, to, opts) do
-      {:ok,
-       %Types.Conversion{
-         id: "fake-gemini-wrap-1",
-         status: :settled,
-         from_asset: from,
-         to_asset: to,
-         from_amount: amount,
-         to_amount: amount,
-         rate: Decimal.new("1"),
-         expires_at: nil,
-         venue_time: @at,
-         provider: :gemini
-       }}
-    end
+    with_injection(fn ->
+      # One step and already settled — no rate was held, which is the whole difference from
+      # quote_conversion/4.
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+           :ok <- fake_direction(from, to, opts) do
+        {:ok,
+         %Types.Conversion{
+           id: "fake-gemini-wrap-1",
+           status: :settled,
+           from_asset: from,
+           to_asset: to,
+           from_amount: amount,
+           to_amount: amount,
+           rate: Decimal.new("1"),
+           expires_at: nil,
+           venue_time: @at,
+           provider: :gemini
+         }}
+      end
+    end)
   end
 
   @impl true
   def get_trade_volume(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      {:ok, [%{"symbol" => "btcusd", "total_volume_base" => "10.5", "data_date" => "2026-08-31"}]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        {:ok,
+         [%{"symbol" => "btcusd", "total_volume_base" => "10.5", "data_date" => "2026-08-31"}]}
+      end
+    end)
   end
 
   defp fake_direction(from, to, opts) do
@@ -836,120 +938,137 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_deposit_address(asset, network, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-      {:ok,
-       %Types.DepositAddress{
-         asset: asset,
-         network: network,
-         address: "0x0000000000000000000000000000000000000000",
-         memo: nil,
-         # `nil`, as in production. `false` would tell a consumer no memo is needed, which
-         # on Solana or XRP loses the deposit.
-         memo_required: nil,
-         label: Keyword.get(opts, :label),
-         created_at: @at,
-         provider: :gemini
-       }}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+        {:ok,
+         %Types.DepositAddress{
+           asset: asset,
+           network: network,
+           address: "0x0000000000000000000000000000000000000000",
+           memo: nil,
+           # `nil`, as in production. `false` would tell a consumer no memo is needed, which
+           # on Solana or XRP loses the deposit.
+           memo_required: nil,
+           label: Keyword.get(opts, :label),
+           created_at: @at,
+           provider: :gemini
+         }}
+      end
+    end)
   end
 
   @impl true
   def list_approved_addresses(opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-      case Keyword.get(opts, :network) do
-        nil ->
-          {:error, {:missing_option, :network}}
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+        case Keyword.get(opts, :network) do
+          nil ->
+            {:error, {:missing_option, :network}}
 
-        network ->
-          # One active and one still time-locked, because a consumer that only ever sees
-          # active addresses never handles the pending case — and a withdrawal to a pending
-          # address is refused.
-          {:ok,
-           [
-             %Types.ApprovedAddress{
-               address: "0x1111111111111111111111111111111111111111",
-               network: network,
-               status: :active,
-               label: "desk",
-               requested_at: @at,
-               provider: :gemini
-             },
-             %Types.ApprovedAddress{
-               address: "0x2222222222222222222222222222222222222222",
-               network: network,
-               status: :pending,
-               # No activation time, so `usable?/2` answers nil — unknown, not "ready".
-               active_from: nil,
-               label: "new",
-               requested_at: @at,
-               provider: :gemini
-             }
-           ]}
+          network ->
+            # One active and one still time-locked, because a consumer that only ever sees
+            # active addresses never handles the pending case — and a withdrawal to a pending
+            # address is refused.
+            {:ok,
+             [
+               %Types.ApprovedAddress{
+                 address: "0x1111111111111111111111111111111111111111",
+                 network: network,
+                 status: :active,
+                 label: "desk",
+                 requested_at: @at,
+                 provider: :gemini
+               },
+               %Types.ApprovedAddress{
+                 address: "0x2222222222222222222222222222222222222222",
+                 network: network,
+                 status: :pending,
+                 # No activation time, so `usable?/2` answers nil — unknown, not "ready".
+                 active_from: nil,
+                 label: "new",
+                 requested_at: @at,
+                 provider: :gemini
+               }
+             ]}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def estimate_withdrawal_fee(_asset, network, _amount, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-      case Keyword.get(opts, :address) do
-        nil ->
-          {:error, {:missing_option, :address}}
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+        case Keyword.get(opts, :address) do
+          nil ->
+            {:error, {:missing_option, :address}}
 
-        address ->
-          {:ok,
-           %{fee: Decimal.new("0.0005"), fee_currency: "ETH", network: network, address: address}}
+          address ->
+            {:ok,
+             %{
+               fee: Decimal.new("0.0005"),
+               fee_currency: "ETH",
+               network: network,
+               address: address
+             }}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def withdraw(asset, network, amount, address, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
-         :ok <- fake_memo(Keyword.get(opts, :memo), Keyword.get(opts, :memo_required, false)) do
-      {:ok,
-       %Types.Withdrawal{
-         # The idempotency key the real package always sends, echoed so a consumer can
-         # assert its own was used.
-         id: Keyword.get(opts, :client_transfer_id, "fake-transfer-1"),
-         # **`:pending`, never `:completed`.** The venue accepting a withdrawal is not the
-         # chain confirming it, and a fake that reported completion would teach a consumer
-         # the money has arrived.
-         status: :pending,
-         asset: asset,
-         amount: amount,
-         network: network,
-         address: address,
-         memo: Keyword.get(opts, :memo),
-         fee: Decimal.new("0.0005"),
-         tx_id: nil,
-         requested_at: @at,
-         provider: :gemini
-       }}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+           :ok <- fake_memo(Keyword.get(opts, :memo), Keyword.get(opts, :memo_required, false)) do
+        {:ok,
+         %Types.Withdrawal{
+           # The idempotency key the real package always sends, echoed so a consumer can
+           # assert its own was used.
+           id: Keyword.get(opts, :client_transfer_id, "fake-transfer-1"),
+           # **`:pending`, never `:completed`.** The venue accepting a withdrawal is not the
+           # chain confirming it, and a fake that reported completion would teach a consumer
+           # the money has arrived.
+           status: :pending,
+           asset: asset,
+           amount: amount,
+           network: network,
+           address: address,
+           memo: Keyword.get(opts, :memo),
+           fee: Decimal.new("0.0005"),
+           tx_id: nil,
+           requested_at: @at,
+           provider: :gemini
+         }}
+      end
+    end)
   end
 
   @impl true
   def list_payment_methods(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      # One verified and one pending: a consumer filtering on presence rather than status
-      # picks one the venue will refuse.
-      {:ok,
-       [
-         %{"id" => "bank-1", "type" => "bank", "status" => "verified"},
-         %{"id" => "bank-2", "type" => "bank", "status" => "pending"}
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        # One verified and one pending: a consumer filtering on presence rather than status
+        # picks one the venue will refuse.
+        {:ok,
+         [
+           %{"id" => "bank-1", "type" => "bank", "status" => "verified"},
+           %{"id" => "bank-2", "type" => "bank", "status" => "pending"}
+         ]}
+      end
+    end)
   end
 
   @impl true
   def add_payment_method(details, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
-         {:ok, _path} <- fake_country(Keyword.get(opts, :country, "US")) do
-      # **Pending, never verified.** The venue verifies out of band; a fake that returned a
-      # usable method would teach a consumer the first transfer will work.
-      {:ok, Map.merge(%{"id" => "bank-3", "status" => "pending"}, details)}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+           {:ok, _path} <- fake_country(Keyword.get(opts, :country, "US")) do
+        # **Pending, never verified.** The venue verifies out of band; a fake that returned a
+        # usable method would teach a consumer the first transfer will work.
+        {:ok, Map.merge(%{"id" => "bank-3", "status" => "pending"}, details)}
+      end
+    end)
   end
 
   defp fake_country("US"), do: {:ok, :us}
@@ -958,91 +1077,108 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def transfer_internal(asset, amount, transfer_opts, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-      case {Keyword.get(transfer_opts, :from), Keyword.get(transfer_opts, :to)} do
-        {nil, _to} ->
-          {:error, {:missing_option, :from}}
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+        case {Keyword.get(transfer_opts, :from), Keyword.get(transfer_opts, :to)} do
+          {nil, _to} ->
+            {:error, {:missing_option, :from}}
 
-        {_from, nil} ->
-          {:error, {:missing_option, :to}}
+          {_from, nil} ->
+            {:error, {:missing_option, :to}}
 
-        {from, to} ->
-          {:ok,
-           %{
-             "asset" => asset,
-             "amount" => to_string(amount),
-             "sourceAccount" => from,
-             "targetAccount" => to
-           }}
+          {from, to} ->
+            {:ok,
+             %{
+               "asset" => asset,
+               "amount" => to_string(amount),
+               "sourceAccount" => from,
+               "targetAccount" => to
+             }}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def request_approved_address(network, address, label, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-      # **Pending.** A successful response is not permission to withdraw, and a fake that
-      # returned "active" would teach a consumer it is.
-      {:ok,
-       %{"network" => network, "address" => address, "label" => label, "status" => "pending-time"}}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+        # **Pending.** A successful response is not permission to withdraw, and a fake that
+        # returned "active" would teach a consumer it is.
+        {:ok,
+         %{
+           "network" => network,
+           "address" => address,
+           "label" => label,
+           "status" => "pending-time"
+         }}
+      end
+    end)
   end
 
   @impl true
   def remove_approved_address(network, address, opts \\ []) do
-    with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
-      {:ok, %{"network" => network, "address" => address, "status" => "removed"}}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+        {:ok, %{"network" => network, "address" => address, "status" => "removed"}}
+      end
+    end)
   end
 
   @impl true
   def get_transactions(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      # Kinds that are not trades and not transfers, because that is the point of the
-      # endpoint and a fake returning only fills would hide it.
-      {:ok,
-       [
-         %{"type" => "Trade", "amount" => "1"},
-         %{"type" => "Deposit", "amount" => "100"},
-         %{"type" => "Fee", "amount" => "-0.5"}
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        # Kinds that are not trades and not transfers, because that is the point of the
+        # endpoint and a fake returning only fills would hide it.
+        {:ok,
+         [
+           %{"type" => "Trade", "amount" => "1"},
+           %{"type" => "Deposit", "amount" => "100"},
+           %{"type" => "Fee", "amount" => "-0.5"}
+         ]}
+      end
+    end)
   end
 
   @impl true
   def get_notional_balances(credentials, currency, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      # The quantity and its valuation are different keys and different numbers. A fake that
-      # made them equal would let a consumer read either as the other and still pass.
-      {:ok,
-       [
-         %{
-           "currency" => "BTC",
-           "amount" => "1.5",
-           "amountNotional" => "60000.00",
-           "available" => "1.5",
-           "availableNotional" => "60000.00",
-           "notionalCurrency" => String.upcase(currency)
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        # The quantity and its valuation are different keys and different numbers. A fake that
+        # made them equal would let a consumer read either as the other and still pass.
+        {:ok,
+         [
+           %{
+             "currency" => "BTC",
+             "amount" => "1.5",
+             "amountNotional" => "60000.00",
+             "available" => "1.5",
+             "availableNotional" => "60000.00",
+             "notionalCurrency" => String.upcase(currency)
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
   def list_custody_fees(credentials, _opts \\ []) do
-    with :ok <- authenticated(credentials) do
-      # A charge with no trade behind it — the gap a consumer reconciling against fills
-      # alone cannot otherwise explain.
-      {:ok,
-       [
-         %{
-           "currency" => "BTC",
-           "amount" => "0.00012",
-           "timestampms" => 1_700_000_000_000,
-           "eid" => 123_456
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(credentials) do
+        # A charge with no trade behind it — the gap a consumer reconciling against fills
+        # alone cannot otherwise explain.
+        {:ok,
+         [
+           %{
+             "currency" => "BTC",
+             "amount" => "0.00012",
+             "timestampms" => 1_700_000_000_000,
+             "eid" => 123_456
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
@@ -1092,37 +1228,43 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def create_account(opts \\ []) do
-    case Keyword.get(opts, :name) do
-      name when is_binary(name) ->
-        with :ok <- authenticated(fake_credentials(opts)) do
-          # The venue answers with a kebab-cased shortname, not the name that was sent —
-          # a fake that echoed the name would let a consumer address the wrong thing.
-          {:ok,
-           %{
-             "account" => name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-"),
-             "type" => Keyword.get(opts, :type, "exchange")
-           }}
-        end
+    with_injection(fn ->
+      case Keyword.get(opts, :name) do
+        name when is_binary(name) ->
+          with :ok <- authenticated(fake_credentials(opts)) do
+            # The venue answers with a kebab-cased shortname, not the name that was sent —
+            # a fake that echoed the name would let a consumer address the wrong thing.
+            {:ok,
+             %{
+               "account" => name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-"),
+               "type" => Keyword.get(opts, :type, "exchange")
+             }}
+          end
 
-      _missing ->
-        {:error, :name_required}
-    end
+        _missing ->
+          {:error, :name_required}
+      end
+    end)
   end
 
   @impl true
   def rename_account(id, name, opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)) do
-      # Only the fields that changed come back, as the venue documents.
-      {:ok, %{"name" => name, "account" => id}}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)) do
+        # Only the fields that changed come back, as the venue documents.
+        {:ok, %{"name" => name, "account" => id}}
+      end
+    end)
   end
 
   @impl true
   def get_roles(opts \\ []) do
-    with :ok <- authenticated(fake_credentials(opts)) do
-      # Trader and Fund Manager combined, and Auditor false — the combination the venue
-      # allows. One role field would not be able to say this.
-      {:ok, %{"isAuditor" => false, "isFundManager" => true, "isTrader" => true}}
-    end
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts)) do
+        # Trader and Fund Manager combined, and Auditor false — the combination the venue
+        # allows. One role field would not be able to say this.
+        {:ok, %{"isAuditor" => false, "isFundManager" => true, "isTrader" => true}}
+      end
+    end)
   end
 end
