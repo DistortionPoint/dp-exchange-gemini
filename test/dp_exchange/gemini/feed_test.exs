@@ -106,6 +106,36 @@ defmodule DpExchange.Gemini.FeedTest do
 
       assert_receive {:dp_exchange, :gemini, %Quote{}}
     end
+
+    test "a subscriber registered by name (not a raw pid) is delivered to rather than crashing the feed" do
+      # Filed as a live bug on the sibling Coinbase package: Process.alive?/1 only
+      # accepts a pid and raises on anything else, so a consumer that registers itself
+      # under a name and hands that name to `to:` — ordinary OTP practice — crashed the
+      # whole feed on the very first delivery.
+      name = :"gemini_feed_test_subscriber_#{System.unique_integer([:positive])}"
+      Process.register(self(), name)
+      feed = start_feed()
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: name)
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+
+      assert_receive {:dp_exchange, :gemini, %Quote{}}
+      assert Process.alive?(feed)
+
+      Process.unregister(name)
+    end
+
+    test "a name that is not (or no longer) registered is silently skipped, not a crash" do
+      name = :"gemini_feed_test_unregistered_#{System.unique_integer([:positive])}"
+      refute Process.whereis(name)
+      feed = start_feed()
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: name)
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      Process.sleep(20)
+
+      assert Process.alive?(feed)
+    end
   end
 
   describe "update_symbols/2" do
