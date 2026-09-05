@@ -90,7 +90,7 @@ defmodule DpExchange.Gemini.Private do
     Withdrawal
   }
 
-  alias DpExchange.Gemini.{Auth, Environment, SymbolFormat}
+  alias DpExchange.Gemini.{Auth, Environment, Rest, SymbolFormat}
 
   @doc "Every currency the account holds, with what is available and what is on hold."
   @spec get_balances(map(), keyword()) ::
@@ -2393,12 +2393,11 @@ defmodule DpExchange.Gemini.Private do
 
   defp epoch_ms(_other), do: nil
 
-  defp refusal(body) do
-    case decode(body) do
-      %{"reason" => reason} -> String.to_atom(Macro.underscore(reason))
-      _other -> :refused
-    end
-  end
+  # Delegated to `Rest.refusal_reason/1` rather than duplicated. This was a second, exact
+  # copy of the same `String.to_atom/1` on venue-supplied text, so the atom-table DoS it
+  # carried had to be found and fixed twice — and could as easily have been fixed in only
+  # one of the two. One implementation, one place to get it right.
+  defp refusal(body), do: Rest.refusal_reason(decode(body))
 
   defp decode(body) when is_binary(body) do
     case Jason.decode(body) do

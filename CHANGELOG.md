@@ -38,6 +38,34 @@ acceptable changelog line.
 
 ### Fixed
 
+- **Decoding a venue refusal could exhaust the VM's atom table and kill the whole BEAM —
+  family-wide defect sweep, G7.** `refusal/1` in both `Rest` and `Private` built its result
+  with `String.to_atom(Macro.underscore(reason))`, where `reason` comes straight out of
+  Gemini's own JSON error body. Atoms are **never garbage collected** and the table is
+  finite (default ~1,048,576): a venue emitting unbounded distinct reasons — through error
+  variety, a changed error format, anything this package does not control — mints a
+  permanent atom every time and eventually takes down the entire node. These packages run
+  *inside* a consumer's application, so that is the consumer's whole system, not just this
+  venue.
+
+  `mix sobelow` had been reporting it as `DOS.StringToAtom` all along, and it was waved
+  through twice in one day as a "pre-existing, unrelated, low-confidence warning". It was
+  none of those three.
+
+  Fixed by writing the recognised refusal vocabulary down at compile time
+  (`@refusal_reasons`) and mapping against it, so an atom can only ever come from a fixed
+  set — the same discipline `Core.FakeInjection` already adopted deliberately for this
+  exact class. Every reason callers already match on keeps its existing atom, unchanged.
+  An **unrecognised** reason now returns `{:unknown_reason, reason}`, keeping the venue's
+  own wording rather than being flattened to a bare `:refused`: the list is deliberately
+  not exhaustive (Gemini adds reasons without notice), so it has to degrade legibly rather
+  than silently. The duplicate copy in `Private` now delegates to the one implementation —
+  it had to be found and fixed twice, and could as easily have been fixed in only one.
+
+  Regression test asserts `:erlang.system_info(:atom_count)` is unchanged across fifty
+  novel reasons, because the old return value looked perfectly reasonable the entire time
+  the bug was live.
+
 - **`get_staking_rates/1` had `asset` and `provider_id` swapped, and read a field that does
   not exist — family-wide defect sweep, G1+G2.** Re-verified live 2026-09-05:
   `GET https://api.gemini.com/v1/staking/rates` returns

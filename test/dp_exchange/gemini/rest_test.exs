@@ -149,6 +149,62 @@ defmodule DpExchange.Gemini.RestTest do
       assert {:error, _reason} =
                Rest.get_price("BTC-USD", plug: responding(%{}, status: 500), retry_attempts: 0)
     end
+
+    test "an UNRECOGNISED reason keeps the venue's words and creates NO atom" do
+      # This decoded with `String.to_atom(Macro.underscore(reason))`, on text the venue
+      # supplies. Atoms are never garbage collected and the table is finite, so a venue
+      # emitting novel reasons could exhaust it and kill the whole BEAM — the consumer's
+      # entire node, not just this package. `mix sobelow` flagged it as DOS.StringToAtom
+      # and it was waved through twice as a "pre-existing low-confidence warning".
+      #
+      # Asserting on `:atom_count` rather than on the return value alone, because the
+      # return value looked perfectly reasonable the whole time the bug was live.
+      before_count = :erlang.system_info(:atom_count)
+
+      reasons =
+        for index <- 1..50,
+            do: "NoSuchReasonInvented#{index}#{System.unique_integer([:positive])}"
+
+      results =
+        for reason <- reasons do
+          body = %{"result" => "error", "reason" => reason}
+
+          Rest.get_price("BTC-USD", plug: responding(body, status: 400), retry_attempts: 0)
+        end
+
+      assert :erlang.system_info(:atom_count) == before_count
+
+      # And the venue's own wording survives — an unrecognised reason must degrade
+      # legibly, not collapse to a bare `:refused` that says nothing about what happened.
+      for {result, reason} <- Enum.zip(results, reasons) do
+        assert {:refused, {:unknown_reason, ^reason}} = result
+      end
+    end
+
+    test "every RECOGNISED reason still maps to the atom callers already match on" do
+      # The fix must not quietly change the vocabulary consumers pattern-match against.
+      for {sent, expected} <- [
+            {"InvalidSymbol", :invalid_symbol},
+            {"InvalidApiKey", :invalid_api_key},
+            {"MissingSecurityHeaders", :missing_security_headers},
+            {"InvalidSignature", :invalid_signature},
+            {"InvalidNonce", :invalid_nonce},
+            {"RateLimit", :rate_limit}
+          ] do
+        body = %{"result" => "error", "reason" => sent}
+
+        assert {:refused, ^expected} =
+                 Rest.get_price("BTC-USD", plug: responding(body, status: 400), retry_attempts: 0)
+      end
+    end
+
+    test "a 400 with no reason at all is still a plain refusal" do
+      assert {:refused, :refused} =
+               Rest.get_price("BTC-USD",
+                 plug: responding(%{"result" => "error"}, status: 400),
+                 retry_attempts: 0
+               )
+    end
   end
 
   defp to_ms(datetime), do: DateTime.to_unix(datetime, :millisecond)

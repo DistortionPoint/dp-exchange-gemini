@@ -58,6 +58,39 @@ defmodule DpExchange.Gemini.Rest do
 
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
+  # The venue's refusal vocabulary, written down at compile time so that decoding one can
+  # never mint an atom from venue-supplied text. See `refusal_reason/1` for why that
+  # matters more than it looks.
+  #
+  # These are the reasons this package RECOGNISES, not the venue's complete list — Gemini
+  # publishes more and adds to them without notice. That is exactly why an unrecognised
+  # reason keeps its own string rather than being guessed at or collapsed: an incomplete
+  # list must degrade legibly, not silently. Each key is the venue's own spelling; each
+  # value is the atom this package's callers already match on, unchanged from when these
+  # were built by `String.to_atom(Macro.underscore(reason))`.
+  #
+  # Every entry here is either in Gemini's own documented error-code table
+  # (`docs/reference/gemini/rate-limits-and-auth.md` — the seven `Missing*`/`Invalid*`/
+  # `AmbiguousAuthentication` codes) or measured live and recorded elsewhere in this
+  # module's own docs (`MissingSecurityHeaders`, the documented divergence from
+  # `MissingApikeyHeader`; `InvalidSymbol` and `InvalidParameterValue`, named in
+  # `request_opts/1`'s comment and exercised by this module's own tests). Nothing is
+  # guessed: an entry that is not backed by the vendor's table or a live measurement does
+  # not belong here, because a wrong entry in this map is silently, permanently wrong for
+  # whatever real reason happens to collide with it.
+  @refusal_reasons %{
+    "MissingApikeyHeader" => :missing_apikey_header,
+    "MissingPayloadHeader" => :missing_payload_header,
+    "MissingSignatureHeader" => :missing_signature_header,
+    "InvalidNonce" => :invalid_nonce,
+    "InvalidSignature" => :invalid_signature,
+    "AmbiguousAuthentication" => :ambiguous_authentication,
+    "InvalidApiKey" => :invalid_api_key,
+    "MissingSecurityHeaders" => :missing_security_headers,
+    "InvalidSymbol" => :invalid_symbol,
+    "InvalidParameterValue" => :invalid_parameter_value
+  }
+
   # Canonical width => the literal Gemini accepts. Measured 2026-08-28: the venue names
   # its own accepted set in the 400 body — `[1m, 5m, 15m, 30m, 1hr, 6hr, 1day]` — while
   # its documentation lists `1h`, `6h` and `1d`, none of which work. Three of the seven
@@ -783,12 +816,35 @@ defmodule DpExchange.Gemini.Rest do
   # A 400 from Gemini names its own reason, and the ones below are permanent for the
   # request as sent — no retry can make an unknown symbol known. That is a refusal, not
   # an error, and the distinction is the whole point of having two shapes.
-  defp refusal(body) do
-    case decode(body) do
-      %{"reason" => reason} -> String.to_atom(Macro.underscore(reason))
-      _other -> :refused
-    end
+  defp refusal(body), do: refusal_reason(decode(body))
+
+  @doc false
+  # Shared with `DpExchange.Gemini.Private`, which refuses on the same venue vocabulary.
+  # One implementation rather than two copies that can drift apart on a security fix.
+  #
+  # ## This must never call `String.to_atom/1` on the venue's reason
+  #
+  # It used to. `reason` arrives from the venue's own JSON error body, and atoms are
+  # **never garbage collected** — the VM's atom table is finite (default ~1,048,576) and
+  # exhausting it kills the entire BEAM, not just this package. Since these packages run
+  # *inside* a consumer's application, an unbounded stream of distinct reasons would take
+  # that consumer's whole node down, driven by input this package does not control. Found
+  # by `mix sobelow` (`DOS.StringToAtom`) during the 2026-09-05 defect sweep, where it had
+  # been waved through twice as a "pre-existing low-confidence warning".
+  #
+  # `Core.FakeInjection` already designed around this same class deliberately — see its
+  # moduledoc. The rule is the same here: an atom may only ever come from a fixed set
+  # written down at compile time.
+  #
+  # A reason NOT in that set keeps the venue's own words as data rather than being
+  # flattened to a bare `:refused`, because the venue's wording is the only thing that
+  # says what actually happened, and Gemini adds reasons without telling anyone.
+  @spec refusal_reason(term()) :: atom() | {:unknown_reason, String.t()}
+  def refusal_reason(%{"reason" => reason}) when is_binary(reason) do
+    Map.get(@refusal_reasons, reason, {:unknown_reason, reason})
   end
+
+  def refusal_reason(_other), do: :refused
 
   # The venue's own clock, from the response it served. Absent, and the request fails —
   # a quote whose freshness cannot be stated must not be returned.
