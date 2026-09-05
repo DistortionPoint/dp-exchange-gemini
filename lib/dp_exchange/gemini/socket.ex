@@ -47,6 +47,36 @@ defmodule DpExchange.Gemini.Socket do
 
   require Logger
 
+  # Chosen against `Feed.@call_timeout` (15s), not inherited from `websockex`'s own
+  # general-purpose defaults (6s connect + 5s recv — measured from
+  # `deps/websockex/lib/websockex/conn.ex:10-11`, which `start_link/1` used to pass no
+  # opts at all and so accepted by accident). `ensure_socket/1` connects synchronously
+  # inside a `Feed`/`SandboxFeed` `handle_call`, and one `send_frame` for the subscribe
+  # that follows (`@frame_window_ms`, 5s) rides the same call: 3s + 2s + 5s = 10s, leaving
+  # 5s of `@call_timeout` for everything else in that call. See `Feed`'s moduledoc.
+  @socket_connect_timeout_ms 3_000
+  @socket_recv_timeout_ms 2_000
+
+  @doc """
+  The `websockex` connection opts `start_link/1` passes to `WebSockex.start_link/4` —
+  `:socket_connect_timeout` and `:socket_recv_timeout`, defaulted to this module's own
+  budget (see the moduledoc) and overridable by `opts`.
+
+  Exposed as its own function, rather than inlined, so the budget the moduledoc claims can
+  be pinned by a test without opening a real connection — `start_link/1` itself cannot be
+  exercised against a fake transport, since `websockex` dials for real — and so a later
+  refactor cannot silently drop either the explicit values or the override path back to
+  `websockex`'s own accidental defaults.
+  """
+  @spec connect_opts(keyword()) :: keyword()
+  def connect_opts(opts) do
+    [
+      socket_connect_timeout:
+        Keyword.get(opts, :socket_connect_timeout, @socket_connect_timeout_ms),
+      socket_recv_timeout: Keyword.get(opts, :socket_recv_timeout, @socket_recv_timeout_ms)
+    ]
+  end
+
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     url =
@@ -59,7 +89,7 @@ defmodule DpExchange.Gemini.Socket do
       request_id: 0
     }
 
-    WebSockex.start_link(url, __MODULE__, state)
+    WebSockex.start_link(url, __MODULE__, state, connect_opts(opts))
   end
 
   @doc """

@@ -485,11 +485,14 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "get_staking_rates/1", %{opts: sup} do
-      body = %{"ETH" => %{"provider-a" => %{"ratePct" => "4.0"}}}
+      # Keyed as the venue actually sends it: outer key the provider, inner key the asset —
+      # see `Rest.get_staking_rates/1`'s moduledoc for why this used to be inverted.
+      body = %{"provider-a" => %{"ETH" => %{"ratePct" => "4.0"}}}
 
       assert {:ok, [rate]} =
                Gemini.get_staking_rates(Keyword.merge(money_opts(sup, body), credentials: nil))
 
+      assert rate.asset == "ETH"
       assert rate.provider_id == "provider-a"
     end
 

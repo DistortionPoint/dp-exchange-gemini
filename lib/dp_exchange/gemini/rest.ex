@@ -493,24 +493,14 @@ defmodule DpExchange.Gemini.Rest do
   defp as_of(ms, _requested_at) when is_integer(ms), do: DateTime.from_unix!(ms, :millisecond)
   defp as_of(_absent, requested_at), do: requested_at
 
-  @doc """
-  The blockchain networks `asset` moves over — `GET /v2/network/{token}`.
-
-  **Read this before `get_deposit_address/3`.** That endpoint takes a network, and a wrong
-  one produces an address on a chain this venue does not credit; funds sent there are gone.
-
-  Public. The inverse direction — which assets a *network* carries — is authenticated and
-  lives in `DpExchange.Gemini.Private.list_networks/2`, because the venue scopes its answer
-  to the credential.
-
-  Rows come back as the venue sends them: its network names are its own, and translating
-  them would invent a vocabulary it does not accept back.
-  """
-  @spec networks_for_asset(String.t(), keyword()) ::
-          {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def networks_for_asset(asset, opts) do
-    with {:ok, body} <- get_body("/v2/network/#{asset}", opts), do: {:ok, List.wrap(body)}
-  end
+  # `GET /v2/network/{token}` — the blockchain networks an asset moves over — used to live
+  # here, documented "Public". It is not: measured live 2026-09-05, an unauthenticated
+  # `GET /v2/network/BTC` returns `401 MissingSecurityHeaders`, and the vendor's own
+  # OpenAPI requires apiKeyAuth, signatureAuth and payloadAuth on this route. `Rest` never
+  # sends credentials — that is this module's whole design, see the moduledoc — so this
+  # function could never succeed no matter what a caller passed it. It now lives in
+  # `DpExchange.Gemini.Private.list_networks/2`, signed like every other authenticated
+  # call, alongside the network→assets direction it already answered.
 
   @doc """
   Symbols currently carrying a promotional fee — `GET /v1/feepromos`.
@@ -541,6 +531,24 @@ defmodule DpExchange.Gemini.Rest do
 
   Public: the schedule is the same for everyone, so no credential is involved.
 
+  ## The nesting was read backwards, and the fixture agreed with the bug
+
+  Measured live 2026-09-05: the response is `{"<provider-uuid>": {"ETH": {...}, "SOL":
+  {...}}}` — the **outer key is a provider UUID** and each provider holds a map keyed by
+  **asset symbol**. This package had it inverted: `asset` was read from the outer key and
+  `provider_id` from the inner one, so every `StakingRate` it built carried an upcased UUID
+  as its asset and a real asset symbol as its provider. Gemini's own OpenAPI names the
+  nesting exactly this way too — `StakingRateResponse`'s "Provider UUID Keys" hold a
+  `StakingRateProvider`'s "Currency Symbol Keys" — so the mistake was checkable without a
+  live call, and it wasn't checked: the test fixture was written keyed the same wrong way,
+  which is exactly why a swapped pair of fields survived. The fix is keyed the other way
+  and the fixture now uses the shape captured from the live response.
+
+  Each row also names its own field for the notional cap — `depositUsdLimit` — which this
+  package read as `depositLimitUsd`, a field the venue does not send. Every row's
+  `:deposit_limit_usd` was silently `nil`. The same live payload proved both bugs at once,
+  so both are fixed together.
+
   **Three numbers, and only two of them survive.** Gemini publishes `rate` in *basis
   points*, `ratePct` as a percentage and `apyPct` as an annualised percentage — the first
   two differ by a factor of a hundred and the third by compounding as well. `StakingRate`
@@ -552,9 +560,8 @@ defmodule DpExchange.Gemini.Rest do
   derived from `:rate_pct` at all — that needs a compounding frequency the venue did not
   state, and assuming one is inventing a number.
 
-  The response is keyed by asset, each asset holding its providers. Both levels are walked
-  so a provider is addressable; `Types.StakingBalance` carries the matching breakdown, and
-  redeeming from the wrong provider redeems at the wrong rate.
+  Both levels are walked so a provider is addressable; `Types.StakingBalance` carries the
+  matching breakdown, and redeeming from the wrong provider redeems at the wrong rate.
   """
   @spec get_staking_rates(keyword()) ::
           {:ok, [StakingRate.t()]} | {:error, term()} | {:refused, term()}
@@ -565,16 +572,16 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp staking_rates(%{} = body) do
-    Enum.flat_map(body, fn {asset, providers} -> rates_for_asset(asset, providers) end)
+    Enum.flat_map(body, fn {provider_id, assets} -> rates_for_provider(provider_id, assets) end)
   end
 
   defp staking_rates(_other), do: []
 
-  defp rates_for_asset(asset, %{} = providers) do
-    Enum.map(providers, fn {provider_id, row} -> staking_rate(asset, provider_id, row) end)
+  defp rates_for_provider(provider_id, %{} = assets) do
+    Enum.map(assets, fn {asset, row} -> staking_rate(asset, provider_id, row) end)
   end
 
-  defp rates_for_asset(_asset, _other), do: []
+  defp rates_for_provider(_provider_id, _other), do: []
 
   defp staking_rate(asset, provider_id, row) when is_map(row) do
     %StakingRate{
@@ -582,7 +589,7 @@ defmodule DpExchange.Gemini.Rest do
       provider_id: provider_id,
       rate_pct: rate_pct(row),
       apy_pct: decimal(row["apyPct"]),
-      deposit_limit_usd: decimal(row["depositLimitUsd"]),
+      deposit_limit_usd: decimal(row["depositUsdLimit"]),
       venue_time: nil,
       provider: :gemini
     }

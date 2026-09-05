@@ -177,4 +177,42 @@ defmodule DpExchange.Gemini.SocketTest do
       assert Map.keys(details) == [:reason]
     end
   end
+
+  describe "connect_opts/1 — the connect timeout budget start_link/1 actually uses" do
+    # `start_link/1` itself dials a real socket and can't be exercised here (see the
+    # module note at the top of this file), so this pins the keyword list it builds and
+    # passes to `WebSockex.start_link/4` instead — the one thing that actually determines
+    # the connect budget. Before this existed, `start_link/1` passed no opts to
+    # `WebSockex.start_link/4` at all, silently inheriting websockex's own 6s/5s defaults
+    # rather than the 3s/2s this package chose against its own `@call_timeout` budget; a
+    # regression back to that would not show up as a compile error or a crash, only as a
+    # slow venue eventually wedging every consumer sharing one `Feed`.
+    test "defaults to this package's own chosen budget, not websockex's" do
+      assert Socket.connect_opts([]) == [
+               socket_connect_timeout: 3_000,
+               socket_recv_timeout: 2_000
+             ]
+    end
+
+    test "a caller's :socket_connect_timeout wins over the default" do
+      assert Socket.connect_opts(socket_connect_timeout: 9_000)[:socket_connect_timeout] ==
+               9_000
+    end
+
+    test "a caller's :socket_recv_timeout wins over the default" do
+      assert Socket.connect_opts(socket_recv_timeout: 9_000)[:socket_recv_timeout] == 9_000
+    end
+
+    test "unrelated opts (subscriber, url, ...) are not carried into the connect opts" do
+      # `start_link/1`'s own `opts` carry `:subscriber` always, and `:url` on ordinary use
+      # — neither is a `websockex` connection option, and `WebSockex.Conn` would ignore an
+      # unknown key rather than reject it, so a leak here would be silent.
+      opts = [subscriber: self(), url: "wss://example.invalid", socket_connect_timeout: 1_000]
+
+      assert Socket.connect_opts(opts) == [
+               socket_connect_timeout: 1_000,
+               socket_recv_timeout: 2_000
+             ]
+    end
+  end
 end

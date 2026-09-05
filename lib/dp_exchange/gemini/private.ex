@@ -90,7 +90,7 @@ defmodule DpExchange.Gemini.Private do
     Withdrawal
   }
 
-  alias DpExchange.Gemini.{Auth, Environment, Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Auth, Environment, SymbolFormat}
 
   @doc "Every currency the account holds, with what is available and what is on hold."
   @spec get_balances(map(), keyword()) ::
@@ -851,14 +851,25 @@ defmodule DpExchange.Gemini.Private do
   **Call this before `get_deposit_address/3`.** That endpoint takes a network, and a wrong
   one produces an address on a chain this venue does not credit — funds sent there are gone.
 
-  Two directions and two endpoints, and they are not symmetric:
+  Two directions and two endpoints, both authenticated GETs:
 
-      list_networks("USDC", [])          public,  GET /v2/network/USDC
-      list_networks(nil, network: "…")   private, /v2/networks/{network}/assets
+      list_networks("USDC", credentials: creds)              GET /v2/network/USDC
+      list_networks(nil, network: "…", credentials: creds)   GET /v2/networks/{network}/assets
 
-  **The second is scoped to the credential and the first is not.** The vendor requires the
-  Fund Manager or Auditor role and states it returns *"only the assets where your account
-  has deposit and withdraw access enabled"*. So an empty answer means **this account cannot
+  **Both directions were dead until 2026-09-05, in two different ways.** The asset
+  direction used to be documented "Public" and delegate to `Rest.networks_for_asset/2`,
+  which sends no credentials — that is `Rest`'s whole design. Measured live: an
+  unauthenticated `GET /v2/network/BTC` returns `401 MissingSecurityHeaders`, and the
+  vendor's OpenAPI requires apiKeyAuth, signatureAuth and payloadAuth on it, so this
+  direction could never succeed for any consumer. The network direction had its own,
+  independent bug: it `POST`ed to `/v2/networks/{network}/assets`, and the vendor documents
+  that route as `GET` (`operationId: getAssetsForNetwork`) — there is no POST form. Both
+  now go through `signed_get/3`, the helper this module already used for exactly this
+  request shape elsewhere.
+
+  **Both are scoped to the credential.** The vendor requires the Fund Manager or Auditor
+  role and states the network direction returns *"only the assets where your account has
+  deposit and withdraw access enabled"*. So an empty answer means **this account cannot
   move anything on that network**, not that the network carries nothing — a caller reading
   it as a description of the network would draw the wrong conclusion from a true response.
   """
@@ -873,13 +884,19 @@ defmodule DpExchange.Gemini.Private do
         credentials = Keyword.get(opts, :credentials, %{})
 
         with {:ok, body, _headers} <-
-               post("/v2/networks/#{network}/assets", %{}, credentials, opts) do
+               signed_get("/v2/networks/#{network}/assets", credentials, opts) do
           {:ok, List.wrap(body)}
         end
     end
   end
 
-  def list_networks(asset, opts), do: Rest.networks_for_asset(asset, opts)
+  def list_networks(asset, opts) do
+    credentials = Keyword.get(opts, :credentials, %{})
+
+    with {:ok, body, _headers} <- signed_get("/v2/network/#{asset}", credentials, opts) do
+      {:ok, List.wrap(body)}
+    end
+  end
 
   @doc """
   A fresh deposit address for `asset` on `network` — `/v1/deposit/{network}/newAddress`.

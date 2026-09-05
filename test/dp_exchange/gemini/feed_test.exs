@@ -189,6 +189,63 @@ defmodule DpExchange.Gemini.FeedTest do
     end
   end
 
+  describe "the periodic resubscribe — a reconnect with no memory must not mean silence" do
+    # `Socket` holds no record of what it was told to carry (`%{subscriber:, request_id:}`),
+    # and WebSockex reconnects on its own without this package's involvement. Before this
+    # fix, `handle_connect/2` emitted `:link_up` and nothing else — a reconnected socket
+    # looked healthy and delivered nothing until a consumer noticed a quiet chart. `Feed`
+    # now re-issues its `wanted` set on a timer, unconditionally, which is what actually
+    # recovers coverage after a reconnect this process never even learns happened.
+    #
+    # `:resubscribe` is sent directly here rather than waiting out the real
+    # `@resubscribe_interval_ms` — the handler doesn't care who sent the message, only that
+    # it arrived, so this exercises the exact code path the timer drives without a 60-second
+    # test.
+    test "resends the current subscription on the wire, unprompted by any reconnect signal" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:frame_sent, frame}
+      assert frame["method"] == "subscribe"
+      assert Enum.sort(frame["params"]) == ["btcusd@bookTicker", "ethusd@bookTicker"]
+    end
+
+    test "drops what was unsubscribed rather than re-asking for it" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      :ok = Feed.unsubscribe(feed, ["ETH-USD"])
+      assert_receive {:frame_sent, %{"method" => "unsubscribe"}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:frame_sent, frame}
+      assert frame["params"] == ["btcusd@bookTicker"]
+    end
+
+    test "sends nothing when nothing is wanted" do
+      feed = start_feed()
+
+      send(feed, :resubscribe)
+
+      refute_receive {:frame_sent, _frame}, 50
+      assert Process.alive?(feed)
+    end
+
+    test "sends nothing when no socket has ever been dialled" do
+      {:ok, feed} = Feed.start_link(name: :"feed_#{System.unique_integer([:positive])}")
+
+      send(feed, :resubscribe)
+
+      # No socket, nothing to crash and nothing to send to.
+      Process.sleep(10)
+      assert Process.alive?(feed)
+    end
+  end
+
   describe "unknown messages" do
     test "an unexpected call is refused rather than crashing the feed" do
       feed = start_feed()

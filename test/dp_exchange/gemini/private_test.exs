@@ -935,22 +935,55 @@ defmodule DpExchange.Gemini.PrivateTest do
   end
 
   describe "networks — the call that has to happen before a deposit address" do
-    test "the asset direction is public and lists the chains" do
-      # get_deposit_address/3 takes a network, and a wrong one produces an address on a
-      # chain this venue does not credit. Funds sent there are gone.
-      body = [%{"token" => "USDC", "network" => ["ethereum", "solana"]}]
-
-      assert {:ok, rows} =
-               Rest.networks_for_asset("USDC", plug: responding(body), retry_attempts: 0)
-
-      assert [%{"token" => "USDC"}] = rows
-    end
-
-    test "the network direction is authenticated and asks the venue's own path" do
+    test "the asset direction is authenticated — it was never actually public" do
+      # Measured live 2026-09-05: an unauthenticated `GET /v2/network/BTC` returns
+      # `401 MissingSecurityHeaders`, and the vendor's OpenAPI requires apiKeyAuth,
+      # signatureAuth and payloadAuth on this route. This used to delegate to
+      # `Rest.networks_for_asset/2`, which never sends credentials — so it could not
+      # succeed against the real venue no matter what a caller passed. This asserts the
+      # fixed path actually signs the request and asks GET.
       me = self()
 
       plug = fn conn ->
-        send(me, {:path, conn.request_path})
+        send(
+          me,
+          {:request, conn.method, conn.request_path,
+           Plug.Conn.get_req_header(conn, "x-gemini-apikey")}
+        )
+
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Req.Test.json([%{"token" => "USDC", "network" => ["ethereum", "solana"]}])
+      end
+
+      assert {:ok, rows} =
+               Private.list_networks("USDC",
+                 credentials: @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert [%{"token" => "USDC"}] = rows
+      assert_receive {:request, "GET", "/v2/network/USDC", ["account-test"]}
+    end
+
+    test "the asset direction is refused, not sent bare, with nothing to sign with" do
+      exploding = fn _conn ->
+        raise "must not reach the venue with no credentials to sign the request with"
+      end
+
+      assert {:error, {:unsupported_auth_scheme, nil}} =
+               Private.list_networks("USDC", plug: exploding, retry_attempts: 0)
+    end
+
+    test "the network direction asks GET, not POST" do
+      # `list_networks(nil, network: …)` used to `POST` to `/v2/networks/{network}/assets`.
+      # The vendor documents that route as `GET` (`operationId: getAssetsForNetwork`) — there
+      # is no POST form, so every call here was hitting a route that does not exist.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:request, conn.method, conn.request_path})
 
         conn
         |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
@@ -965,7 +998,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:path, "/v2/networks/ethereum/assets"}
+      assert_receive {:request, "GET", "/v2/networks/ethereum/assets"}
     end
 
     test "neither an asset nor a network is an error" do
@@ -973,23 +1006,6 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       assert {:error, :asset_or_network_required} =
                Private.list_networks(nil, plug: exploding, retry_attempts: 0)
-    end
-
-    test "the asset direction goes through the public endpoint even from Private" do
-      me = self()
-
-      plug = fn conn ->
-        send(me, {:path, conn.request_path})
-
-        conn
-        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
-        |> Req.Test.json([%{"token" => "USDC"}])
-      end
-
-      assert {:ok, [_row]} =
-               Private.list_networks("USDC", plug: plug, retry_attempts: 0)
-
-      assert_receive {:path, "/v2/network/USDC"}
     end
   end
 

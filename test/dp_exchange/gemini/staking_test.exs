@@ -62,10 +62,43 @@ defmodule DpExchange.Gemini.StakingTest do
   end
 
   describe "get_staking_rates/1 — the unit is the whole risk" do
+    test "the real venue shape: outer key is the provider, inner key is the asset" do
+      # Captured live against `GET https://api.gemini.com/v1/staking/rates` on 2026-09-05:
+      #
+      #     {"62bb4d27-a9c8-4493-a737-d4fa33994f1f":
+      #        {"ETH": {"providerId": "62bb4d27-a9c8-4493-a737-d4fa33994f1f", "rate": 22.95,
+      #                 "apyPct": 0.23, "ratePct": 0.2295, "depositUsdLimit": 10000000}}}
+      #
+      # The code used to read this backwards — asset from the outer key, provider from the
+      # inner one — so it would have asserted `rate.asset ==
+      # "62BB4D27-A9C8-4493-A737-D4FA33994F1F"` here instead of "ETH", and
+      # `rate.deposit_limit_usd == nil` because it read `depositLimitUsd`, a field the venue
+      # does not send.
+      body = %{
+        "62bb4d27-a9c8-4493-a737-d4fa33994f1f" => %{
+          "ETH" => %{
+            "providerId" => "62bb4d27-a9c8-4493-a737-d4fa33994f1f",
+            "rate" => 22.95,
+            "apyPct" => 0.23,
+            "ratePct" => 0.2295,
+            "depositUsdLimit" => 10_000_000
+          }
+        }
+      }
+
+      assert {:ok, [rate]} = Rest.get_staking_rates(plug: responding(body), retry_attempts: 0)
+      assert %Types.StakingRate{} = rate
+      assert rate.asset == "ETH"
+      assert rate.provider_id == "62bb4d27-a9c8-4493-a737-d4fa33994f1f"
+      assert Decimal.equal?(rate.rate_pct, Decimal.new("0.2295"))
+      assert Decimal.equal?(rate.apy_pct, Decimal.new("0.23"))
+      assert Decimal.equal?(rate.deposit_limit_usd, Decimal.new("10000000"))
+    end
+
     test "a percentage is taken as published" do
       body = %{
-        "ETH" => %{
-          "provider-a" => %{"ratePct" => "4.0", "apyPct" => "4.07"}
+        "provider-a" => %{
+          "ETH" => %{"ratePct" => "4.0", "apyPct" => "4.07"}
         }
       }
 
@@ -80,14 +113,14 @@ defmodule DpExchange.Gemini.StakingTest do
     test "basis points are divided by a hundred, not carried as a percentage" do
       # 400 bps is 4%. Carried unconverted it is a rate a hundred times too high, and every
       # number downstream stays plausible.
-      body = %{"ETH" => %{"provider-a" => %{"rate" => 400}}}
+      body = %{"provider-a" => %{"ETH" => %{"rate" => 400}}}
 
       assert {:ok, [rate]} = Rest.get_staking_rates(plug: responding(body), retry_attempts: 0)
       assert Decimal.equal?(rate.rate_pct, Decimal.new("4"))
     end
 
     test "ratePct wins where both are published" do
-      body = %{"ETH" => %{"provider-a" => %{"rate" => 400, "ratePct" => "4.25"}}}
+      body = %{"provider-a" => %{"ETH" => %{"rate" => 400, "ratePct" => "4.25"}}}
 
       assert {:ok, [rate]} = Rest.get_staking_rates(plug: responding(body), retry_attempts: 0)
       assert Decimal.equal?(rate.rate_pct, Decimal.new("4.25"))
@@ -96,23 +129,24 @@ defmodule DpExchange.Gemini.StakingTest do
     test "an APY the venue does not publish stays nil rather than being derived" do
       # Turning a simple rate into an APY needs a compounding frequency the venue did not
       # state. Assuming one invents a number a caller cannot see was invented.
-      body = %{"ETH" => %{"provider-a" => %{"ratePct" => "4.0"}}}
+      body = %{"provider-a" => %{"ETH" => %{"ratePct" => "4.0"}}}
 
       assert {:ok, [rate]} = Rest.get_staking_rates(plug: responding(body), retry_attempts: 0)
       assert rate.apy_pct == nil
     end
 
-    test "every provider under an asset is addressable" do
+    test "every asset under a provider is addressable" do
       body = %{
-        "ETH" => %{
-          "provider-a" => %{"ratePct" => "4.0"},
-          "provider-b" => %{"ratePct" => "3.5"}
+        "provider-a" => %{
+          "ETH" => %{"ratePct" => "4.0"},
+          "SOL" => %{"ratePct" => "3.5"}
         }
       }
 
       assert {:ok, rates} = Rest.get_staking_rates(plug: responding(body), retry_attempts: 0)
       assert length(rates) == 2
-      assert Enum.sort(Enum.map(rates, & &1.provider_id)) == ["provider-a", "provider-b"]
+      assert Enum.sort(Enum.map(rates, & &1.asset)) == ["ETH", "SOL"]
+      assert Enum.all?(rates, &(&1.provider_id == "provider-a"))
     end
 
     test "a shape the venue never sends is an empty list, not a crash" do

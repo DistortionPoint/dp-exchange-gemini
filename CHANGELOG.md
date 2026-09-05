@@ -38,6 +38,65 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`get_staking_rates/1` had `asset` and `provider_id` swapped, and read a field that does
+  not exist — family-wide defect sweep, G1+G2.** Re-verified live 2026-09-05:
+  `GET https://api.gemini.com/v1/staking/rates` returns
+  `{"<provider-uuid>": {"ETH": {...}, "SOL": {...}}}` — the outer key is a **provider
+  UUID**, the inner key is the **asset**. This package assumed the reverse, so every
+  `StakingRate` it built carried an upcased UUID as `:asset` and a real asset symbol as
+  `:provider_id`. Gemini's own OpenAPI names the nesting the same way — `StakingRateResponse`
+  nests a `StakingRateProvider` under "Provider UUID Keys", which itself nests "Currency
+  Symbol Keys" — so the swap was checkable without a live call and wasn't: the test fixture
+  was keyed the same wrong way the code assumed, which is exactly why it passed. The same
+  live payload also showed `:deposit_limit_usd` reading `depositLimitUsd`, a field the venue
+  does not send — the real field is `depositUsdLimit`, and every row's cap was silently
+  `nil`. Both fixed together; the fixture is rewritten to the captured shape rather than to
+  either assumption.
+
+- **`networks_for_asset/2` was documented "Public" and could not succeed for any consumer;
+  `list_networks/2`'s network direction `POST`ed to a route the venue only serves as
+  `GET` — family-wide defect sweep, G3+G4.** Re-verified live 2026-09-05:
+  `GET /v2/network/BTC` with no credentials returns `401 MissingSecurityHeaders`, and the
+  vendor's OpenAPI requires `apiKeyAuth`, `signatureAuth` and `payloadAuth` on it — `Rest`
+  never aliases `Auth` and sends no credentials anywhere, by design, so this direction was
+  dead from the day it shipped. Independently, `list_networks(nil, network: …)` sent
+  `POST /v2/networks/{network}/assets`; the vendor documents that route as `GET`
+  (`operationId: getAssetsForNetwork`) — there is no POST form. Together the two bugs meant
+  **both directions of network discovery were dead**, on the one call whose own docstring
+  warns that a wrong network produces an address on a chain this venue does not credit.
+  Both now go through `Private.list_networks/2`'s `signed_get/3` — the asset direction moved
+  out of `Rest` entirely, since it was never really public and `Rest` has no way to sign a
+  request; the network direction now asks `GET` instead of `POST`.
+
+- **No resubscribe after a WebSocket reconnect — a silent coverage collapse with no
+  error — family-wide defect sweep, G5.** WebSockex reconnects a dropped socket on its
+  own; `Socket.handle_connect/2` only emitted a `:link_up` notice, and `Socket`'s own state
+  (`%{subscriber:, request_id:}`) carried no memory of what had been subscribed — there was
+  nothing to resend even if it tried. `Feed`'s `wanted` `MapSet` was written on every
+  `subscribe/3` and read by nothing (confirmed by grep). The sequence a consumer actually
+  saw was `:link_down` then `:link_up` — which reads as "recovered" — followed by silence
+  until someone noticed a quiet chart. Same incident class the sibling
+  `dp_exchange_coinbase` package already carries a fix for; adapted here rather than
+  reinvented. `Feed` now re-issues its `wanted` set on a 60-second timer, unconditionally —
+  not gated on detecting a reconnect, because a reconnect this process never learns about
+  (a supervisor restart of `Socket`, for instance) is indistinguishable from one it does.
+
+  Also fixed alongside it: `ensure_socket/1` calls `Socket.start_link/1` synchronously
+  inside `handle_call`, and `Feed`/`SandboxFeed` are named, shared processes — the whole
+  blocking window that connect can take is borne by every other consumer's `subscribe/3`,
+  `unsubscribe/2` and `coverage/1` queued behind it. The connect was never actually
+  unbounded, which was the first, wrong diagnosis of this: `Socket.start_link/1` passed no
+  opts to `WebSockex.start_link/4` at all, so it silently inherited `websockex`'s own
+  general-purpose defaults — measured from the vendored dependency,
+  `socket_connect_timeout: 6_000`ms and `socket_recv_timeout: 5_000`ms
+  (`deps/websockex/lib/websockex/conn.ex:10-11`) — rather than choosing them. 6s + 5s of
+  connect, plus one `send_frame` for the subscribe that follows (up to 5s), is 16s against
+  `Feed`'s own 15s `@call_timeout`: already over budget before any other overhead in that
+  call. `Socket.start_link/1` now sets `:socket_connect_timeout` (3s) and
+  `:socket_recv_timeout` (2s) explicitly, chosen against that same budget — 3s + 2s + 5s is
+  10s, leaving 5s of headroom — and both remain overridable through `opts`, threaded from
+  `Feed.start_link/1` through to `Socket.start_link/1` alongside `:url` and `:environment`.
+
 - **`Feed.fan_out/2` crashed on a subscriber registered by name — DpCryptoManagement's
   issue #15, same defect found on the sibling `dp_exchange_coinbase` package.**
   `subscribe/2`'s `to:` option accepts any value, and `fan_out/2` called
