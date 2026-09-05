@@ -66,6 +66,15 @@ acceptable changelog line.
   novel reasons, because the old return value looked perfectly reasonable the entire time
   the bug was live.
 
+  `@refusal_reasons` itself was reviewed once more before landing: it had picked up three
+  plausible-sounding entries (`RateLimit`, `EndpointNotFound`, `InsufficientFunds`) with no
+  vendor documentation and no live measurement behind any of them, while missing four codes
+  Gemini's own error table actually documents (`MissingApikeyHeader`, `MissingPayloadHeader`,
+  `MissingSignatureHeader`, `AmbiguousAuthentication`). The guessed three were removed and
+  the documented four added — every entry in the map now traces to either
+  `docs/reference/gemini/rate-limits-and-auth.md` or a live measurement recorded elsewhere
+  in this module's own docs, nothing asserted from how a reason *sounds*.
+
 - **`get_staking_rates/1` had `asset` and `provider_id` swapped, and read a field that does
   not exist — family-wide defect sweep, G1+G2.** Re-verified live 2026-09-05:
   `GET https://api.gemini.com/v1/staking/rates` returns

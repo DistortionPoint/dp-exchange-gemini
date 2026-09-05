@@ -157,10 +157,11 @@ defmodule DpExchange.Gemini.RestTest do
       # entire node, not just this package. `mix sobelow` flagged it as DOS.StringToAtom
       # and it was waved through twice as a "pre-existing low-confidence warning".
       #
-      # Asserting on `:atom_count` rather than on the return value alone, because the
-      # return value looked perfectly reasonable the whole time the bug was live.
-      before_count = :erlang.system_info(:atom_count)
-
+      # Asserted per-reason via `String.to_existing_atom/1` rather than by watching
+      # `:erlang.system_info(:atom_count)`. The count is process-global and this suite is
+      # `async: true`, so unrelated tests running concurrently move it — that first draft
+      # was itself a flaky test, which is its own kind of bug. This form is deterministic:
+      # it asks the only question that actually matters, of the exact string in question.
       reasons =
         for index <- 1..50,
             do: "NoSuchReasonInvented#{index}#{System.unique_integer([:positive])}"
@@ -172,7 +173,13 @@ defmodule DpExchange.Gemini.RestTest do
           Rest.get_price("BTC-USD", plug: responding(body, status: 400), retry_attempts: 0)
         end
 
-      assert :erlang.system_info(:atom_count) == before_count
+      # The atom the OLD code would have minted is the underscored form. If decoding ever
+      # creates it again, this raise stops happening and the test fails.
+      for reason <- reasons do
+        assert_raise ArgumentError, fn ->
+          String.to_existing_atom(Macro.underscore(reason))
+        end
+      end
 
       # And the venue's own wording survives — an unrecognised reason must degrade
       # legibly, not collapse to a bare `:refused` that says nothing about what happened.
@@ -183,13 +190,25 @@ defmodule DpExchange.Gemini.RestTest do
 
     test "every RECOGNISED reason still maps to the atom callers already match on" do
       # The fix must not quietly change the vocabulary consumers pattern-match against.
+      # Every pair here is the whole `@refusal_reasons` map — each one either in Gemini's
+      # own documented error-code table (`docs/reference/gemini/rate-limits-and-auth.md`)
+      # or measured live and recorded in this module's own docs. An earlier version of
+      # this map also carried `RateLimit`, `EndpointNotFound` and `InsufficientFunds` —
+      # plausible-looking reasons with no vendor documentation or live measurement behind
+      # any of them, found and removed during review: a guessed entry in this table is
+      # exactly the "nearby substitute" this family's own conventions rule out, even
+      # though the practical risk here is a dead map entry rather than a wrong live value.
       for {sent, expected} <- [
-            {"InvalidSymbol", :invalid_symbol},
+            {"MissingApikeyHeader", :missing_apikey_header},
+            {"MissingPayloadHeader", :missing_payload_header},
+            {"MissingSignatureHeader", :missing_signature_header},
+            {"InvalidNonce", :invalid_nonce},
+            {"InvalidSignature", :invalid_signature},
+            {"AmbiguousAuthentication", :ambiguous_authentication},
             {"InvalidApiKey", :invalid_api_key},
             {"MissingSecurityHeaders", :missing_security_headers},
-            {"InvalidSignature", :invalid_signature},
-            {"InvalidNonce", :invalid_nonce},
-            {"RateLimit", :rate_limit}
+            {"InvalidSymbol", :invalid_symbol},
+            {"InvalidParameterValue", :invalid_parameter_value}
           ] do
         body = %{"result" => "error", "reason" => sent}
 

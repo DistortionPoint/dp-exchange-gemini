@@ -392,6 +392,31 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
     end
+
+    test "an unrecognised reason mints no atom here either — refusal/1 delegates to Rest" do
+      # `Private.refusal/1` used to be its own exact copy of the same
+      # `String.to_atom(Macro.underscore(reason))` bug — the atom-table DoS had to be
+      # fixed in two places, and could as easily have been fixed in only one. It now
+      # delegates to `Rest.refusal_reason/1` rather than carrying a second copy, so this
+      # proves the delegation actually runs the safe path end-to-end through `Private`,
+      # not only through `Rest`.
+      #
+      # Asserted via `String.to_existing_atom/1` rather than `:erlang.system_info(
+      # :atom_count)` — the count is process-global and this suite runs `async: true`, so
+      # unrelated tests creating atoms concurrently would make a count comparison flaky
+      # rather than wrong. This form asks the only question that actually matters, of the
+      # exact string in question.
+      novel = "NeverDocumentedPrivateReason#{System.unique_integer([:positive])}"
+      body = %{"result" => "error", "reason" => novel}
+
+      assert {:refused, {:unknown_reason, ^novel}} =
+               Private.get_balances(@credentials,
+                 plug: responding(body, status: 401),
+                 retry_attempts: 0
+               )
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(Macro.underscore(novel)) end
+    end
   end
 
   describe "the environment reaches private calls too" do
