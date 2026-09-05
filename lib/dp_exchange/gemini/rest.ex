@@ -798,9 +798,26 @@ defmodule DpExchange.Gemini.Rest do
   # 4xx body — `InvalidSymbol`, `InvalidParameterValue` — and without this Core flattens
   # status and body into a message string, leaving a venue to recover the distinction by
   # matching substrings. Added to Core for this package.
+  #
+  # `:rate_limit_blocking` is forwarded from here too — a family-wide gap
+  # (DpCryptoManagement's issue #23's investigation, alongside `dp_exchange_webull`'s own
+  # issue #23 and `dp_exchange_robinhood`'s issue #16): `Core.HttpClient.check_rate_limits/1`
+  # reads it to choose `acquire/3` over fail-fast `check/3`, and no caller of this module
+  # could ever set it. Not defaulted — this venue's periodic resubscribe
+  # (`DpExchange.Gemini.Feed`'s unconditional 60s re-issue) sends WebSocket frames, not
+  # HTTP, so there is no rate-limited background replay here that would justify choosing
+  # a default on a caller's behalf.
   defp request_opts(opts) do
     opts
-    |> Keyword.take([:limiter, :timeout, :retry_attempts, :log_requests, :plug, :req_adapter])
+    |> Keyword.take([
+      :limiter,
+      :timeout,
+      :retry_attempts,
+      :log_requests,
+      :plug,
+      :req_adapter,
+      :rate_limit_blocking
+    ])
     |> Keyword.merge(provider: :gemini, raw_status: true)
   end
 

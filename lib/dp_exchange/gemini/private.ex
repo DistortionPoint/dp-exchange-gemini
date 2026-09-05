@@ -400,9 +400,20 @@ defmodule DpExchange.Gemini.Private do
     end)
   end
 
+  # `:rate_limit_blocking` is forwarded from here too — see `Rest.request_opts/1`'s
+  # comment for the full family-wide gap (DpCryptoManagement's issue #23). Not defaulted,
+  # same reasoning: this venue's periodic resubscribe is WebSocket frames, not HTTP.
   defp request_opts(opts) do
     opts
-    |> Keyword.take([:limiter, :timeout, :retry_attempts, :log_requests, :plug, :req_adapter])
+    |> Keyword.take([
+      :limiter,
+      :timeout,
+      :retry_attempts,
+      :log_requests,
+      :plug,
+      :req_adapter,
+      :rate_limit_blocking
+    ])
     |> Keyword.merge(provider: :gemini_private, raw_status: true)
   end
 

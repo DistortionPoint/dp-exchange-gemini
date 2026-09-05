@@ -38,6 +38,25 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`:rate_limit_blocking` was unreachable on every REST call this package makes —
+  family-wide gap, DpCryptoManagement's issue #23.** `Core.HttpClient.check_rate_limits/1`
+  reads this option to choose `acquire/3` (wait for capacity) over fail-fast `check/3`,
+  and its own error message on a self-inflicted throttle tells a caller to set it — but no
+  caller could, on this venue: `Rest.request_opts/1` and `Private.request_opts/1` both
+  stripped it from their forwarded-options allowlist before it ever reached
+  `Core.HttpClient`. The same defect (`dp_exchange_webull`'s issue #23,
+  `dp_exchange_robinhood`'s issue #16) audited across the rest of the family; this venue
+  was one of four still carrying it.
+
+  Both allowlists now forward `:rate_limit_blocking`, proven with a recording rate limiter
+  that records which of `acquire/3` / `check/3` was actually called — not merely that the
+  keyword survives the allowlist. **Not defaulted anywhere in this package**, unlike
+  `dp_exchange_webull`'s `Feed` and `dp_exchange_robinhood`'s `Feed`: this venue's own
+  periodic resubscribe (`DpExchange.Gemini.Feed`'s unconditional 60s re-issue) sends
+  WebSocket frames, not HTTP, so there is no rate-limited background replay here to
+  justify choosing a default on a caller's behalf. A caller that wants blocking opts in
+  explicitly.
+
 - **Decoding a venue refusal could exhaust the VM's atom table and kill the whole BEAM —
   family-wide defect sweep, G7.** `refusal/1` in both `Rest` and `Private` built its result
   with `String.to_atom(Macro.underscore(reason))`, where `reason` comes straight out of
