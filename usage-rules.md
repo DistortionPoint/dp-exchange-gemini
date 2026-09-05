@@ -179,9 +179,15 @@ Which one your application uses is a decision about your users and your deployme
 market-data package is not entitled to make it for you, and could not implement the second
 one anyway — it has no browser, no redirect URI and nowhere safe to keep a refresh token.
 
-**Every authenticated endpoint here returns `{:error, :not_supported}`.** Balances,
-orders, fees, transfers and trade history are yours to implement against your own auth.
-The demo environment is what makes doing that safe.
+**Account and trading are implemented.** Balances, orders, fees, transfers, trade
+history, staking, positions, clearing and account administration all work once you hand
+this package credentials and — where it cannot be inferred — the scheme: it **signs**,
+it does not **authenticate**. What genuinely returns `{:error, :not_supported}` is the
+venue's own absence (options, watchlists, financials — see `venue_does_not_serve/0`) and
+the small remainder of this package's own backlog (`list_instruments/1`,
+`list_portfolios/1`, `get_conversion/2`), not the authenticated surface as a whole. The
+demo environment is what makes exercising any of this safely, before you point it at a
+real account.
 
 If you do use the signing helper, name the scheme; it refuses to guess:
 
@@ -231,13 +237,17 @@ not an asset. It matches no catalogue entry and collects nothing, silently.
 The quote list, longest-first: `RLUSD USDC USDT GUSD USD EUR GBP SGD DAI BTC ETH SOL FIL`.
 
 **Perpetuals are excluded** from `get_symbols/1`. Thirteen symbols carry a `perp` suffix;
-they are real instruments but not spot pairs, and this package declares
-`supported_instrument_types: [:spot]`.
+they are real instruments, but `get_symbols/1` is the *spot* catalogue and does not list
+them. `capabilities/0` declares `supported_instrument_types: [:spot, :perp]` — the
+perpetuals surface has its own endpoints (`get_positions/1`, `get_contract_stats/2`,
+`get_funding/2`, among others), not a place in this list.
 
 ## What this package does not do
 
-Authenticated endpoints — covered above: the host authenticates, so balances, orders,
-fees, transfers and trade history all return `{:error, :not_supported}`.
+Authenticated endpoints are **not** on this list — see "This package does not handle
+authentication — you do", above: balances, orders, fees, transfers, trade history and the
+rest of the account surface are implemented and signed on request; only obtaining,
+storing, refreshing or choosing between credentials is the host's job.
 
 `list_instruments/1` is also `:unsupported`, for a different reason: 346 symbols and no
 bulk detail endpoint means one request per symbol, which is not a listing, it is a

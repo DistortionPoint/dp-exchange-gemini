@@ -165,6 +165,31 @@ acceptable changelog line.
 
 ### Documentation
 
+- **`usage-rules.md` twice told a consuming agent that every authenticated endpoint here
+  returns `{:error, :not_supported}`** — "Balances, orders, fees, transfers and trade
+  history are yours to implement against your own auth" and, in "What this package does
+  not do", "the host authenticates, so balances, orders, fees, transfers and trade
+  history all return `{:error, :not_supported}`." Both were false the day they were
+  written: `Private` (~2,400 lines) implements all of them, and `capabilities/0` has
+  declared `get_balances/2`, `get_orders/2`, `place_order/3`, `get_fees/2`,
+  `get_transfers/2`, `get_trade_history/2`, `get_staking_balances/1` and the rest of the
+  account surface `:experimental` since 2026-08-28 — verified again here with
+  `mix run -e` against the live module, not read off the source. The document
+  contradicted itself in the same breath: its own sections on `stake/3`, `unstake/3` and
+  clearing orders correctly walk through using that same authenticated surface. The
+  detailed how-to-use sections were right; the two blanket "not_supported" claims were
+  wrong, and are now corrected to say what this package actually does — signs a request
+  you hand it credentials and a scheme for, obtains and stores neither. Left unfixed,
+  a consuming agent reading this would have concluded Gemini has no authenticated surface
+  and rebuilt an already-implemented API against its own auth layer, the inverse of the
+  Robinhood defect. Family-wide defect sweep, G6.
+
+  Also found and fixed in the same pass: `usage-rules.md` still said
+  `supported_instrument_types: [:spot]` under "Perpetuals are excluded", stale since
+  perpetuals landed above in this same file — `capabilities/0` has declared
+  `[:spot, :perp]` since 2026-09-01. Corrected to name the perpetuals endpoints instead of
+  a capability list the venue section had already outgrown.
+
 - **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 22 endpoints
   that are Gemini's own absence — options, watchlists, replace/preview, position closing —
   each with the source and date behind it; three stay under `@not_ported` because they are
