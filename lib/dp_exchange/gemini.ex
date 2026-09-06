@@ -56,6 +56,9 @@ defmodule DpExchange.Gemini do
   `DpExchange.Core.Config` — which resolves per **process**, so one async test can point at
   demo without redirecting every test running beside it.
 
+  `live?/1` answers the question directly, resolving `opts` the same way every call here
+  does: `DpExchange.Gemini.live?(environment: :sandbox)` is `false`.
+
   ## You authenticate; this package signs
 
   Account and trading are implemented, and **credentials arrive as arguments** — used to
@@ -108,7 +111,7 @@ defmodule DpExchange.Gemini do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Venue}
-  alias DpExchange.Gemini.{Feed, Private, Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Environment, Feed, Private, Rest, SymbolFormat}
 
   # Account and trading ARE implemented: credentials arrive as function arguments and are
   # used to sign that one request (§6.0, invariant #2). Credential *storage* is the host's
@@ -673,6 +676,24 @@ defmodule DpExchange.Gemini do
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
 
   # --- health ------------------------------------------------------------
+
+  @doc """
+  Whether the environment `opts` resolves to moves real money.
+
+  Resolves `opts[:environment]` through the same precedence as every call this package
+  makes — an explicit option, then `DpExchange.Core.Config`, then `:production` — and
+  answers with `DpExchange.Gemini.Environment.live?/1`. Meant as a check a caller makes of
+  itself before a money-moving call such as `place_order/3` or `withdraw/5`, in the same
+  spirit as `capabilities/0`'s own declaration: the default is production and that is the
+  direction where a wrong guess costs money, so a caller that wants to be certain asks
+  rather than assumes.
+
+      if DpExchange.Gemini.live?(opts) do
+        # confirm with the human before placing this order
+      end
+  """
+  @spec live?(keyword()) :: boolean()
+  def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
 
   @impl true
   def test_connection(credentials, opts),

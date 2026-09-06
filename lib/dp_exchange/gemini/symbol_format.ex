@@ -58,7 +58,14 @@ defmodule DpExchange.Gemini.SymbolFormat do
   # ordering that 80 of 346 live symbols depend on.
   @mapping %{sep: "", quotes: ~w(RLUSD USDC USDT GUSD USD EUR GBP SGD DAI BTC ETH SOL FIL)}
 
-  @doc "The mapping, exposed so the conformance suite can drive `CanonicalPair` with it."
+  @doc """
+  The mapping, exposed so the conformance suite can drive `CanonicalPair` with it.
+
+  `to_canonical_symbol/1` and `to_exchange_symbol/1` read the mapping through this
+  function too, rather than the module attribute directly, so there is exactly one
+  mapping in force — never a risk of the conformance suite driving `CanonicalPair`
+  against a value the package's own conversions do not actually use.
+  """
   @spec mapping() :: CanonicalPair.mapping()
   def mapping, do: @mapping
 
@@ -83,12 +90,12 @@ defmodule DpExchange.Gemini.SymbolFormat do
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()
   def to_canonical_symbol(native) when is_binary(native),
-    do: CanonicalPair.to_canonical(@mapping, native)
+    do: CanonicalPair.to_canonical(mapping(), native)
 
   @impl true
   @spec to_exchange_symbol(String.t()) :: String.t()
   def to_exchange_symbol(canonical) when is_binary(canonical) do
-    @mapping
+    mapping()
     |> CanonicalPair.to_exchange(canonical)
     |> String.downcase()
   end

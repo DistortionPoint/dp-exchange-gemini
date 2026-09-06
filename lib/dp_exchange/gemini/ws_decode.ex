@@ -36,7 +36,7 @@ defmodule DpExchange.Gemini.WsDecode do
   vendor says so, and a package storing the zero would keep a level nobody is quoting.
   """
 
-  alias DpExchange.Core.Types.{OrderBook, TopOfBook, Trade}
+  alias DpExchange.Core.Types.{OrderBook, OrderBookDelta, TopOfBook, Trade}
 
   @doc """
   A `Trade` from a `{symbol}@trade` frame.
@@ -148,6 +148,41 @@ defmodule DpExchange.Gemini.WsDecode do
   @spec depth_changes(map()) :: %{bids: [{Decimal.t(), Decimal.t()}], asks: list()}
   def depth_changes(frame) do
     %{bids: levels(frame["b"]), asks: levels(frame["a"])}
+  end
+
+  @doc """
+  An `OrderBookDelta` from a `{symbol}@depth` / `@depthFast` differential frame.
+
+  Built on `depth_changes/1`, side-tagging each level the way `OrderBookDelta.level/0`
+  requires — bids first, then asks. The venue does not interleave the two sides by time
+  within one frame, so concatenating them in that order loses no ordering information the
+  frame itself carried.
+
+  `sequence` is the frame's `u` — the update id this diff advances the book to, the same
+  value `depth_gap?/2` compares the *next* frame's `U` against. A quantity of zero is
+  carried through unresolved, exactly as `depth_changes/1` and `OrderBookDelta`'s own
+  moduledoc both require: it means the level ceased to exist, and deciding that is the
+  consumer's job, not this package's.
+  """
+  @spec to_order_book_delta(map(), String.t()) ::
+          {:ok, OrderBookDelta.t()} | {:error, term()}
+  def to_order_book_delta(frame, symbol) do
+    with {:ok, timestamp} <- nanosecond_time(frame["E"]) do
+      %{bids: bids, asks: asks} = depth_changes(frame)
+
+      levels =
+        Enum.map(bids, fn {price, quantity} -> {:bid, price, quantity} end) ++
+          Enum.map(asks, fn {price, quantity} -> {:ask, price, quantity} end)
+
+      {:ok,
+       OrderBookDelta.new(
+         symbol: symbol,
+         levels: levels,
+         timestamp: timestamp,
+         sequence: frame["u"],
+         provider: :gemini
+       )}
+    end
   end
 
   defp levels(rows) when is_list(rows) do

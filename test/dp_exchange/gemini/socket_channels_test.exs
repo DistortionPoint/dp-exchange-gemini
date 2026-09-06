@@ -44,6 +44,42 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     end
   end
 
+  describe "subscribe/3 and unsubscribe/3 refuse two shapes before building any frame" do
+    test "symbols against a channel that takes none is refused, not silently dropped" do
+      # `streams/2` itself silently drops an address that fails to build (see above), which
+      # used to mean `subscribe(socket, ["BTC-USD"], :contract_status)` built zero frames
+      # and `send_rpc/3` answered `:ok` — a subscription for nothing, reported as success.
+      # `:contract_status` is public, so this exercises the symbol-shape check on its own,
+      # apart from the credential check below.
+      assert Socket.subscribe(self(), ["BTC-USD"], :contract_status) ==
+               {:error, {:channel_takes_no_symbol, :contract_status}}
+
+      assert Socket.unsubscribe(self(), ["BTC-USD"], :contract_status) ==
+               {:error, {:channel_takes_no_symbol, :contract_status}}
+    end
+
+    test "a channel requiring a credential is refused — this socket never authenticates" do
+      assert Socket.subscribe(self(), [], :orders_account) ==
+               {:error, {:credential_required, :orders_account}}
+
+      assert Socket.subscribe(self(), [], :request_for_quote_session) ==
+               {:error, {:credential_required, :request_for_quote_session}}
+    end
+
+    test "the public requestForQuote channel is not refused for lacking a credential" do
+      refute Socket.subscribe(:no_such_socket, [], :request_for_quote) ==
+               {:error, {:credential_required, :request_for_quote}}
+    end
+
+    test "empty symbols against a public per-symbol channel is not refused — registers, asks for nothing" do
+      assert Socket.subscribe(:no_such_socket, [], :book_ticker) == :ok
+    end
+
+    test "an unknown channel is not double-refused here — streams/2 already answers it" do
+      assert Socket.subscribe(:no_such_socket, ["BTC-USD"], :candles) == :ok
+    end
+  end
+
   describe "a trade frame's side is inverted from `m`" do
     @trade %{
       "e" => "trade",
@@ -90,12 +126,33 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       "a" => [["3611.00", "0"]]
     }
 
-    test "it is delivered as a diff, not as an OrderBook" do
+    test "it is delivered as an OrderBookDelta, never a raw frame or a full OrderBook" do
       # Handing a subscriber the changed levels under a type that means "the whole book" is
-      # the substitution this family refuses.
+      # the substitution this family refuses — and handing them the undecoded venue JSON
+      # is the same substitution one layer further out: a decoder (`WsDecode.
+      # to_order_book_delta/2`) exists precisely so nothing downstream has to parse `"b"`
+      # and `"a"` for itself.
       assert {:ok, _state} = Socket.handle_frame(frame(@diff), state())
 
-      assert_received {:dp_exchange, :gemini, {:depth_update, _message}}
+      assert_received {:dp_exchange, :gemini, %Types.OrderBookDelta{} = delta}
+      assert delta.symbol == "BTC-USD"
+      assert delta.sequence == 15
+
+      assert {:bid, price, quantity} =
+               Enum.find(delta.levels, &match?({:bid, _price, _quantity}, &1))
+
+      assert Decimal.equal?(price, Decimal.new("3610.00"))
+      assert Decimal.equal?(quantity, Decimal.new("1.5"))
+
+      # A quantity of zero is a DELETE, carried through unresolved — see `depth_changes/1`
+      # and `OrderBookDelta`'s own moduledoc.
+      assert {:ask, ask_price, ask_quantity} =
+               Enum.find(delta.levels, &match?({:ask, _price, _quantity}, &1))
+
+      assert Decimal.equal?(ask_price, Decimal.new("3611.00"))
+      assert Decimal.equal?(ask_quantity, Decimal.new("0"))
+
+      refute_received {:dp_exchange, :gemini, {:depth_update, _message}}
       refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
     end
 
@@ -120,6 +177,18 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     test "the first frame is never a gap" do
       assert {:ok, _state} = Socket.handle_frame(frame(@diff), state())
       refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+    end
+
+    test "an undated diff delivers nothing, but still advances the sequence" do
+      # A delta whose place in the sequence cannot be stated must not reach a consumer —
+      # same rule as an undated trade or a book ticker with no event time. The sequence
+      # bookkeeping is unaffected: `depth_gap?/2` reads `u`, not the decoded delta.
+      undated = Map.delete(@diff, "E")
+
+      assert {:ok, new_state} = Socket.handle_frame(frame(undated), state())
+
+      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+      assert new_state.last_depth_update == 15
     end
   end
 

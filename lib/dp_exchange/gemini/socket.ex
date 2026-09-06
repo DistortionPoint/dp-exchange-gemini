@@ -30,19 +30,26 @@ defmodule DpExchange.Gemini.Socket do
   single delta rather than the maintained book, which is the incident that created it.
 
   A caller wanting depth calls `get_order_book/2`, which is a REST snapshot with the
-  venue's own per-level timestamps.
+  venue's own per-level timestamps. Where a differential depth frame arrives instead — a
+  future `@depth`/`@depthFast` subscription, not one this socket requests today — it is
+  decoded into `Core.Types.OrderBookDelta` by `WsDecode.to_order_book_delta/2` and forwarded
+  once, per frame. Never accumulated into a book here: see `OrderBookDelta`'s own moduledoc
+  for why a distinct, non-snapshot-shaped type is what keeps that from happening by
+  construction rather than by discipline.
 
   ## Event time is nanoseconds
 
   The `E` field is **nanoseconds** since the epoch, not milliseconds. The difference is a
   factor of a million: read as milliseconds, a 2026 timestamp lands in the year 58,000 and
-  every staleness check passes forever. Converted once, here.
+  every staleness check passes forever. Converted once, in `WsDecode.nanosecond_time/1` —
+  every frame handler here reaches that through one of `WsDecode`'s decoders rather than
+  parsing `E` a second time.
   """
 
   use WebSockex
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.{Quote, TopOfBook}
+  alias DpExchange.Core.Types.Quote
   alias DpExchange.Gemini.{Environment, SymbolFormat, WsChannels, WsDecode}
 
   require Logger
@@ -103,17 +110,66 @@ defmodule DpExchange.Gemini.Socket do
 
   A per-account channel takes no symbols: pass `[]`.
 
+  **A non-empty `symbols` against a channel that takes none is refused here**, with
+  `{:error, {:channel_takes_no_symbol, channel}}`, rather than reaching `streams/2` and
+  silently subscribing to nothing — see `WsChannels.address/2`'s own moduledoc for the
+  shape of that failure. **A channel `WsChannels.requires_credential?/1` marks private is
+  refused too**, with `{:error, {:credential_required, channel}}`: this socket never
+  authenticates its connection, so a private channel can only ever fail at the venue, and
+  telling a caller before the round trip is the whole reason that function exists.
+
   Returns `{:error, :send_timeout}` rather than exiting when the socket will not accept the
   frame — a caller can retry a batch, but it cannot recover from a linked exit it did not
   expect.
   """
   @spec subscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
-  def subscribe(socket, symbols, channel \\ :book_ticker),
-    do: send_rpc(socket, "subscribe", streams(symbols, channel))
+  def subscribe(socket, symbols, channel \\ :book_ticker) do
+    with :ok <- validate_channel(symbols, channel) do
+      send_rpc(socket, "subscribe", streams(symbols, channel))
+    end
+  end
 
+  @doc """
+  Unsubscribes the connection from `channel` for each symbol.
+
+  Refuses the same two shapes `subscribe/3` does, for the same reasons — see its doc.
+  """
   @spec unsubscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
-  def unsubscribe(socket, symbols, channel \\ :book_ticker),
-    do: send_rpc(socket, "unsubscribe", streams(symbols, channel))
+  def unsubscribe(socket, symbols, channel \\ :book_ticker) do
+    with :ok <- validate_channel(symbols, channel) do
+      send_rpc(socket, "unsubscribe", streams(symbols, channel))
+    end
+  end
+
+  # `symbols == []` against a per-symbol channel is deliberately **not** refused here: it is
+  # how a caller registers as a subscriber without asking for anything yet (`Feed.subscribe/3`
+  # with an empty symbol list is exactly this), and `streams/2` already answers it with an
+  # empty address list rather than a guess. The two shapes this DOES catch are the ones
+  # `WsChannels`'s own moduledoc names as silent failures: a channel given symbols it cannot
+  # take, and a private channel this socket can never authenticate for.
+  defp validate_channel(symbols, channel) do
+    case WsChannels.requires_credential?(channel) do
+      true ->
+        {:error, {:credential_required, channel}}
+
+      false ->
+        validate_symbol_shape(symbols, channel)
+
+      # Unknown channel: `streams/2` already answers this with an empty list rather than a
+      # guessed address — see its own "an unknown channel yields no address" test. Refusing
+      # it twice over, in two different shapes, would be redundant rather than safer.
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp validate_symbol_shape(symbols, channel) do
+    if symbols != [] and channel not in WsChannels.per_symbol() do
+      {:error, {:channel_takes_no_symbol, channel}}
+    else
+      :ok
+    end
+  end
 
   @doc """
   The subscription addresses for `symbols` on `channel`.
@@ -183,8 +239,12 @@ defmodule DpExchange.Gemini.Socket do
 
   # A differential depth frame. **Not delivered as an OrderBook**: a diff is not a book, and
   # handing a subscriber the changed levels under a type that means "the whole book" is the
-  # substitution this family refuses. The socket reports the gap check instead, which is the
-  # part a consumer cannot do for itself without the sequence range.
+  # substitution this family refuses. Delivered as `Core.Types.OrderBookDelta` instead — the
+  # contract's own shape for "changed levels, not accumulated" — via `WsDecode`'s decoder,
+  # never as the raw frame. This used to send the undecoded JSON message straight through
+  # under a bare `{:depth_update, message}` tuple, which is the exact defect this family's
+  # "internal wiring" conformance check exists to catch: a decoder built, documented, and
+  # never called, while its caller forwarded venue JSON directly instead.
   defp handle_message(%{"e" => "depthUpdate", "U" => _first} = message, state) do
     if WsDecode.depth_gap?(message, state[:last_depth_update]) do
       # The vendor's rule: discard the book and resubscribe. A consumer that keeps applying
@@ -197,7 +257,15 @@ defmodule DpExchange.Gemini.Socket do
       )
     end
 
-    send(state.subscriber, {:dp_exchange, :gemini, {:depth_update, message}})
+    symbol = SymbolFormat.to_canonical_symbol(message["s"] || "")
+
+    case WsDecode.to_order_book_delta(message, symbol) do
+      {:ok, delta} -> send(state.subscriber, {:dp_exchange, :gemini, delta})
+      # An undated diff cannot be ordered against anything. Silence beats a delta whose
+      # place in the sequence cannot be stated.
+      {:error, _reason} -> :ok
+    end
+
     {:ok, Map.put(state, :last_depth_update, message["u"])}
   end
 
@@ -223,26 +291,23 @@ defmodule DpExchange.Gemini.Socket do
   # A bookTicker frame is top-of-book data, so it now delivers `Core.Types.TopOfBook`, which
   # has no `price` field to misuse. Where the frame also carries a last trade (`c`), that is
   # a separate fact and is delivered as its own `Quote`.
-  defp handle_message(%{"s" => native, "b" => bid, "a" => ask} = message, state) do
-    with {:ok, timestamp} <- event_time(message) do
-      symbol = SymbolFormat.to_canonical_symbol(native)
+  #
+  # The `TopOfBook` itself is built by `WsDecode.to_top_of_book/3` — this used to duplicate
+  # that same construction inline, a second implementation of the same decode that could
+  # drift from the one `WsChannelsTest` actually exercises directly. One decoder, called
+  # once.
+  defp handle_message(%{"s" => native, "b" => _bid, "a" => _ask} = message, state) do
+    symbol = SymbolFormat.to_canonical_symbol(native)
 
-      send(
-        state.subscriber,
-        {:dp_exchange, :gemini,
-         %TopOfBook{
-           symbol: symbol,
-           bid: decimal(bid),
-           ask: decimal(ask),
-           bid_size: decimal(message["B"]),
-           ask_size: decimal(message["A"]),
-           venue_time: timestamp,
-           observed_at: DateTime.utc_now(),
-           provider: :gemini
-         }}
-      )
+    case WsDecode.to_top_of_book(message, symbol, DateTime.utc_now()) do
+      {:ok, top} ->
+        send(state.subscriber, {:dp_exchange, :gemini, top})
+        deliver_last_trade(message["c"], symbol, top.venue_time, state)
 
-      deliver_last_trade(message["c"], symbol, timestamp, state)
+      # A quote whose freshness cannot be stated must not reach a consumer — see
+      # `WsDecode.nanosecond_time/1`. Silence beats stamping it with our own clock.
+      {:error, _reason} ->
+        :ok
     end
 
     {:ok, state}
@@ -297,15 +362,6 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   defp deliver(state, payload), do: send(state.subscriber, {:dp_exchange, :gemini, payload})
-
-  # Nanoseconds. Absent, and nothing is emitted — a quote whose freshness cannot be
-  # stated must not be delivered, and on a stream that means dropping the frame rather
-  # than stamping it with our own clock.
-  defp event_time(%{"E" => nanoseconds}) when is_integer(nanoseconds) do
-    DateTime.from_unix(div(nanoseconds, 1_000), :microsecond)
-  end
-
-  defp event_time(_other), do: {:error, :missing_venue_timestamp}
 
   defp notify(state, notice), do: send(state.subscriber, {:dp_exchange, :gemini, notice})
 

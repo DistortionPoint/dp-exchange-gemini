@@ -52,15 +52,6 @@ defmodule DpExchange.Gemini.WsChannels do
   @by_name Map.new(@channels, fn {name, address, auth} -> {name, {address, auth}} end)
 
   @doc """
-  Every channel the venue's AsyncAPI document defines — twenty-two.
-
-  The count is the point: the rendered Stream Matrix shows eleven families, and reading it
-  as the surface is what hid the other ten.
-  """
-  @spec all() :: [atom()]
-  def all, do: Enum.map(@channels, &elem(&1, 0))
-
-  @doc """
   The subscription address for `channel`, with `{symbol}` filled in where the channel takes
   one.
 
@@ -96,7 +87,9 @@ defmodule DpExchange.Gemini.WsChannels do
   Whether `channel` needs an authenticated connection.
 
   Subscribing to a private channel without a credential fails at the venue; answering here
-  lets a caller be told before the round trip.
+  lets a caller be told before the round trip — `Socket.subscribe/3` does exactly that,
+  refusing before it ever builds a frame, since `Socket` never carries a credential to
+  authenticate a private channel with in the first place.
   """
   @spec requires_credential?(atom()) :: boolean() | {:error, term()}
   def requires_credential?(channel) do
@@ -106,7 +99,14 @@ defmodule DpExchange.Gemini.WsChannels do
     end
   end
 
-  @doc "Channels that carry a symbol in their address."
+  @doc """
+  Channels that carry a symbol in their address.
+
+  `Socket.subscribe/3` and `unsubscribe/3` check membership here before ever reaching
+  `address/2`: a non-empty symbol list against a channel absent from this list is refused
+  with `{:error, {:channel_takes_no_symbol, channel}}` rather than silently subscribing to
+  nothing, which is what `streams/2`'s own error-filtering used to let through.
+  """
   @spec per_symbol() :: [atom()]
   def per_symbol do
     for {name, address, _auth} <- @channels, String.contains?(address, "{symbol}"), do: name

@@ -56,7 +56,87 @@ acceptable changelog line.
   injection cannot express partial failure for. Follows the reference implementation
   shipped in `dp_exchange_robinhood`.
 
+- **`DpExchange.Gemini.live?/1`** — whether the environment `opts` resolves to moves real
+  money, resolved through the same precedence every call here uses. Meant as a check a
+  caller makes of itself before a money-moving call: `live?(environment: :sandbox)` is
+  `false`; `live?([])` is `true`, since `:production` is the default. Surfaces
+  `DpExchange.Gemini.Environment.live?/1`, which existed already but had no caller
+  anywhere in this package's own `lib/` — found by `Core.AdapterContract`'s "16. internal
+  wiring" assertion, checked against a local `dp_exchange_core` checkout ahead of its next
+  release (this package's own dependency pin stays at `~> 0.1.48` for this change). This
+  is the case that assertion's own moduledoc calls out as legitimate public surface the
+  facade never offered, not dead code.
+
+### Removed
+
+- **`WsChannels`'s `all/0`, removed.** Returned every channel name the venue's
+  AsyncAPI document defines; nothing in this package's own `lib/` ever called it —
+  `address/2` and `per_symbol/0` both read the underlying `@channels` attribute directly,
+  and the conformance suite this package's tests do not run against itself. Found by
+  `Core.AdapterContract`'s "16. internal wiring" assertion. **Breaking** for anyone who
+  called it directly; it was never reachable through the facade. `WsChannelsTest` now
+  checks the same twenty-two-channel-catalogue facts through `requires_credential?/1`,
+  which every known channel answers and no test-only accessor was needed for.
+
 ### Fixed
+
+- **A differential depth frame (`@depth`/`@depthFast`) was delivered as the raw, undecoded
+  venue JSON — `{:depth_update, message}` — instead of a value in the contract's own
+  shape.** `WsDecode.depth_changes/1` decodes exactly this frame into `{price, quantity}`
+  levels and has done since the channel was added, but `Socket`'s `depthUpdate` handler
+  never called it: it forwarded the raw map straight to subscribers. `Core.
+  AdapterContract`'s new "16. internal wiring" assertion — checked against a local
+  `dp_exchange_core` checkout ahead of its next release, since this package's own
+  dependency pin stays at `~> 0.1.48` for this change — is what found the disconnect:
+  `depth_changes/1` had no caller anywhere in this package's own `lib/`. This channel is
+  not requested by default (`Feed` only ever asks for `@bookTicker`), so no consumer using
+  this package as documented was affected today, but
+  the handler was live and reachable the moment anything called `Socket.subscribe/3` with
+  `:depth` or `:depth_fast` directly, and would have handed that caller unparsed strings
+  under an undocumented tuple shape rather than `Decimal` values under a contract type.
+  Now decoded through a new `WsDecode.to_order_book_delta/2`, built on `depth_changes/1`,
+  into `dp_exchange_core`'s `Core.Types.OrderBookDelta` — a type added to Core specifically
+  so a venue streaming deltas has a non-accumulated shape to hand back, after
+  `dp_exchange_coinbase`'s `Socket` was found rebuilding a full book in-process for exactly
+  this reason (~22,800 bid levels for one symbol, measured on a consumer's live node).
+
+- **`Socket`'s `bookTicker` handler duplicated `WsDecode.to_top_of_book/3`'s construction
+  of `Core.Types.TopOfBook` inline**, rather than calling the decoder — a second
+  implementation of the same decode, free to drift from the one `WsDecode`'s own tests
+  actually exercise. Found the same way as the depth defect above: `to_top_of_book/3` had
+  no caller in `lib/`, despite being fully written, documented and tested in isolation.
+  Now called directly; no behavioural change, since both implementations decoded the same
+  fields the same way.
+
+- **A per-account channel given a non-empty symbol list subscribed to nothing, silently,
+  and reported success.** `WsChannels.address/2` already refuses this shape —
+  `{:error, {:channel_takes_no_symbol, channel}}` — but `Socket.streams/2`'s
+  comprehension silently drops any address that fails to build, so `Socket.subscribe(pid,
+  ["BTC-USD"], :orders_account)` built zero frames and `send_rpc/3`'s `[]` clause answered
+  plain `:ok`. `WsChannels.per_symbol/0` had a matching defect: written, documented, and
+  never called from anywhere in `lib/`. `subscribe/3` and `unsubscribe/3` now check
+  `per_symbol/0` before reaching `streams/2` at all, answering
+  `{:error, {:channel_takes_no_symbol, channel}}` up front. A channel `WsChannels.
+  requires_credential?/1` marks private is refused the same way, with `{:error,
+  {:credential_required, channel}}` — this socket never authenticates a connection, so a
+  private channel could previously only ever fail at the venue, one round trip later, and
+  `requires_credential?/1` had exactly the same "no caller in `lib/`" defect as
+  `per_symbol/0`. Neither of these channel shapes is reachable through the public facade
+  today (`Feed` only ever requests `:book_ticker`), so no consumer was affected.
+
+- **`Environment.validate!/1` carried its own literal `[:production, :sandbox]` guard — a
+  second, hand-copied statement of exactly what `Environment.known/0` already declares.**
+  `known/0` had no caller in `lib/` and could have drifted from the guard silently if
+  either were updated alone; `validate!/1` now checks membership in `known()` instead, so
+  there is one place this package's set of recognised environments is written down.
+
+- **`SymbolFormat.to_canonical_symbol/1` and `to_exchange_symbol/1` read the `@mapping`
+  module attribute directly, bypassing `mapping/0`** — the same accessor `quotes/0` and
+  `capabilities/0`'s `supported_quotes` already read through. No behavioural change
+  (`mapping/0` returns the same attribute), but `mapping/0` had no caller in `lib/` before
+  this — its own moduledoc's claim that it exists "so the conformance suite can drive
+  `CanonicalPair` with it" was the whole reason, and a test is not a caller `Core.
+  AdapterContract`'s "16. internal wiring" assertion counts.
 
 - **A 404 on a symbol-scoped market-data GET was reported as a retryable error, not the
   permanent refusal it is.** Measured live 2026-09-06: `GET /v1/pubticker/{symbol}` and

@@ -130,6 +130,19 @@ getting production sends a real order to a real exchange.
 `68169.88` against ask `64886.32`. Spreads computed against demo data go negative. Use the
 demo environment to exercise code paths, not to validate anything price-dependent.
 
+**`live?/1` answers "am I about to move real money" directly**, resolving `opts` the same
+way every call here does:
+
+```elixir
+DpExchange.Gemini.live?([])                       # true — production is the default
+DpExchange.Gemini.live?(environment: :sandbox)     # false
+```
+
+Worth a check of your own before a call that places, cancels, withdraws or converts — the
+same asymmetry that makes `:production` the default (a wrong guess toward demo is loud and
+free; a wrong guess toward production is silent and costs money) is worth confirming
+explicitly at the one call site that actually risks it.
+
 ## Run both at once — that is the expected case, not a workaround
 
 Live trading against production while strategies are tested against demo, in one node:

@@ -107,12 +107,19 @@ defmodule DpExchange.Gemini.Environment do
   @spec known() :: [t()]
   def known, do: [:production, :sandbox]
 
-  defp validate!(environment) when environment in [:production, :sandbox], do: environment
-
-  defp validate!(other) do
-    raise ArgumentError,
-          "unknown Gemini environment #{inspect(other)} — expected :production or :sandbox. " <>
-            "Refusing rather than defaulting: a typo that silently resolved to :production " <>
-            "would send a real order to a real exchange."
+  # `known/0` is the single source of truth for what this module recognises — `validate!/1`
+  # used to carry its own literal `[:production, :sandbox]` guard, a second copy of the same
+  # list that `known/0` could drift from silently if either one were updated alone. Routed
+  # through the function instead, so there is exactly one place this package's set of known
+  # environments is written down.
+  defp validate!(environment) do
+    if environment in known() do
+      environment
+    else
+      raise ArgumentError,
+            "unknown Gemini environment #{inspect(environment)} — expected one of " <>
+              "#{inspect(known())}. Refusing rather than defaulting: a typo that silently " <>
+              "resolved to :production would send a real order to a real exchange."
+    end
   end
 end

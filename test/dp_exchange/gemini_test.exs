@@ -1,7 +1,7 @@
 defmodule DpExchange.GeminiTest do
   use ExUnit.Case, async: true
 
-  alias DpExchange.Core.{Capabilities, Venue}
+  alias DpExchange.Core.{Capabilities, Config, Venue}
   alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini
   alias DpExchange.Gemini.Feed
@@ -101,6 +101,29 @@ defmodule DpExchange.GeminiTest do
   describe "market_status/1" do
     test "crypto is always open" do
       assert Gemini.market_status([]) == {:ok, :open}
+    end
+  end
+
+  describe "live?/1" do
+    test "production, the default, moves real money" do
+      assert Gemini.live?([]) == true
+      assert Gemini.live?(environment: :production) == true
+    end
+
+    test "sandbox does not" do
+      assert Gemini.live?(environment: :sandbox) == false
+    end
+
+    test "an explicit option beats the process-scoped Core.Config setting" do
+      Config.put_override(:environment, :sandbox)
+
+      assert Gemini.live?(environment: :production) == true
+    end
+
+    test "with no explicit option, the process-scoped setting is what resolves" do
+      Config.put_override(:environment, :sandbox)
+
+      assert Gemini.live?([]) == false
     end
   end
 

@@ -18,16 +18,49 @@ defmodule DpExchange.Gemini.WsChannelsTest do
   alias DpExchange.Gemini.{WsChannels, WsDecode}
 
   describe "the surface the Stream Matrix does not show" do
+    # `WsChannels` exposes no "list every channel" accessor — nothing in this package's own
+    # `lib/` ever needed one, and `Core.AdapterContract`'s "16. internal wiring" assertion
+    # refuses an accessor whose only caller is a test. Existence is checked here through
+    # `requires_credential?/1` instead, which every known channel answers with a boolean and
+    # every unknown one answers with `{:error, {:unknown_channel, _}}` — a real accessor this
+    # package's own `Socket.subscribe/3` depends on, not one kept alive for this test alone.
+    @known_channels [
+      :connection,
+      :book_ticker,
+      :trade,
+      :contract_status,
+      :depth,
+      :depth_fast,
+      :depth5,
+      :depth5_fast,
+      :depth10,
+      :depth10_fast,
+      :depth20,
+      :depth20_fast,
+      :orders_account,
+      :orders_session,
+      :balances_account,
+      :balances_account_snapshot,
+      :positions_account,
+      :positions_account_snapshot,
+      :settlements_account,
+      :request_for_quote,
+      :request_for_quote_account,
+      :request_for_quote_session
+    ]
+
     test "the AsyncAPI document defines twenty-two channels" do
       # The rendered matrix shows eleven families. Reading it as the surface is what hid the
       # other ten — the whole requestForQuote family, connection, both snapshots and the
       # four Fast variants.
-      assert length(WsChannels.all()) == 22
+      assert length(@known_channels) == 22
+
+      for channel <- @known_channels do
+        assert is_boolean(WsChannels.requires_credential?(channel)), "#{channel} is missing"
+      end
     end
 
     test "the ten the matrix omits are all present" do
-      channels = WsChannels.all()
-
       for channel <- [
             :connection,
             :balances_account_snapshot,
@@ -40,7 +73,7 @@ defmodule DpExchange.Gemini.WsChannelsTest do
             :request_for_quote_account,
             :request_for_quote_session
           ] do
-        assert channel in channels, "#{channel} is missing"
+        assert is_boolean(WsChannels.requires_credential?(channel)), "#{channel} is missing"
       end
     end
   end
@@ -221,6 +254,55 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert [{price, quantity}] = changes.bids
       assert Decimal.equal?(price, Decimal.new("3610.00"))
       assert Decimal.equal?(quantity, Decimal.new("0"))
+    end
+  end
+
+  describe "to_order_book_delta/2 side-tags depth_changes/1's levels into one flat list" do
+    @depth_frame %{
+      "E" => 1_787_936_147_000_000_000,
+      "s" => "btcusd",
+      "U" => 11,
+      "u" => 15,
+      "b" => [["3610.00", "1.5"], ["3609.50", "0"]],
+      "a" => [["3611.00", "0.5"]]
+    }
+
+    test "bids and asks land in one levels list, each tagged with its side" do
+      assert {:ok, %Types.OrderBookDelta{} = delta} =
+               WsDecode.to_order_book_delta(@depth_frame, "BTC-USD")
+
+      assert delta.symbol == "BTC-USD"
+      assert delta.provider == :gemini
+
+      assert {:bid, price, quantity} =
+               Enum.find(delta.levels, fn {side, price, _qty} ->
+                 side == :bid and Decimal.equal?(price, Decimal.new("3610.00"))
+               end)
+
+      assert Decimal.equal?(price, Decimal.new("3610.00"))
+      assert Decimal.equal?(quantity, Decimal.new("1.5"))
+
+      # A zero quantity is a DELETE and is carried through unresolved — same rule as
+      # `depth_changes/1` itself.
+      assert Enum.any?(delta.levels, fn {side, price, qty} ->
+               side == :bid and Decimal.equal?(price, Decimal.new("3609.50")) and
+                 Decimal.equal?(qty, Decimal.new("0"))
+             end)
+
+      assert Enum.any?(delta.levels, fn {side, price, qty} ->
+               side == :ask and Decimal.equal?(price, Decimal.new("3611.00")) and
+                 Decimal.equal?(qty, Decimal.new("0.5"))
+             end)
+    end
+
+    test "`u` becomes the delta's sequence — the same value depth_gap?/2 compares next" do
+      assert {:ok, delta} = WsDecode.to_order_book_delta(@depth_frame, "BTC-USD")
+      assert delta.sequence == 15
+    end
+
+    test "an undated diff is refused rather than stamped locally" do
+      assert {:error, :missing_venue_timestamp} =
+               WsDecode.to_order_book_delta(Map.delete(@depth_frame, "E"), "BTC-USD")
     end
   end
 
