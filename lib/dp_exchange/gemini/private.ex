@@ -316,6 +316,15 @@ defmodule DpExchange.Gemini.Private do
 
   Gemini requires a symbol here — there is no all-symbols variant — so a caller asking for
   everything is asking for one request per symbol, and it is theirs to decide whether to.
+
+  `opts[:since]` accepts a `DateTime`, converted to the venue's own unit — **milliseconds**,
+  per its own request examples (`timestamp: 1591084414000`) — the same conversion every
+  other filtered endpoint in this module uses. This used to reach `maybe_put/3` instead,
+  which stringifies whatever it is handed rather than converting it: a `DateTime` became
+  `"2026-08-28 17:00:01Z"` on the wire, a shape the venue's `timestamp` field does not
+  parse, so the filter silently failed to narrow anything rather than erroring — the same
+  bug `get_orders/2`'s `history_params/1` already carries the fix for. `opts[:limit]` had
+  the same defect for `limit_trades`, sent as `"100"` instead of the documented integer.
   """
   @spec get_trade_history(map(), keyword()) ::
           {:ok, [Fill.t()]} | {:error, term()} | {:refused, term()}
@@ -327,8 +336,8 @@ defmodule DpExchange.Gemini.Private do
       symbol ->
         params =
           %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
-          |> maybe_put("limit_trades", Keyword.get(opts, :limit))
-          |> maybe_put("timestamp", Keyword.get(opts, :since))
+          |> put_present("limit_trades", Keyword.get(opts, :limit))
+          |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
 
         with {:ok, rows, _headers} <- post("/v1/mytrades", params, credentials, opts) do
           {:ok, Enum.map(List.wrap(rows), &to_fill(&1, symbol))}
@@ -1609,6 +1618,17 @@ defmodule DpExchange.Gemini.Private do
   `liquidation_price` is `nil` here: `/v1/positions` does not publish one. **That does not
   mean the position is safe** — `get_account_margin/2` publishes
   `estimated_liquidation_price` for the account, which is where a caller must look.
+
+  **`symbol` is read through `SymbolFormat`, not carried raw.** The venue's own example
+  response sends it lowercase (`"btcgusdperp"`), the same case `/v1/symbols` uses — this
+  used to pass `row["symbol"]` straight onto the struct unchanged, so a real position
+  arrived as `symbol: "btcgusdperp"` beside `to_order/1`'s and every other reader's
+  uppercase form. Nothing here failed loudly: the test fixtures that exist all wrote
+  `"BTCGUSDPERP"` by hand, and none of them ever asserted on `position.symbol` at all, so
+  the venue's real casing was never exercised. Perpetuals take the same `:nomatch` path
+  through `CanonicalPair.to_canonical/2` that produces the uppercased, unsplit form
+  `SymbolFormat`'s own moduledoc documents — `to_canonical_symbol/1` is the same
+  conversion `to_order/1` already applies to a symbol from the same family of endpoints.
   """
   @spec get_positions(map(), keyword()) ::
           {:ok, [Position.t()]} | {:error, term()} | {:refused, term()}
@@ -1627,7 +1647,7 @@ defmodule DpExchange.Gemini.Private do
     quantity = decimal(row["quantity"])
 
     %Position{
-      symbol: row["symbol"],
+      symbol: position_symbol(row["symbol"]),
       side: position_side(quantity),
       quantity: position_size(quantity),
       instrument_type: position_instrument(row["instrument_type"]),
@@ -1654,6 +1674,14 @@ defmodule DpExchange.Gemini.Private do
       provider: :gemini
     }
   end
+
+  # The venue's own case, whatever it is — `to_canonical_symbol/1` uppercases (and, for a
+  # spot pair, splits) it. `nil` stays `nil`: a position with no symbol has nothing to
+  # canonicalise, and `to_canonical_symbol/1` requires a binary.
+  defp position_symbol(nil), do: nil
+
+  defp position_symbol(symbol) when is_binary(symbol),
+    do: SymbolFormat.to_canonical_symbol(symbol)
 
   # The contract types this as an atom, and the venue sends "spot" or "perp". A word this
   # package does not know is `nil` rather than the nearest atom that fits — an instrument
@@ -2408,7 +2436,12 @@ defmodule DpExchange.Gemini.Private do
   # copy of the same `String.to_atom/1` on venue-supplied text, so the atom-table DoS it
   # carried had to be found and fixed twice — and could as easily have been fixed in only
   # one of the two. One implementation, one place to get it right.
-  defp refusal(body), do: Rest.refusal_reason(decode(body))
+  #
+  # `body` is passed RAW, not through this module's own `decode/1` — see
+  # `Rest.refusal_reason/1`'s moduledoc. `decode/1`'s fallback collapses unparseable JSON
+  # to `%{}`, which would discard a plain-text refusal body before `refusal_reason/1` gets
+  # a chance to keep it; `refusal_reason/1` now decodes a raw body itself.
+  defp refusal(body), do: Rest.refusal_reason(body)
 
   defp decode(body) when is_binary(body) do
     case Jason.decode(body) do

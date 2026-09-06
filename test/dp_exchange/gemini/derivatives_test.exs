@@ -189,6 +189,19 @@ defmodule DpExchange.Gemini.DerivativesTest do
       refute Decimal.negative?(position.quantity)
     end
 
+    test "symbol is read through SymbolFormat, in the venue's own (lowercase) case" do
+      # The venue's own OpenAPI example sends "btcgusdperp", not "BTCGUSDPERP" — this used
+      # to carry `row["symbol"]` onto the struct unchanged, so a real response arrived
+      # lowercase beside every other reader's uppercase form. No fixture in this file ever
+      # asserted on `position.symbol`, which is exactly how that shipped unnoticed.
+      body = %{"openPositions" => [%{"symbol" => "btcgusdperp", "quantity" => "0.2"}]}
+
+      assert {:ok, [position]} =
+               Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert position.symbol == "BTCGUSDPERP"
+    end
+
     test "a positive quantity is a long" do
       body = %{"openPositions" => [%{"symbol" => "BTCGUSDPERP", "quantity" => "0.2"}]}
 

@@ -439,6 +439,93 @@ defmodule DpExchange.Gemini.RestTest do
     end
   end
 
+  describe "a 404 is the venue speaking, not a routing failure" do
+    # Measured live 2026-09-06: `GET /v1/pubticker/nonexistentsymbolxyz` returns 404 with
+    # a plain-text body, `'nonexistentsymbolxyz' does not have available data yet` — the
+    # venue naming exactly the condition a symbol-scoped GET refuses on, not a transient
+    # failure. Before this fix a 404 fell through to the generic `{:error, …}` clause, so
+    # a permanently unlisted symbol looked retryable forever.
+    defp responding_text(body, status) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.send_resp(status, body)
+      end
+    end
+
+    test "get_price refuses on a 404, keeping the venue's own words" do
+      body = "'nonexistentsymbolxyz' does not have available data yet"
+
+      assert {:refused, {:unknown_reason, ^body}} =
+               Rest.get_price("NOPE-USD", plug: responding_text(body, 404), retry_attempts: 0)
+    end
+
+    test "get_top_of_book refuses on a 404 the same way" do
+      body = "'nonexistentsymbolxyz' does not have available data yet"
+
+      assert {:refused, {:unknown_reason, ^body}} =
+               Rest.get_top_of_book("NOPE-USD",
+                 plug: responding_text(body, 404),
+                 retry_attempts: 0
+               )
+    end
+
+    test "an empty 404 body (measured on /v1/fundingamount) is still a plain refusal" do
+      assert {:refused, :refused} =
+               Rest.get_price("NOPE-USD", plug: responding_text("", 404), retry_attempts: 0)
+    end
+  end
+
+  describe "a refusal body that is not JSON at all keeps the venue's own text" do
+    # Measured live 2026-09-06: `/v2/candles/{symbol}/{width}`'s 400 body is plain text,
+    # `"Supplied value 'X' is not a valid symbol"`, not the `{"result":…,"reason":…}`
+    # shape every other refusal in this module carries. `decode/1`'s own fallback
+    # collapses unparseable JSON to `%{}` — right for a 2xx body, wrong for a refusal one,
+    # where it used to discard the venue's only stated reason before `refusal_reason/1`
+    # ever saw it.
+    test "a plain-text 400 becomes {:unknown_reason, text}, not a bare :refused" do
+      body = "Supplied value 'NOPE-USD' is not a valid symbol"
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.send_resp(400, body)
+      end
+
+      assert {:refused, {:unknown_reason, ^body}} =
+               Rest.get_historical_prices("NOPE-USD", "1m", [], plug: plug, retry_attempts: 0)
+    end
+
+    test "a body that arrives as a raw string but IS valid JSON with a reason still reads it" do
+      # Req only auto-decodes a body it recognises as JSON from the content type; a venue
+      # (or a proxy in front of it) answering `application/json`-shaped bytes under a
+      # different content type reaches `refusal_reason/1` as a raw string that happens to
+      # parse. The reason inside it must not be lost just because it arrived unparsed.
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.send_resp(400, ~s({"result":"error","reason":"InvalidSymbol"}))
+      end
+
+      assert {:refused, :invalid_symbol} =
+               Rest.get_price("NOPE-USD", plug: plug, retry_attempts: 0)
+    end
+
+    test "a raw-string body that IS JSON but not the {reason: ...} shape is a plain refusal" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.send_resp(400, ~s(["unexpected", "array"]))
+      end
+
+      assert {:refused, :refused} = Rest.get_price("NOPE-USD", plug: plug, retry_attempts: 0)
+    end
+  end
+
   describe "get_fx_rate/3 refuses a non-numeric rate rather than delivering rate: nil" do
     test "Decimal.new/1 used to raise here; now the record is refused" do
       body = %{"rate" => "null", "fxPair" => "GBPUSD"}

@@ -286,7 +286,12 @@ defmodule DpExchange.Gemini.FeedTest do
 
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: name)
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
-      Process.sleep(20)
+
+      # A synchronous call from this same process, not a sleep: Erlang orders messages
+      # from one sender to one receiver, so this round trip only returns once the feed
+      # has processed the `send/2` above — proving it did not crash rather than hoping
+      # 20ms was enough.
+      Feed.coverage(feed)
 
       assert Process.alive?(feed)
     end
@@ -394,8 +399,11 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      # No socket, nothing to crash and nothing to send to.
-      Process.sleep(10)
+      # No socket, nothing to crash and nothing to send to. A synchronous call from this
+      # same process — not a sleep — only returns once the feed has processed the
+      # `:resubscribe` message above, since Erlang orders messages from one sender to one
+      # receiver.
+      Feed.coverage(feed)
       assert Process.alive?(feed)
     end
   end
@@ -420,7 +428,13 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change} = notice}
+      # A generous explicit timeout, not ExUnit's 100ms default: this notice is the last
+      # hop of test -> Feed -> the stand-in socket's blocking `:gen.call` -> back to Feed
+      # -> `fan_out/2`, and under this suite's own concurrency (734 tests, `async: true`)
+      # that chain can occasionally take longer than 100ms without anything being wrong.
+      # A tight default here was an intermittent, load-dependent CI failure waiting to
+      # happen — found by running the full suite repeatedly, not any one test alone.
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change} = notice}, 1_000
       assert notice.severity == :warning
       assert notice.details.reason =~ "send_timeout"
 
@@ -443,12 +457,16 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}}
+      # See the timeout note in the previous test — the same multi-hop chain to a
+      # `Notice` applies here.
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
+                     1_000
 
       send(feed, :resubscribe)
 
       assert_receive {:dp_exchange, :gemini,
-                      %Notice{kind: :coverage_change, severity: :info} = notice}
+                      %Notice{kind: :coverage_change, severity: :info} = notice},
+                     1_000
 
       assert notice.message =~ "resumed"
 

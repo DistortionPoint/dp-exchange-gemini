@@ -118,16 +118,23 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
   end
 
   describe "statuses between success and refusal" do
-    test "a 404 on a public call is an error naming the status" do
-      # Not a refusal: this venue states refusals in a 400/401/403 body. A 404 is the
-      # shape of a wrong URL, which is our bug rather than the venue's answer.
-      assert {:error, {:exchange_error, :gemini, message}} =
+    test "a 404 on a public call is a refusal, not an error naming the status" do
+      # This used to assert the opposite — that a 404 is "the shape of a wrong URL, our
+      # bug rather than the venue's answer" — and that was the substitution: measured
+      # live 2026-09-06, `GET /v1/pubticker/nonexistentsymbolxyz` returns 404 with the
+      # venue naming exactly the condition, `'nonexistentsymbolxyz' does not have
+      # available data yet`. `Rest.get_with_headers/2` now treats 404 the same as 400 on
+      # every symbol-scoped GET. A body with no reason at all still degrades to a plain
+      # refusal rather than inventing one.
+      assert {:refused, :refused} =
                Rest.get_price("BTC-USD", plug: json(%{}, 404), retry_attempts: 0)
-
-      assert message =~ "404"
     end
 
-    test "a 404 on a private call is an error too" do
+    test "a 404 on a private call is still an error — unmeasured, so unchanged" do
+      # Unlike the public GETs above, no live measurement backs a 404 shape for this
+      # venue's authenticated POSTs, and guessing one is the mistake this family's own
+      # conventions rule out. `Private`'s status list stays 400/401/403 until a 404 is
+      # actually observed here.
       assert {:error, {:exchange_error, :gemini, message}} =
                Private.get_balances(@credentials, plug: json(%{}, 404), retry_attempts: 0)
 

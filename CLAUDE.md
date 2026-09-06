@@ -56,8 +56,27 @@ supervisor pids.
   this the hard way; the moduledoc that records it is carried here verbatim.
 - **Its whole connection strategy** — how many sockets, which channels, how many pairs
   each carries, in what order, at what pace. A consumer never shards anything.
-- **Its order-book maintenance.** The L2 book is rebuilt from the venue's own updates
-  inside this package; what crosses the facade is a book, never a diff stream.
+
+## This package does not maintain an order book, or any other market-data state
+
+A venue package's job is to get the data and maintain the connection — decode a venue
+frame into the contract type it names, and pass it on. **It is not the host's book, and
+it is not this package's either.** The only state this package holds across calls is
+state about what it is doing: which pairs are subscribed to which shard, and delivery
+coverage backing `coverage/1` and `coverage_by_kind/1`. Accumulating market data —
+reconstructing a book from a diff stream, holding a running last price, aggregating
+candles — is a different job, and `dp_exchange_coinbase` was caught doing it and is
+having it removed.
+
+Concretely here: `Socket` subscribes to `@bookTicker`, which carries top-of-book and the
+last trade in one message, so there is no L2 diff stream to reconstruct in the first
+place — see `Socket`'s own moduledoc for why that endpoint was chosen over one that would
+have needed a book. Where a snapshot or diff frame does arrive (`get_order_book/2`'s REST
+snapshot, or a future depth-channel subscription), it is decoded into the matching
+contract type and forwarded once, per frame — never accumulated into package state. This
+line used to claim the opposite — "the L2 book is rebuilt from the venue's own updates
+inside this package" — which described no code that has ever shipped here and was
+corrected once the discrepancy was found.
 
 ## Essential Commands
 

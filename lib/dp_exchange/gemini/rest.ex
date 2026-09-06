@@ -760,6 +760,18 @@ defmodule DpExchange.Gemini.Rest do
   # come down to what `get/3` throws away: it drops the response headers, which is where
   # this venue's only usable quote timestamp lives, and it maps a 4xx to a message string,
   # which is where this venue states its refusal reason.
+  #
+  # ## A 404 on these endpoints is the venue speaking, not the endpoint missing
+  #
+  # Measured live 2026-09-06: `GET /v1/pubticker/nonexistentsymbolxyz` returns **404**,
+  # plain text, `'nonexistentsymbolxyz' does not have available data yet` — the venue
+  # naming exactly the condition `Core.PollingFeed`'s typedoc means by a venue *statement*
+  # that it does not carry the symbol, not a routing failure. `GET
+  # /v1/fundingamount/nonexistentsymbolxyz` also 404s, with an empty body. Before this, a
+  # 404 fell through to the generic `{:error, {:exchange_error, …}}` clause below — the
+  # one shape the family reserves for a possibly-transient failure — so a permanently
+  # unlisted symbol looked retryable forever. Every symbol-scoped GET in this module
+  # shares this clause, so the fix is here rather than at each call site.
   defp get_with_headers(path, opts) do
     url = base_url(opts) <> path <> query(opts)
 
@@ -767,7 +779,7 @@ defmodule DpExchange.Gemini.Rest do
       {:ok, %{status: status, body: body, headers: headers}} when status in 200..299 ->
         {:ok, decode(body), headers}
 
-      {:ok, %{status: 400, body: body}} ->
+      {:ok, %{status: status, body: body}} when status in [400, 404] ->
         {:refused, refusal(body)}
 
       {:ok, %{status: status, body: body}} ->
@@ -830,10 +842,18 @@ defmodule DpExchange.Gemini.Rest do
 
   defp decode(body), do: body
 
-  # A 400 from Gemini names its own reason, and the ones below are permanent for the
-  # request as sent — no retry can make an unknown symbol known. That is a refusal, not
-  # an error, and the distinction is the whole point of having two shapes.
-  defp refusal(body), do: refusal_reason(decode(body))
+  # A 400 or 404 from Gemini names its own reason, and the ones below are permanent for
+  # the request as sent — no retry can make an unknown symbol known. That is a refusal,
+  # not an error, and the distinction is the whole point of having two shapes.
+  #
+  # `body` is passed RAW, not through `decode/1`: `decode/1`'s own fallback collapses
+  # unparseable JSON to `%{}`, which is right for a 2xx body but wrong for a refusal one —
+  # it would discard the venue's own text before `refusal_reason/1` ever saw it. Measured
+  # live 2026-09-06: `/v2/candles/{symbol}/{width}`'s 400 body is plain text (`"Supplied
+  # value 'X' is not a valid symbol"`), not JSON, so `decode/1` here used to turn it into
+  # `{:refused, :refused}` — the venue's only stated reason, discarded. `refusal_reason/1`
+  # now does its own decode and keeps the text when there is nothing else to keep.
+  defp refusal(body), do: refusal_reason(body)
 
   @doc false
   # Shared with `DpExchange.Gemini.Private`, which refuses on the same venue vocabulary.
@@ -856,9 +876,38 @@ defmodule DpExchange.Gemini.Rest do
   # A reason NOT in that set keeps the venue's own words as data rather than being
   # flattened to a bare `:refused`, because the venue's wording is the only thing that
   # says what actually happened, and Gemini adds reasons without telling anyone.
+  #
+  # ## Some refusals arrive as plain text, not JSON
+  #
+  # `HttpClient`/Req only decodes a body it recognises as JSON; a plain-text 4xx (measured
+  # live on `/v2/candles`) reaches this function as a raw `String.t()`, not a map. This
+  # clause decodes it here rather than upstream, so a body that turns out not to be JSON
+  # at all still keeps its own words — via `{:unknown_reason, text}` — instead of losing
+  # them to the same `%{}`-shaped fallback a 2xx body uses. An empty body (Gemini's 404 on
+  # `/v1/fundingamount/{symbol}`, measured the same day) names nothing to keep, so it stays
+  # a bare `:refused` rather than `{:unknown_reason, ""}`.
   @spec refusal_reason(term()) :: atom() | {:unknown_reason, String.t()}
   def refusal_reason(%{"reason" => reason}) when is_binary(reason) do
     Map.get(@refusal_reasons, reason, {:unknown_reason, reason})
+  end
+
+  def refusal_reason(body) when is_binary(body) do
+    case String.trim(body) do
+      "" ->
+        :refused
+
+      trimmed ->
+        case Jason.decode(trimmed) do
+          {:ok, %{"reason" => reason}} when is_binary(reason) ->
+            Map.get(@refusal_reasons, reason, {:unknown_reason, reason})
+
+          {:ok, _other} ->
+            :refused
+
+          {:error, _reason} ->
+            {:unknown_reason, trimmed}
+        end
+    end
   end
 
   def refusal_reason(_other), do: :refused

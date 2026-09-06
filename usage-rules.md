@@ -82,6 +82,23 @@ clock, which is what makes a stale quote indistinguishable from a live one.
 If you need sub-second freshness, use `subscribe/2` — the stream carries a real
 nanosecond event time per update.
 
+## A 404 on a market-data call is a refusal, not a retryable error
+
+Measured live 2026-09-06: `GET /v1/pubticker/{symbol}` and `GET
+/v1/fundingamount/{symbol}` both answer **404** for a symbol the venue does not carry —
+`/v1/pubticker` names it in plain text (`'X' does not have available data yet`),
+`/v1/fundingamount` with an empty body. Every symbol-scoped read in this package
+(`get_price/2`, `get_top_of_book/2`, `get_historical_prices/4`, `get_order_book/2`,
+`get_trades/2`, `get_funding/2`, `next_funding_timestamp/2`, `get_contract_stats/2`,
+`quantization/1`) treats that 404 the same as the 400 the venue uses elsewhere for the
+same fact: `{:refused, reason}`, permanent for the symbol as given, not
+`{:error, {:exchange_error, …}}`, which this family reserves for a failure worth retrying.
+
+Where the venue's refusal body is not JSON at all — measured on `/v2/candles`'s 400,
+plain text rather than the usual `{"reason": …}` shape — the text itself is the reason:
+`{:refused, {:unknown_reason, "Supplied value 'X' is not a valid symbol"}}`, not a bare
+`{:refused, :refused}` that throws the venue's own words away.
+
 ## The demo environment is one option, on both transports
 
 Gemini runs a full exchange with test funds — bots make the order book, and a new account
@@ -242,6 +259,21 @@ them. `capabilities/0` declares `supported_instrument_types: [:spot, :perp]` —
 perpetuals surface has its own endpoints (`get_positions/1`, `get_contract_stats/2`,
 `get_funding/2`, among others), not a place in this list.
 
+## `:since` narrows a window as a `DateTime`, everywhere it appears
+
+`get_orders/2` (with `history: true`), `get_trade_history/2`, `get_transactions/1`,
+`list_custody_fees/1`, `list_accounts/1` and the staking history/reward reads all accept
+`since: ~U[...]` and convert it to the venue's own unit (milliseconds) before it goes on
+the wire — pass a `DateTime`, not a raw integer. `get_trade_history/2`'s `:limit` and
+`:since` used to reach the venue as `to_string(value)` instead — a `DateTime` became a
+string like `"2026-08-28 17:00:01Z"`, a shape `/v1/mytrades`'s `timestamp` field does not
+parse, so the filter silently failed to narrow anything. Fixed to match every other
+`:since`-accepting call in this module.
+
+`get_transfers/2` is the one exception: its filters (`currency:`, `timestamp:`,
+`limit_transfers:`) are the venue's own field names and units unchanged, not translated —
+see `Private.get_transfers/2`'s moduledoc.
+
 ## What this package does not do
 
 Authenticated endpoints are **not** on this list — see "This package does not handle
@@ -289,6 +321,11 @@ stays plausible.
 
 `notional_value` **keeps** its sign — that one is a value, not a magnitude with a direction
 beside it.
+
+`symbol` comes back uppercase and unsplit (`"BTCGUSDPERP"`), matching every other reader
+in this package — the venue's own example sends it lowercase, the same case `/v1/symbols`
+uses, and this package normalises it rather than handing back whatever case the response
+happened to arrive in.
 
 **`liquidation_price` is `nil` here, and that is not safety.** `/v1/positions` publishes
 none; `get_account_margin/1` carries `estimated_liquidation_price` for the account, and that

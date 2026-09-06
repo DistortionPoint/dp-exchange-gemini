@@ -58,6 +58,56 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A 404 on a symbol-scoped market-data GET was reported as a retryable error, not the
+  permanent refusal it is.** Measured live 2026-09-06: `GET /v1/pubticker/{symbol}` and
+  `GET /v1/fundingamount/{symbol}` both answer 404 for a symbol the venue does not carry
+  — `/v1/pubticker` names the condition in plain text (`'X' does not have available data
+  yet`) — while every other status this module's `get_with_headers/2` did not recognise
+  fell to the generic `{:error, {:exchange_error, …}}` clause. That clause is the shape
+  this family reserves for a failure worth retrying; a permanently unlisted symbol read
+  as one forever. 404 now takes the same `{:refused, reason}` path as 400 on every
+  symbol-scoped read (`get_price/2`, `get_top_of_book/2`, `get_historical_prices/4`,
+  `get_order_book/2`, `get_trades/2`, `get_funding/2`, `next_funding_timestamp/2`,
+  `get_contract_stats/2`, `quantization/1`).
+
+- **A refusal body that was not JSON collapsed to a bare `{:refused, :refused}`, discarding
+  the venue's only stated reason.** Measured live 2026-09-06: `/v2/candles/{symbol}/{width}`'s
+  400 body is plain text (`"Supplied value 'X' is not a valid symbol"`), not the
+  `{"reason": …}` shape every other refusal in this package carries. `Rest.refusal/1` and
+  `Private.refusal/1` both pre-decoded the body through the same helper their 2xx success
+  path uses, whose fallback for unparseable JSON is `%{}` — losing the text before
+  `Rest.refusal_reason/1` ever saw it, even though that function's own moduledoc states the
+  opposite intent ("a reason NOT in that set keeps the venue's own words as data"). Both now
+  pass the raw body to `refusal_reason/1`, which decodes it itself and keeps the text as
+  `{:unknown_reason, text}` when it is not JSON; a genuinely empty body still degrades to
+  the plain `:refused` atom, since there is nothing in it worth keeping.
+
+- **`get_trade_history/2`'s `:since` and `:limit` reached the venue as `to_string/1` output
+  instead of the venue's own units.** Every other filtered read in `Private` (`get_orders/2`
+  with `history: true`, `get_transactions/2`, `list_custody_fees/2`, `list_accounts/2`, the
+  staking history/reward reads) converts a `since:` `DateTime` to Unix milliseconds before
+  it goes on the wire — `/v1/mytrades`'s own request examples confirm the unit
+  (`timestamp: 1591084414000`). `get_trade_history/2` alone reached `maybe_put/3` instead,
+  which stringifies whatever it is handed: a `DateTime` became `"2026-08-28 17:00:01Z"` on
+  the wire, a shape the venue's `timestamp` field does not parse, so the filter silently
+  narrowed nothing rather than erroring or filtering correctly. `:limit` had the matching
+  defect for `limit_trades`, sent as `"100"` instead of the documented integer `100`. No
+  test in this package's suite ever passed a `DateTime` to `get_trade_history/2`'s `:since`,
+  which is how this shipped unnoticed. Now uses `put_present/3` and `timestamp_param/1`,
+  matching `get_orders/2`'s `history_params/1`.
+
+- **`get_positions/2` carried a position's `symbol` in whatever case the venue's response
+  happened to use, instead of the canonical uppercase form every other reader in this
+  package produces.** The venue's own `/v1/positions` example sends `"btcgusdperp"`
+  (lowercase, the same case `/v1/symbols` uses); `to_position/2` passed `row["symbol"]`
+  straight onto the struct unchanged, so a real position arrived as `symbol: "btcgusdperp"`
+  beside `to_order/1`'s uppercase form for the identical family of endpoints. Every test
+  fixture in this package wrote `"BTCGUSDPERP"` by hand and none of them ever asserted on
+  `position.symbol`, so the venue's actual casing was never exercised. Now reads the symbol
+  through `SymbolFormat.to_canonical_symbol/1`, the same conversion `to_order/1` already
+  applies — a perpetual takes the `:nomatch` path through `CanonicalPair.to_canonical/2`
+  and comes back uppercased and unsplit, matching `Fake`'s `"BTCGUSDPERP"`.
+
 - **The periodic resubscribe's own failure path was silent — the same shape of defect the
   resubscribe timer itself was built to close (G5, above).** `resubscribe/1`'s `{:error,
   reason}` branch reached only a `Logger.warning`; `grep -n "Notice.new(" lib/dp_exchange/gemini/feed.ex`

@@ -123,13 +123,20 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                Rest.get_price("BTC-USD", plug: plug, retry_attempts: 0)
     end
 
-    test "a 400 whose body is not JSON still refuses" do
+    test "a 400 whose body is not JSON still refuses, keeping the venue's own words" do
       # A venue behind a proxy can answer a 4xx with an HTML error page. It is still a
       # refusal — permanent for the request as sent — and must not be reported as a
       # transient error a caller will retry forever.
-      plug = fn conn -> Plug.Conn.resp(conn, 400, "<html>Bad Request</html>") end
+      #
+      # This used to collapse to a bare `{:refused, :refused}`: `refusal/1` decoded the
+      # body through the same helper a 2xx success path uses, whose fallback for
+      # unparseable JSON is `%{}` — discarding whatever text the venue actually sent
+      # before `refusal_reason/1` ever saw it. `/v2/candles`'s 400 body is plain text on
+      # the real venue (measured live 2026-09-06), so this was not a hypothetical shape.
+      body = "<html>Bad Request</html>"
+      plug = fn conn -> Plug.Conn.resp(conn, 400, body) end
 
-      assert {:refused, :refused} =
+      assert {:refused, {:unknown_reason, ^body}} =
                Rest.get_price("BTC-USD", plug: plug, retry_attempts: 0)
     end
 
@@ -397,10 +404,15 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                )
     end
 
-    test "a refusal with a non-JSON body is still a refusal" do
-      plug = fn conn -> Plug.Conn.resp(conn, 401, "<html>denied</html>") end
+    test "a refusal with a non-JSON body is still a refusal, keeping the venue's words" do
+      # See `Rest.refusal_reason/1`'s moduledoc: this used to collapse to a bare
+      # `{:refused, :refused}` because `refusal/1` pre-decoded the body through the same
+      # helper a 2xx success path uses, discarding unparseable text before
+      # `refusal_reason/1` got a chance to keep it.
+      body = "<html>denied</html>"
+      plug = fn conn -> Plug.Conn.resp(conn, 401, body) end
 
-      assert {:refused, :refused} =
+      assert {:refused, {:unknown_reason, ^body}} =
                DpExchange.Gemini.Private.get_balances(@credentials,
                  plug: plug,
                  retry_attempts: 0
