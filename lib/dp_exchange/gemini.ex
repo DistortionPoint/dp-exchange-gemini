@@ -542,7 +542,13 @@ defmodule DpExchange.Gemini do
   def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
 
   @doc """
-  **Not supported.** Gemini publishes no order-preview endpoint.
+  **Not supported.** Gemini publishes no endpoint answering what an order would *cost*.
+
+  It does publish `POST /v1/margin/order/preview` — a **margin impact** preview, returning
+  pre- and post-order risk statistics for a hypothetical spot order. That is a different
+  question, and answering the cost question with margin statistics is the nearby
+  substitute this family refuses. It is reachable on its own terms, as
+  `preview_margin_order/2`.
 
   Declared through `supports_order_preview: false`, so a consumer routes around it rather
   than discovering the refusal at call time.

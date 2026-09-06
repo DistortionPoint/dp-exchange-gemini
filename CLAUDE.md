@@ -48,12 +48,18 @@ supervisor pids.
 - **Its transport.** `websockex` is declared here because this venue speaks WebSocket.
   Core ships no transport library at any strength.
 - **Its authentication.** Gemini's scheme — a base64 payload signed with HMAC-SHA384 —
-  lives here and is passed to Core's `build_auth_headers/5` as a function. Core keeps
-  only the generic schemes.
-- **Its nonce discipline.** Gemini requires strictly *increasing* nonces per key, and a
-  request that arrives out of order is rejected with `InvalidNonce`. Generating the nonce
-  and sending the request is therefore one ordered unit, not two steps. The host learned
-  this the hard way; the moduledoc that records it is carried here verbatim.
+  lives here, in `Auth.headers/5`, and the headers it returns are handed straight to
+  `Core.HttpClient.request/5`. Core keeps only the generic schemes and is never told
+  Gemini's.
+- **Its nonce discipline.** Gemini provisions a key in one of two nonce validation modes
+  and exposes no way to ask which: time-based (Unix **seconds**, within ±30 s, no
+  ordering requirement) or incremental (strictly *increasing*, or the request is rejected
+  with `InvalidNonce`). No single value satisfies both, so the mode is the host's to name
+  — `nonce_mode:`, defaulting to `:time_based`, the venue's own recommendation. The
+  incremental path draws from a node-wide `:atomics` counter, and `Auth.ensure_counter/0`'s
+  own doc records the incident behind it: a lazily-initialised counter could be *replaced*
+  mid-flight, restarting the sequence and handing two processes the same nonce — the exact
+  failure the counter exists to prevent, reintroduced by its own initialisation.
 - **Its whole connection strategy** — how many sockets, which channels, how many pairs
   each carries, in what order, at what pace. A consumer never shards anything.
 
@@ -62,8 +68,9 @@ supervisor pids.
 A venue package's job is to get the data and maintain the connection — decode a venue
 frame into the contract type it names, and pass it on. **It is not the host's book, and
 it is not this package's either.** The only state this package holds across calls is
-state about what it is doing: which pairs are subscribed to which shard, and delivery
-coverage backing `coverage/1` and `coverage_by_kind/1`. Accumulating market data —
+state about what it is doing: which pairs are subscribed (this package runs one socket and
+shards nothing — see `Feed`'s moduledoc), and delivery coverage backing `coverage/1` and
+`coverage_by_kind/1`. Accumulating market data —
 reconstructing a book from a diff stream, holding a running last price, aggregating
 candles — is a different job, and `dp_exchange_coinbase` was caught doing it and is
 having it removed.

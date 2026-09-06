@@ -19,7 +19,7 @@ same facade every venue in the family exposes.
 
 ## What this package covers
 
-87 callbacks, of which **62 are declared `:experimental`** and 25 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
+88 callbacks, of which **63 are declared `:experimental`** and 25 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
 
 Asset classes: **crypto**. Streamed kinds: **quotes, top of book** — everything else pulls only.
 

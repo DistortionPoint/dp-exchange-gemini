@@ -37,9 +37,14 @@ defmodule DpExchange.Gemini.SymbolFormat do
 
   Thirteen symbols carry a `perp` suffix (`avaxgusdperp`). They end in no quote, so they
   take the `:nomatch` path and are returned uppercased and unsplit. That is deliberate:
-  this package declares `supported_instrument_types: [:spot]`, and inventing a canonical
-  spot pair for a perpetual would be a substitution. `Rest.get_symbols/1` filters them out
-  rather than emitting a symbol the rest of the family cannot interpret.
+  a perpetual is not a `BASE-QUOTE` spot pair, and inventing a canonical one for it would
+  be a substitution. `Rest.get_symbols/1` filters them out rather than emitting a symbol
+  the rest of the family cannot interpret.
+
+  This is a claim about the *symbol shape*, not about coverage: `capabilities/0` declares
+  `supported_instrument_types: [:spot, :perp]` since 2026-09-01, and the perpetuals
+  surface is reached through its own endpoints (`get_positions/1`, `get_funding/2`,
+  `get_contract_stats/2`) rather than through this catalogue.
 
   ## Downcase on the way out
 

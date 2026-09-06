@@ -1,6 +1,6 @@
 # Design Documentation
 
-Welcome to the design documentation for `dp_exchange_core`. This section is the collaborative workspace between the architect and Claude for iterative design, from initial concept through implementation planning. The conventions here are shared across the DpExchange package family and were adopted from `dp_crypto_management`.
+Welcome to the design documentation for `dp_exchange_gemini`. This section is the collaborative workspace between the architect and Claude for iterative design, from initial concept through implementation planning. The conventions here are shared across the DpExchange package family and were adopted from `dp_crypto_management`.
 
 ## Design Workflow Process
 

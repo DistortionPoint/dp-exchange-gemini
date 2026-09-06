@@ -92,18 +92,23 @@ escalation retry have nothing to protect. The host serialises every private requ
 key — a real throughput ceiling — to satisfy a constraint its key may no longer be under.
 
 This package does not choose the mode; the key's provisioning does, and the package cannot
-see which was selected. So it does the one thing that is correct under both: **it sends a
-strictly increasing nonce that is also a valid current timestamp** — a monotonic
-millisecond counter seeded from wall-clock time, which satisfies incremental validation by
-construction and time-based validation as long as it stays inside ±30 s.
+see which was selected. **There is no single value that satisfies both** — time-based
+validation wants Unix *seconds*, and a seconds-granularity value on an incremental key
+caps that key at one request per second — so the mode is named by the caller, as
+`nonce_mode: :time_based | :incremental`, defaulting to `:time_based` because that is the
+venue's own recommendation. `Auth.nonce/1` returns `System.system_time(:second)` for the
+first and a strictly increasing millisecond value from a node-wide `:atomics` counter for
+the second. A mismatch fails loudly with `InvalidNonce` on the first request rather than
+producing a wrong answer.
 
-What it does *not* carry over is the global lock. Ordering is preserved per connection,
-and a caller who needs a stronger guarantee than that is describing a sequencing
-requirement, not a rate limit.
+What it does *not* carry over is the global lock spanning generation and send. Ordering is
+preserved per connection, and a caller who needs a stronger guarantee than that is
+describing a sequencing requirement, not a rate limit.
 
-**Both nonce modes are tier-3 territory** — proving either needs credentials this repo
-must never hold. The mode's existence is documented; the behaviour is not measured here,
-and `capabilities/0` says so.
+**Both nonce modes are tier-3 territory** — proving either needs credentials this repo must
+never hold. The mode's existence is documented and the behaviour is not measured here;
+`capabilities/0` carries no field for it, so the record is this document and `Auth`'s own
+moduledoc rather than the declaration.
 
 ## Session behaviour worth knowing before placing an order
 
@@ -116,7 +121,8 @@ and `capabilities/0` says so.
 
 Neither is enabled by this package. Both are consumer policy: a package that silently
 turned on cancel-on-disconnect would be making a risk decision for someone else's money.
-`capabilities/0` reports that they exist; acting on them is the consumer's call.
+`capabilities/0` has no field for either, so this document and `usage-rules.md` are where
+their existence is recorded; acting on them is the consumer's call.
 
 ## Authentication error codes
 

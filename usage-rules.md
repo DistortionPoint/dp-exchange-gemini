@@ -15,8 +15,9 @@ children = [{DpExchange.Gemini, []}]
 
 The venue supervises a limiter configured from the ceilings it declares. That is not a
 convenience: `Core.HttpClient` fails closed when no limiter is reachable, so a venue
-package that expected someone else to start one answers `{:error, "Rate limiter
-unavailable"}` to everything.
+package that expected someone else to start one answers
+`{:error, {:exchange_error, :gemini, "Rate limiter unavailable"}}` to everything —
+`:gemini_private` on the authenticated calls, which meter against their own bucket.
 
 Running two — two credentials, two scopes — needs distinct names:
 

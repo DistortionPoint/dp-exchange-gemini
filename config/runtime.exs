@@ -17,7 +17,11 @@ import Config
 #   4. tell CI to set it
 #   5. tell the deploy platform to set it
 #
-# `dp_exchange_gemini` currently reads nothing. It is a contract library: it
-# opens no sockets, holds no credentials, and takes its one configurable seam
-# (`:rate_limit_module`, D5) from the CONSUMER's application environment at
-# call time, never from here.
+# `dp_exchange_gemini` currently reads nothing here. It is a venue package: it
+# holds no credentials (they arrive as call arguments), and it opens no socket
+# until a consumer supervises `DpExchange.Gemini` and subscribes — there is no
+# `mod:` in `mix.exs`, so nothing starts on load.
+#
+# Its configurable seams — `:rate_limit_module` (D5) and `:environment` — are
+# read from the CONSUMER's application environment through
+# `DpExchange.Core.Config` at call time, never from here.

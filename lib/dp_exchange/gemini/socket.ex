@@ -18,8 +18,11 @@ defmodule DpExchange.Gemini.Socket do
   and the venue acknowledges with `{"id":1,"status":200}`.
 
   This package subscribes to **`@bookTicker`** and nothing else. That single stream carries
-  best bid, best ask, and last trade price — everything a `Core.Types.Quote` needs, in one
-  message per change.
+  best bid, best ask and — where the book has traded — the last trade price, in one message
+  per change. It delivers `Core.Types.TopOfBook` on every frame that parses, and a separate
+  `Core.Types.Quote` only on the frames that also carry that last trade: the two are
+  independent facts and a bid is never dressed up as a price. See `handle_message/2` for
+  the substitution that rule exists to stop.
 
   ### Which is why there is no order-book machinery here
 

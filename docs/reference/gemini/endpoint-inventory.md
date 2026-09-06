@@ -12,28 +12,29 @@ was accurate at the time and stopped being accurate as this package grew. The ve
 counts below have not moved; what changed is this package's coverage of them, and that is
 recorded through `capabilities/0` rather than re-derived here from a page count.
 
-**Current, from `capabilities/0`, checked 2026-09-03**: 62 of 87 contract callbacks
+**Current, from `capabilities/0`, checked 2026-09-06**: 63 of 88 contract callbacks
 `:experimental`, 25 `:unsupported`, of which 22 are the venue's own absence — see
 `negative-claims.md` — and 3 remain not yet ported (`get_conversion/2`,
 `list_portfolios/1`, `list_instruments/1`).
 
 | group | endpoints (vendor) | in this package |
 |---|---|---|
-| fund management | 16 | most — deposit address, networks, allowlist, withdraw, payment methods, internal transfer; see `usage-rules/money-movement.md` |
+| fund management | 16 | most — deposit address, networks, allowlist, withdraw, payment methods, internal transfer; see `usage-rules.md` |
 | orders | 12 | most — place, cancel, get, list, cancel-all, active orders |
 | market data | 12 | quotes, top of book, candles, trades, order book |
 | derivatives | 9 | perpetuals surface — funding, positions, contract stats |
 | clearing | 8 | confirm/reject/list |
 | staking | 6 | rates, balances, rewards, history, stake, unstake |
-| margin | 3 | not this package's scope on spot |
-| instant orders | 2 | not ported |
-| **total** | **68** | **62 declared `:experimental`, per `capabilities/0`** |
+| margin | 3 | all three — `get_margin_account/1`, `get_margin_rates/1`, `preview_margin_order/2` |
+| instant orders | 2 | both — `quote_conversion/4` and `commit_conversion/2`, plus the wrap endpoint behind `convert/4` |
+| **total** | **68** | **63 declared `:experimental`, per `capabilities/0`** |
 
 Plus `rest-api/common`: 5 admin + 2 package-side OAuth, all implemented — see
-`usage-rules/auth.md` for the refresh and revoke pair.
+`usage-rules.md` for the refresh and revoke pair.
 
-**Best-covered crypto venue in the family**, and no longer close: 62 of the contract's 87
-callbacks against Coinbase's 46 and Webull's 44.
+**Best-covered crypto venue in the family**, and no longer close: 63 of the contract's 88
+callbacks against Coinbase's 49 and Webull's 47 (all three counted from their own
+`capabilities/0` on 2026-09-06).
 
 ## Endpoints
 

@@ -108,14 +108,22 @@ error handling — not for anything that depends on prices being sane.
 
 ## What this package still does not do there
 
-**It does not authenticate**, in demo or production. The host implements authentication
-and chooses which kind; every endpoint requiring a credential is declared `:unsupported`
-here regardless of environment.
+**It does not authenticate**, in demo or production. It **signs**: credentials arrive as
+arguments, are used for one request, and are not kept. Obtaining a credential, storing it,
+refreshing it, and choosing between the API-key and OAuth schemes remain the host's, in
+either environment.
 
-So the demo environment does not change this package's surface. What it changes is the
-**host's** ability to exercise its own trading code — placing, cancelling and reconciling
-orders against real venue machinery with fake money — using this package for market data
-and streaming underneath. That is the win, and it belongs to the host.
+This section read "every endpoint requiring a credential is declared `:unsupported` here
+regardless of environment" until 2026-09-06, and that had stopped being true: balances,
+orders, transfers, trade history, staking, clearing, the perpetuals surface and account
+administration are all implemented and declared `:experimental`. What is `:unsupported` is
+the venue's own absence (see `negative-claims.md`) plus three not-yet-ported endpoints —
+never the authenticated surface as a whole.
+
+So what the demo environment changes is that a consumer can exercise its **whole** trading
+integration — placing, cancelling and reconciling orders against real venue machinery with
+fake money — before a single real order, using this package for the calls as well as for
+market data and streaming.
 
 ## Running both at once
 
