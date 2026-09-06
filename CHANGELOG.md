@@ -58,6 +58,33 @@ acceptable changelog line.
 
 ### Fixed
 
+- **The periodic resubscribe's own failure path was silent — the same shape of defect the
+  resubscribe timer itself was built to close (G5, above).** `resubscribe/1`'s `{:error,
+  reason}` branch reached only a `Logger.warning`; `grep -n "Notice.new(" lib/dp_exchange/gemini/feed.ex`
+  matched nothing in this file before this fix. A consumer whose reconnect kept failing to
+  resubscribe — a venue outage, a stale socket the venue silently stopped honouring — had
+  no facade-level way to learn it, the same "recovered from a quiet chart, or not at all"
+  gap G5 exists to close for the reconnect itself.
+
+  The discovery route is DpCryptoManagement's issue #21, the poll-feed sibling case:
+  `dp_exchange_core`'s `Core.PollingFeed` answered nothing for hours while its own
+  "delivered NOTHING" log line sat ungrepped, and its fix established the
+  `notice_state: :ok | :dead` latch this package now borrows — a `Core.Notice` fires on
+  the transition INTO failure and a recovery notice fires on the transition back OUT,
+  never once per tick for as long as an outage lasts. `dp_exchange_coinbase`'s `Feed`
+  established `:coverage_change` as the kind for this family's sibling shape — a channel
+  subscribe that exhausted its retries without ever becoming delivery — but its own notice
+  there is one-shot, with no recovery counterpart, because that retry chain either
+  succeeds silently or is left for the next unconditional cycle. This module's resubscribe
+  runs forever on a fixed timer rather than a bounded retry chain, so the stricter,
+  `PollingFeed`-shaped latch applies: a new `resubscribe_notice_state` field tracks the
+  last attempt's outcome, a `:warning` notice fires once on the first failure after a
+  success (or after boot), and an `:info` recovery notice fires once on the first success
+  after a failure. The `Logger.warning` is unchanged and still fires on every failing
+  tick — only a consumer-visible `Notice` is new, and it is deliberately quieter than the
+  log beside it. A dead socket or an empty `wanted` set (nothing attempted) touches neither
+  the log nor the latch, matching the pre-fix behaviour for that branch exactly.
+
 - **`:rate_limit_blocking` was unreachable on every REST call this package makes —
   family-wide gap, DpCryptoManagement's issue #23.** `Core.HttpClient.check_rate_limits/1`
   reads this option to choose `acquire/3` (wait for capacity) over fail-fast `check/3`,

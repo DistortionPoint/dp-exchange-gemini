@@ -30,6 +30,50 @@ defmodule DpExchange.Gemini.FeedTest do
     pid
   end
 
+  # A stand-in socket whose `Socket.subscribe/2` result is controlled from the test —
+  # `fake_socket/1` above always answers `:ok`, which cannot exercise the resubscribe
+  # failure-latch path. Every send is still forwarded to `report_to` as `{:frame_sent,
+  # _}`, matching `fake_socket/1`'s contract, so a test can synchronize on the wire
+  # traffic exactly as the existing tests do.
+  #
+  # Never recovers — every send answers `{:error, :send_timeout}`. Used to prove the
+  # failure notice latches: it must fire once on the first failing resubscribe and never
+  # again while the failure continues.
+  defp always_fails_socket(report_to) do
+    spawn_link(fn -> always_fails_frames(report_to) end)
+  end
+
+  defp always_fails_frames(report_to) do
+    receive do
+      {:"$websockex_send", from, {:text, frame}} ->
+        send(report_to, {:frame_sent, Jason.decode!(frame)})
+        :gen.reply(from, {:error, :send_timeout})
+        always_fails_frames(report_to)
+    end
+  end
+
+  # Fails the first `fail_times` sends with `{:error, :send_timeout}`, then answers `:ok`
+  # forever after — used to drive the latch from `:ok` to `:dead` and back to `:ok` inside
+  # one test, proving the recovery notice fires on the transition back out.
+  defp flaky_socket(report_to, fail_times) do
+    spawn_link(fn -> flaky_frames(report_to, fail_times) end)
+  end
+
+  defp flaky_frames(report_to, remaining) do
+    receive do
+      {:"$websockex_send", from, {:text, frame}} ->
+        send(report_to, {:frame_sent, Jason.decode!(frame)})
+
+        if remaining > 0 do
+          :gen.reply(from, {:error, :send_timeout})
+          flaky_frames(report_to, remaining - 1)
+        else
+          :gen.reply(from, :ok)
+          flaky_frames(report_to, 0)
+        end
+    end
+  end
+
   defp quote_for(symbol) do
     %Quote{
       symbol: symbol,
@@ -353,6 +397,87 @@ defmodule DpExchange.Gemini.FeedTest do
       # No socket, nothing to crash and nothing to send to.
       Process.sleep(10)
       assert Process.alive?(feed)
+    end
+  end
+
+  describe "the periodic resubscribe's own failure path was silent — until now" do
+    # Before this fix, a resubscribe that kept failing every cycle only ever reached a
+    # `Logger.warning` — `grep -n "Notice.new(" lib/dp_exchange/gemini/feed.ex` matched
+    # nothing in this file. `resubscribe_notice_state` now latches to `:dead` on the first
+    # failure and back to `:ok` on the first success after one, matching
+    # `Core.PollingFeed`'s `notice_state` shape, so a consumer hears about the outage once
+    # rather than once a minute for as long as it lasts.
+
+    test "a failing resubscribe emits a warning coverage_change notice, once, not on every tick" do
+      socket = always_fails_socket(self())
+      feed = start_feed(socket: socket)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      # The initial subscribe also fails against this socket — irrelevant here, since the
+      # resubscribe latch is only ever touched by the periodic path, not by `subscribe/3`.
+      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change} = notice}
+      assert notice.severity == :warning
+      assert notice.details.reason =~ "send_timeout"
+
+      # Two more failing cycles with the same socket must not re-emit — the notice fires
+      # once on the transition INTO failure, never once per tick while it continues.
+      send(feed, :resubscribe)
+      send(feed, :resubscribe)
+      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
+    end
+
+    test "a resubscribe that recovers after a latched failure emits an info notice, once" do
+      # Fails the initial subscribe and the first resubscribe, then succeeds forever
+      # after — the shape a real busy-then-recovered socket takes.
+      socket = flaky_socket(self(), 2)
+      feed = start_feed(socket: socket)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:dp_exchange, :gemini,
+                      %Notice{kind: :coverage_change, severity: :info} = notice}
+
+      assert notice.message =~ "resumed"
+
+      # A further successful resubscribe must not re-emit the recovery notice — it
+      # already fired on the transition back out, and the latch reads `:ok` again.
+      send(feed, :resubscribe)
+      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
+    end
+
+    test "an ordinary successful resubscribe, never having failed, emits no notice at all" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
+    end
+
+    test "a resubscribe with nothing wanted touches neither the wire nor the failure latch" do
+      socket = always_fails_socket(self())
+      feed = start_feed(socket: socket)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      send(feed, :resubscribe)
+
+      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
     end
   end
 

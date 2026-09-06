@@ -68,6 +68,40 @@ defmodule DpExchange.Gemini.Feed do
   costs one frame the venue ignores; not re-subscribing one it silently dropped costs this
   package's whole coverage until someone notices.
 
+  ## The resubscribe timer's own failure path was silent — until now
+
+  The section above fixed a silent coverage collapse by making this module re-issue its
+  subscription unconditionally. Its own failure path repeated the exact shape it was built
+  to close: before this fix, `grep -n "Notice.new(" lib/dp_exchange/gemini/feed.ex` matched
+  nothing in this file at all — a resubscribe that kept failing every 60 seconds only ever
+  reached a `Logger.warning`, and this is a file whose own moduledoc, one section up, exists
+  because a log line is not something a consumer can subscribe to.
+
+  `DpExchange.Core.PollingFeed`'s moduledoc records the sibling discovery for the poll-feed
+  case — DpCryptoManagement's issue #21, where a feed answered nothing for hours while its
+  own "delivered NOTHING" log line sat ungrepped — and its fix is the shape this module now
+  borrows: a `notice_state: :ok | :dead` latch (`record_success/2` and
+  `notify_delivering_nothing/3`), firing a `Core.Notice` on the transition INTO failure and
+  a recovery notice on the transition back OUT, never once per tick for as long as an
+  outage lasts. `dp_exchange_coinbase`'s `Feed` established the sibling case for THIS
+  family — a channel subscribe that exhausted its retries without ever becoming delivery —
+  using Core's `:coverage_change` kind for exactly that shape of fact: subscribed intent
+  that did not become delivery. A periodic resubscribe that keeps failing is the same shape
+  one level up: the intent is "keep what was already subscribed, subscribed", and it is not
+  becoming delivery either.
+
+  Coinbase's own notice there is one-shot — it fires once when retries are exhausted and
+  carries no recovery counterpart, because that retry chain either succeeds silently or
+  exhausts and is left for the next unconditional cycle to revisit. This module's
+  resubscribe runs forever on a fixed timer rather than a bounded retry chain, so the
+  stricter, `PollingFeed`-shaped latch applies here instead: `resubscribe_notice_state`
+  tracks whether the last resubscribe attempt succeeded, a `:warning` notice fires exactly
+  once on the first failure after a success (or after boot), and an `:info` recovery notice
+  fires exactly once on the first success after a failure. The `Logger.warning` above is
+  unchanged and still fires on every failing tick — that remains the correct "loud while it
+  lasts" log behaviour; only a consumer-visible `Notice` is new, and it is deliberately
+  quieter than the log beside it.
+
   ## `ensure_socket/1` connects inside `handle_call` — its timeout budget is chosen, not inherited
 
   `ensure_socket/1` calls `Socket.start_link/1` synchronously inside `handle_call`, and
@@ -175,7 +209,13 @@ defmodule DpExchange.Gemini.Feed do
        # Both of this venue's declared streamable kinds, pre-populated so
        # `coverage_by_kind/1` always answers with both keys — an absent key would read as
        # "unknown" where an empty map honestly reads as "nothing observed yet".
-       delivering_by_kind: %{quotes: %{}, top_of_book: %{}}
+       delivering_by_kind: %{quotes: %{}, top_of_book: %{}},
+       # Latches to `:dead` the instant a periodic resubscribe fails, and back to `:ok` on
+       # the next one that succeeds — see the moduledoc's "the resubscribe timer's own
+       # failure path was silent" section. `resubscribe/1` reads and writes this to fire a
+       # `Core.Notice` exactly once per transition, matching `Core.PollingFeed`'s
+       # `notice_state` field.
+       resubscribe_notice_state: :ok
      }}
   end
 
@@ -259,17 +299,56 @@ defmodule DpExchange.Gemini.Feed do
     if Process.alive?(socket) and MapSet.size(state.wanted) > 0 do
       case Socket.subscribe(socket, MapSet.to_list(state.wanted)) do
         :ok ->
-          :ok
+          resubscribe_recovered(state)
 
         {:error, reason} ->
           Logger.warning("[Gemini Feed] periodic resubscribe failed: #{inspect(reason)}")
+          resubscribe_failed(state, reason)
       end
+    else
+      # Nothing was attempted — a dead socket or an empty `wanted` set is not a fact about
+      # whether resubscribing works, so the latch is left exactly as it was. Only an actual
+      # `Socket.subscribe/2` result may set or clear it.
+      state
     end
-
-    state
   end
 
   defp resubscribe(state), do: state
+
+  # Fires the recovery notice exactly once, on the transition back OUT of a latched
+  # failure — see the moduledoc and `Core.PollingFeed.record_success/2`. An ordinary
+  # successful resubscribe when nothing was ever latched fires nothing: a notice on every
+  # succeeding tick would be as much of a storm as one on every failing tick.
+  defp resubscribe_recovered(%{resubscribe_notice_state: :dead} = state) do
+    notice =
+      Notice.new(:coverage_change, :gemini,
+        severity: :info,
+        message: "periodic resubscribe has resumed succeeding"
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
+    %{state | resubscribe_notice_state: :ok}
+  end
+
+  defp resubscribe_recovered(state), do: state
+
+  # Fires the failure notice exactly once, on the transition INTO failure — see the
+  # moduledoc and `Core.PollingFeed.notify_delivering_nothing/3`. The `Logger.warning`
+  # above still fires on every failing tick; only this `Notice` latches, so a consumer
+  # hears about the outage once rather than once a minute for as long as it lasts.
+  defp resubscribe_failed(%{resubscribe_notice_state: :dead} = state, _reason), do: state
+
+  defp resubscribe_failed(state, reason) do
+    notice =
+      Notice.new(:coverage_change, :gemini,
+        severity: :warning,
+        message: "periodic resubscribe failed",
+        details: %{reason: inspect(reason)}
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
+    %{state | resubscribe_notice_state: :dead}
+  end
 
   defp apply_delta(%{socket: nil}, _added, _removed), do: :ok
 
