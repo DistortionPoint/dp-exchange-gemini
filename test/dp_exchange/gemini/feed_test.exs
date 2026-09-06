@@ -2,7 +2,7 @@ defmodule DpExchange.Gemini.FeedTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini.Feed
 
   @moduletag :capture_log
@@ -39,6 +39,19 @@ defmodule DpExchange.Gemini.FeedTest do
     }
   end
 
+  defp top_of_book_for(symbol) do
+    %TopOfBook{
+      symbol: symbol,
+      bid: Decimal.new("77800.00"),
+      ask: Decimal.new("77900.00"),
+      bid_size: Decimal.new("0.5"),
+      ask_size: Decimal.new("0.4"),
+      venue_time: ~U[2026-08-28 12:00:00Z],
+      observed_at: ~U[2026-08-28 12:00:00Z],
+      provider: :gemini
+    }
+  end
+
   describe "coverage is observed, never intended" do
     test "a subscribed symbol that has delivered nothing is absent" do
       # The strongest guarantee in the contract. A venue once reported 325 symbols
@@ -70,6 +83,103 @@ defmodule DpExchange.Gemini.FeedTest do
       :ok = Feed.unsubscribe(feed, ["BTC-USD"])
 
       assert Feed.coverage(feed) == %{}
+    end
+  end
+
+  describe "coverage_by_kind/1" do
+    test "with nothing delivered, both declared kinds are present and empty" do
+      # Both kind keys always appear, even with no data yet — an absent key would read
+      # as "this module does not know about that kind", where an empty map honestly
+      # reads as "nothing of that kind has arrived".
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}}
+    end
+
+    test "a symbol delivering only a top-of-book update appears under :top_of_book and " <>
+           "not under :quotes" do
+      # This is the isolation this venue's own mechanics actually produce: a `bookTicker`
+      # frame always yields a `TopOfBook` when it parses, and yields an accompanying
+      # `Quote` only when that same frame also carries a last-traded price
+      # (`DpExchange.Gemini.Socket`). A symbol that quotes continuously without ever
+      # trading is real and exercises exactly this shape — top-of-book healthy, quotes
+      # dark — which `coverage/1` alone cannot tell apart from "everything healthy".
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      send(feed, {:dp_exchange, :gemini, top_of_book_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      by_kind = Feed.coverage_by_kind(feed)
+      assert by_kind == %{quotes: %{}, top_of_book: %{"BTC-USD" => :stream}}
+    end
+
+    test "a symbol delivering both kinds appears under both" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      send(feed, {:dp_exchange, :gemini, top_of_book_for("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert Feed.coverage_by_kind(feed) == %{
+               quotes: %{"BTC-USD" => :stream},
+               top_of_book: %{"BTC-USD" => :stream}
+             }
+    end
+
+    test "the union of every kind's symbols matches coverage/1 exactly" do
+      # The invariant `DpExchange.Core.Venue.coverage_by_kind/1` documents and Core's
+      # conformance suite (assertion 15) checks whenever a venue exports this callback.
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD", "SOL-USD"], to: self())
+
+      # BTC-USD quotes and books; ETH-USD books only; SOL-USD quotes only (unreachable
+      # through the real Socket, but Feed tracks by struct type regardless of how the
+      # message arrived, and the invariant must hold either way).
+      send(feed, {:dp_exchange, :gemini, top_of_book_for("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, top_of_book_for("ETH-USD")})
+      send(feed, {:dp_exchange, :gemini, quote_for("SOL-USD")})
+      _settled = Feed.coverage(feed)
+
+      union =
+        feed
+        |> Feed.coverage_by_kind()
+        |> Map.values()
+        |> Enum.flat_map(&Map.keys/1)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert union == feed |> Feed.coverage() |> Map.keys() |> Enum.sort()
+    end
+
+    test "unsubscribing drops the symbol from every kind's bucket" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      send(feed, {:dp_exchange, :gemini, top_of_book_for("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      :ok = Feed.unsubscribe(feed, ["BTC-USD"])
+
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}}
+    end
+
+    test "update_symbols/2 narrows every kind's bucket to the new set" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], to: self())
+      send(feed, {:dp_exchange, :gemini, top_of_book_for("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, top_of_book_for("ETH-USD")})
+      _settled = Feed.coverage(feed)
+
+      :ok = Feed.update_symbols(feed, ["BTC-USD"])
+
+      assert Feed.coverage_by_kind(feed) == %{
+               quotes: %{},
+               top_of_book: %{"BTC-USD" => :stream}
+             }
     end
   end
 

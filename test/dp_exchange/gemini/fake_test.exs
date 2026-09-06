@@ -116,6 +116,47 @@ defmodule DpExchange.Gemini.FakeTest do
     end
   end
 
+  describe "coverage_by_kind/1" do
+    test "reports what it pushed under :quotes, and declares :top_of_book honestly empty" do
+      # `subscribe/2` above only ever pushes a `Types.Quote` — never a `Types.TopOfBook` —
+      # so this fake is honestly quotes-only. `:top_of_book` still appears, empty, rather
+      # than being omitted: an omitted key would read as "this fake doesn't know the
+      # kind", where an empty map reads as what is true here — declared, nothing observed.
+      :ok = Fake.subscribe(["BTC-USD", "NOPE-USD"], to: self())
+
+      assert Fake.coverage_by_kind() == %{quotes: %{"BTC-USD" => :stream}, top_of_book: %{}}
+    end
+
+    test "the union of its symbols across kinds matches coverage/1's keys exactly" do
+      :ok = Fake.subscribe(["BTC-USD", "ETH-USD"], to: self())
+
+      union =
+        Fake.coverage_by_kind()
+        |> Map.values()
+        |> Enum.flat_map(&Map.keys/1)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert union == Fake.coverage() |> Map.keys() |> Enum.sort()
+    end
+
+    test "every kind key it reports is one capabilities().streamable declares" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
+
+      declared = MapSet.new(Fake.capabilities().streamable)
+      reported = Fake.coverage_by_kind() |> Map.keys() |> MapSet.new()
+
+      assert MapSet.subset?(reported, declared)
+    end
+
+    test "unsubscribing removes it from every kind's bucket" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
+      :ok = Fake.unsubscribe(["BTC-USD"])
+
+      assert Fake.coverage_by_kind() == %{quotes: %{}, top_of_book: %{}}
+    end
+  end
+
   describe "lifecycle" do
     test "it starts nothing" do
       assert Fake.start_link([]) == :ignore

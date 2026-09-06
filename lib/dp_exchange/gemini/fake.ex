@@ -51,7 +51,7 @@ defmodule DpExchange.Gemini.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{FakeInjection, Notice, Timeframe, Types, Venue}
+  alias DpExchange.Core.{Capabilities, FakeInjection, Notice, Timeframe, Types, Venue}
   alias DpExchange.Gemini.{Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
@@ -567,6 +567,25 @@ defmodule DpExchange.Gemini.Fake do
   # Observed, not intended — only symbols actually pushed for.
   @impl true
   def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
+
+  @doc """
+  See `DpExchange.Gemini.coverage_by_kind/1`.
+
+  `subscribe/2` above only ever pushes a `Types.Quote` (via `get_price/2`) — it never
+  builds a `Types.TopOfBook`, so this fake is honestly `:quotes`-only. `:top_of_book`
+  still appears as a key, empty, rather than being omitted: an omitted key here would
+  read as "this fake does not know about that kind", where an empty map reads as what is
+  actually true — the kind is declared, and nothing of it has been observed. **Less
+  capable than the real adapter is allowed; answering a different shape is not**, so the
+  keys match `capabilities().streamable` exactly, the same two the real adapter reports.
+  """
+  @impl true
+  @spec coverage_by_kind(keyword()) :: %{
+          Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
+        }
+  def coverage_by_kind(_opts \\ []) do
+    %{quotes: Map.new(subscribed(), &{&1, :stream}), top_of_book: %{}}
+  end
 
   @impl true
   def subscribe_notices(opts \\ []) do

@@ -13,6 +13,24 @@ defmodule DpExchange.Gemini.Feed do
   A subscribed symbol that has delivered nothing is simply absent, which the facade
   documents as `:not_covered`.
 
+  ## Coverage by kind is tracked from the struct that arrived, never from the channel
+
+  `delivering_by_kind` buckets the same observed-arrival fact `coverage/1` reports, split
+  by which of `Core.Types.Quote` or `Core.Types.TopOfBook` a message actually was;
+  `coverage/1`'s own map is now derived from it, so the two cannot drift apart. The kind
+  comes from a pattern match on the struct itself — never from the `wanted` set, a
+  channel address, or anything this module ever asked for — because intent standing in
+  for evidence is the exact failure `coverage_by_kind/1` exists to close. See
+  `DpExchange.Gemini.coverage_by_kind/1` for the incident this closes and why it applies
+  to a venue with one physical stream underneath two data kinds.
+
+  A payload of a struct type this module does not recognise is still fanned out to
+  subscribers — this module is not the place to decide a struct is uninteresting — but
+  it is not counted toward `delivering_by_kind`, and so not toward `coverage/1` either.
+  Counting an unrecognised kind as generic "something arrived" would be the same collapse
+  one level removed: a symbol would read as covered without this module being able to say
+  what for.
+
   ## Sharding: the host shards this venue nine ways, and this package does not
 
   `gemini/feed.ex` in the host opens **nine sockets**, ten pairs each, because the endpoint
@@ -83,7 +101,8 @@ defmodule DpExchange.Gemini.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.Notice
+  alias DpExchange.Core.{Capabilities, Notice}
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini.Socket
 
   require Logger
@@ -122,6 +141,11 @@ defmodule DpExchange.Gemini.Feed do
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
   def coverage(feed), do: GenServer.call(feed, :coverage)
 
+  @spec coverage_by_kind(GenServer.server()) :: %{
+          Capabilities.data_kind() => %{String.t() => :stream | :internal_poll | :not_covered}
+        }
+  def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind)
+
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed, opts),
     do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())})
@@ -148,7 +172,10 @@ defmodule DpExchange.Gemini.Feed do
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
-       delivering: %{}
+       # Both of this venue's declared streamable kinds, pre-populated so
+       # `coverage_by_kind/1` always answers with both keys — an absent key would read as
+       # "unknown" where an empty map honestly reads as "nothing observed yet".
+       delivering_by_kind: %{quotes: %{}, top_of_book: %{}}
      }}
   end
 
@@ -179,7 +206,7 @@ defmodule DpExchange.Gemini.Feed do
     added = state.wanted |> then(&MapSet.difference(wanted, &1)) |> MapSet.to_list()
     removed = wanted |> then(&MapSet.difference(state.wanted, &1)) |> MapSet.to_list()
 
-    state = %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
+    state = %{state | wanted: wanted, delivering_by_kind: narrow_delivery(state, symbols)}
 
     {:reply, apply_delta(state, added, removed), state}
   end
@@ -187,7 +214,16 @@ defmodule DpExchange.Gemini.Feed do
   def handle_call(:coverage, _from, state) do
     # Only what arrived. A subscribed symbol that has delivered nothing is absent, and
     # the facade documents absence as `:not_covered`.
-    {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
+    {:reply, Map.new(all_delivering(state), fn {symbol, _at} -> {symbol, :stream} end), state}
+  end
+
+  def handle_call(:coverage_by_kind, _from, state) do
+    by_kind =
+      Map.new(state.delivering_by_kind, fn {kind, symbols} ->
+        {kind, Map.new(symbols, fn {symbol, _at} -> {symbol, :stream} end)}
+      end)
+
+    {:reply, by_kind, state}
   end
 
   def handle_call({:subscribe_notices, subscriber}, _from, state) do
@@ -202,14 +238,9 @@ defmodule DpExchange.Gemini.Feed do
     {:noreply, state}
   end
 
-  def handle_info({:dp_exchange, :gemini, quote_struct} = message, state) do
+  def handle_info({:dp_exchange, :gemini, payload} = message, state) do
     fan_out(state.subscribers, message)
-
-    {:noreply,
-     %{
-       state
-       | delivering: Map.put(state.delivering, quote_struct.symbol, :os.system_time(:millisecond))
-     }}
+    {:noreply, track_delivery(state, payload)}
   end
 
   def handle_info(:resubscribe, state) do
@@ -261,7 +292,47 @@ defmodule DpExchange.Gemini.Feed do
     %{
       state
       | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
-        delivering: Map.drop(state.delivering, symbols)
+        delivering_by_kind:
+          Map.new(state.delivering_by_kind, fn {kind, by_symbol} ->
+            {kind, Map.drop(by_symbol, symbols)}
+          end)
+    }
+  end
+
+  defp narrow_delivery(state, symbols) do
+    Map.new(state.delivering_by_kind, fn {kind, by_symbol} ->
+      {kind, Map.take(by_symbol, symbols)}
+    end)
+  end
+
+  # The union of every kind's delivery map — what `coverage/1` reports before the
+  # `:stream` atom is stamped on. Deriving this from `delivering_by_kind` rather than
+  # tracking it separately is what makes the union invariant hold by construction: there
+  # is no second copy of "what arrived" that could drift from the by-kind breakdown.
+  defp all_delivering(state) do
+    Enum.reduce(state.delivering_by_kind, %{}, fn {_kind, by_symbol}, acc ->
+      Map.merge(acc, by_symbol)
+    end)
+  end
+
+  # Kind is derived strictly from the delivered struct's own type — never from a channel
+  # name or subscription intent. See the moduledoc: intent standing in for evidence is
+  # the exact failure `coverage_by_kind/1` exists to close, and deriving kind from
+  # anything but the payload itself would reintroduce it one level down.
+  defp track_delivery(state, %Quote{symbol: symbol}), do: put_delivery(state, :quotes, symbol)
+
+  defp track_delivery(state, %TopOfBook{symbol: symbol}),
+    do: put_delivery(state, :top_of_book, symbol)
+
+  defp track_delivery(state, _other), do: state
+
+  defp put_delivery(state, kind, symbol) do
+    timestamp = :os.system_time(:millisecond)
+
+    %{
+      state
+      | delivering_by_kind:
+          Map.update!(state.delivering_by_kind, kind, &Map.put(&1, symbol, timestamp))
     }
   end
 

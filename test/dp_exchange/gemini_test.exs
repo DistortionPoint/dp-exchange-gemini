@@ -2,7 +2,32 @@ defmodule DpExchange.GeminiTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.{Capabilities, Venue}
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini
+  alias DpExchange.Gemini.Feed
+
+  @moduletag :capture_log
+
+  # A stand-in socket for the coverage_by_kind facade tests below — see
+  # `DpExchange.Gemini.FeedTest` for the same pattern and why it is a real process rather
+  # than a mock.
+  defp fake_socket do
+    spawn_link(fn -> accept_frames() end)
+  end
+
+  defp accept_frames do
+    receive do
+      {:"$websockex_send", from, {:text, _frame}} ->
+        :gen.reply(from, :ok)
+        accept_frames()
+    end
+  end
+
+  defp start_feed do
+    name = :"gemini_test_feed_#{System.unique_integer([:positive])}"
+    {:ok, _pid} = Feed.start_link(name: name, socket: fake_socket())
+    name
+  end
 
   describe "the declaration" do
     test "names every callback exactly once" do
@@ -84,6 +109,84 @@ defmodule DpExchange.GeminiTest do
       # `coverage/1` returns a map and so has no way to say `{:error, :not_supported}`.
       # Empty is the honest answer for a venue delivering nothing.
       assert Gemini.coverage(feed: :no_such_feed_process) == %{}
+    end
+  end
+
+  describe "coverage_by_kind/1" do
+    test "an unstarted feed reports an empty map, not a crash" do
+      assert Gemini.coverage_by_kind(feed: :no_such_feed_process) == %{}
+    end
+
+    test "every kind key it reports is one capabilities().streamable declares" do
+      feed = start_feed()
+      :ok = Gemini.subscribe(["BTC-USD"], to: self(), feed: feed)
+
+      send(
+        feed,
+        {:dp_exchange, :gemini,
+         %TopOfBook{
+           symbol: "BTC-USD",
+           bid: Decimal.new("1"),
+           ask: Decimal.new("2"),
+           bid_size: nil,
+           ask_size: nil,
+           venue_time: ~U[2026-08-28 12:00:00Z],
+           observed_at: ~U[2026-08-28 12:00:00Z],
+           provider: :gemini
+         }}
+      )
+
+      _settled = Gemini.coverage(feed: feed)
+
+      declared = MapSet.new(Gemini.capabilities().streamable)
+      reported = [feed: feed] |> Gemini.coverage_by_kind() |> Map.keys() |> MapSet.new()
+
+      assert MapSet.subset?(reported, declared)
+    end
+
+    test "the union of its symbols across kinds matches coverage/1's keys exactly" do
+      # The same invariant Core's conformance suite (assertion 15) checks, exercised
+      # through the facade rather than through `Feed` directly.
+      feed = start_feed()
+      :ok = Gemini.subscribe(["BTC-USD", "ETH-USD"], to: self(), feed: feed)
+
+      send(
+        feed,
+        {:dp_exchange, :gemini,
+         %TopOfBook{
+           symbol: "BTC-USD",
+           bid: Decimal.new("1"),
+           ask: Decimal.new("2"),
+           bid_size: nil,
+           ask_size: nil,
+           venue_time: ~U[2026-08-28 12:00:00Z],
+           observed_at: ~U[2026-08-28 12:00:00Z],
+           provider: :gemini
+         }}
+      )
+
+      send(
+        feed,
+        {:dp_exchange, :gemini,
+         %Quote{
+           symbol: "ETH-USD",
+           price: Decimal.new("1"),
+           timestamp: ~U[2026-08-28 12:00:00Z],
+           provider: :gemini
+         }}
+      )
+
+      _settled = Gemini.coverage(feed: feed)
+
+      union =
+        [feed: feed]
+        |> Gemini.coverage_by_kind()
+        |> Map.values()
+        |> Enum.flat_map(&Map.keys/1)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert union == [feed: feed] |> Gemini.coverage() |> Map.keys() |> Enum.sort()
     end
   end
 

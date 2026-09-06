@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ### Added
 
+- **`coverage_by_kind/1` implemented — `dp_exchange_core` 0.1.48's optional callback.**
+  `coverage/1` answers one boolean per symbol regardless of which of this venue's two
+  streamable kinds produced it, which is the same collapse that hid Coinbase's
+  `level2`/`ticker` split behind a truthful `:stream` (DpCryptoManagement's issue #22).
+  Gemini's `@bookTicker` stream carries both `:quotes` and `:top_of_book` on one wire, but
+  the two remain independent facts: a frame always yields a `Core.Types.TopOfBook` when it
+  parses, and yields an accompanying `Core.Types.Quote` only when that same frame also
+  carries a last-traded price — so a symbol can quote continuously while never once
+  trading, and `coverage/1` alone cannot tell that apart from full health.
+
+  `Feed` now derives kind strictly from the delivered struct's own type — never from a
+  channel name or the `wanted` subscription set — and `coverage/1`'s own map is derived
+  from the same per-kind state, so the two cannot drift apart by construction. `Fake`
+  reports `:quotes` honestly (the only kind its in-memory `subscribe/2` ever pushes) and
+  `:top_of_book` as a declared-but-empty key, matching the real adapter's key set without
+  claiming delivery it does not simulate. Verified against this venue's actual delivery
+  mechanics: a symbol delivering only a top-of-book update is realistic and is tested; the
+  reverse (`:quotes` with no `:top_of_book`) does not occur through the real socket, since
+  a `Quote` is only ever built alongside a `TopOfBook` from the same frame.
+
 - **`Fake` wired to `Core.FakeInjection` — DpCryptoManagement's issue #14.** Every
   function with a real success path (not an unconditional `Venue.not_supported()`) now
   checks a queued or always-set outcome first: `get_price/2`, `get_top_of_book/2`,

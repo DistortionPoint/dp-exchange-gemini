@@ -607,6 +607,63 @@ defmodule DpExchange.Gemini do
     if alive?(feed), do: Feed.coverage(feed), else: %{}
   end
 
+  @doc """
+  `coverage/1`, split by which of this venue's two streamable kinds is arriving.
+
+  ## Why this exists — the general failure mode
+
+  `coverage/1` is truthful about *whether* anything is arriving for a symbol, but it
+  answers with one boolean regardless of *what* is arriving. That collapse is invisible
+  exactly when it matters most: a venue streaming several distinct kinds of data can have
+  one kind healthy and another dark for the same symbol, and `coverage/1` reports
+  `:stream` either way, because it counts any payload against that symbol's one slot in
+  the map. "One kind dark, another healthy" and "everything healthy" produce the same
+  answer.
+
+  `c:DpExchange.Core.Venue.coverage_by_kind/1` records the incident that forced this open:
+  Coinbase's `level2` (order book) channel delivered over 11,000 frames for 406 symbols
+  while `ticker` (quotes) was dark for all but 5, and `coverage/1` answered `:stream` for
+  all 406 symbols — correctly, by its own definition, and uselessly for anyone trying to
+  tell the two facts apart.
+
+  ## Why it applies here too, even though this venue's delivery is not Coinbase's
+
+  Gemini has no separate channel per kind — one `@bookTicker` stream carries both of this
+  venue's declared kinds, `:quotes` and `:top_of_book` (see `DpExchange.Gemini.Socket`).
+  But the two are still independent facts about a symbol: a `bookTicker` frame always
+  produces a `TopOfBook` when it parses, and produces an accompanying `Quote` only when
+  that same frame also carries a last-traded price. A symbol can quote continuously —
+  its book updating on every level change — while never trading, so `:top_of_book` stays
+  healthy for it and `:quotes` never appears at all. Under `coverage/1` alone that symbol
+  reads identically to one trading actively: `:stream` either way. Sharing one wire
+  underneath both kinds does not prevent the collapse `coverage_by_kind/1` exists to
+  undo; it just changes which mechanism produces the two independent facts.
+
+  ## What this reports, and what it is not
+
+  Each `DpExchange.Core.Types.Quote` and `DpExchange.Core.Types.TopOfBook` this package
+  has actually delivered, grouped by which struct it was — never by channel name, never
+  by what was subscribed. `:quotes` and `:top_of_book` are the only keys, matching
+  `capabilities().streamable`, and each is present even when nothing of that kind has
+  arrived yet, mapped to an empty map — absence here is `:not_covered`, the same as it is
+  in `coverage/1`.
+
+  Not a replacement for `coverage/1`: a caller asking "is anything at all arriving for
+  this symbol" still gets a straight answer from that. Not a per-channel report: this
+  venue's one WebSocket stream must never leak across this facade, by kind or otherwise.
+
+  See `c:DpExchange.Core.Venue.coverage_by_kind/1` for the invariant Core's conformance
+  suite checks whenever a venue exports this callback.
+  """
+  @impl true
+  @spec coverage_by_kind(keyword()) :: %{
+          Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
+        }
+  def coverage_by_kind(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: Feed.coverage_by_kind(feed), else: %{}
+  end
+
   @impl true
   def subscribe_notices(opts \\ []), do: Feed.subscribe_notices(feed(opts), opts)
 
