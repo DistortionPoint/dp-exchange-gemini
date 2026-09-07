@@ -319,8 +319,23 @@ defmodule DpExchange.Gemini.Socket do
   # The subscribe acknowledgement. A non-200 is the venue refusing a subscription, which
   # a consumer needs to hear about — silently continuing is how a feed reports healthy
   # while delivering nothing.
+  #
+  # `:refusal`, not `:coverage_change`: `Core.Notice`'s own moduledoc defines `:refusal`
+  # as "a symbol the venue will not carry", which is exactly this — the venue's own word
+  # about a subscription it received and declined, the same shape `dp_exchange_webull`'s
+  # `Feed` already reports as `:refusal` for its `INVALID_SYMBOL` case.
+  # `:coverage_change` is reserved for the generic, unexplained resubscribe-failure shape
+  # this venue does not have. Found by a cross-package audit comparing notice usage
+  # across all five venues for the identical condition.
   defp handle_message(%{"id" => _id, "status" => status}, state) when status != 200 do
-    notify(state, Notice.new(:coverage_change, :gemini, details: %{subscribe_status: status}))
+    notify(
+      state,
+      Notice.new(:refusal, :gemini,
+        message: "gemini refused a subscription: status #{status}",
+        details: %{subscribe_status: status}
+      )
+    )
+
     {:ok, state}
   end
 

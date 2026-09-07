@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refused subscription reported `:coverage_change` instead of `:refusal`.** A non-200
+  subscribe acknowledgement is the venue's own word about a subscription it received and
+  declined — `Core.Notice`'s own moduledoc defines `:refusal` as "a symbol the venue will
+  not carry", exactly this case, and `dp_exchange_webull`'s `Feed` already reports the
+  identical condition (`INVALID_SYMBOL`) as `:refusal`. `:coverage_change` is the generic,
+  unexplained resubscribe-failure shape this venue does not have here. Found by a
+  cross-package audit comparing notice-kind usage for equivalent conditions across all
+  five venues.
+
+- **`child_spec/1` did not declare `type: :supervisor`, so OTP defaulted it to `:worker`**
+  — which also defaults `:shutdown` to `5_000`ms instead of `:infinity`. A consumer
+  terminating this child gave the whole nested tree (socket, rate limiter, and everything
+  under them) only five seconds to shut down gracefully before `:kill`, rather than
+  letting it unwind on its own terms. Invisible to any single-package review, and found
+  only by diffing `child_spec/1` across all five venue packages against each other;
+  `dp_exchange_schwab` was the only one that already declared it.
+
 ### Added
 
 - **`coverage_by_kind/1` implemented — `dp_exchange_core` 0.1.48's optional callback.**

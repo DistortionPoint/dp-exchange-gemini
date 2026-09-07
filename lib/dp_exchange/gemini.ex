@@ -192,7 +192,18 @@ defmodule DpExchange.Gemini do
 
   @impl true
   def child_spec(opts) do
-    %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
+    # `type: :supervisor`: `start_link/1` starts an OTP `Supervisor`, and without this key
+    # OTP defaults `:type` to `:worker`, which also defaults `:shutdown` to `5_000`ms
+    # instead of `:infinity`. A consumer terminating this child would then give the whole
+    # nested tree — socket, rate limiter, and everything under them — only five seconds to
+    # shut down gracefully before `:kill`, instead of letting it unwind on its own terms.
+    # Found by a cross-package audit comparing `child_spec/1` across all five venues;
+    # `dp_exchange_schwab` was the only one that already declared this.
+    %{
+      id: Keyword.get(opts, :name, __MODULE__),
+      start: {__MODULE__, :start_link, [opts]},
+      type: :supervisor
+    }
   end
 
   @impl true

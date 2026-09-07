@@ -96,6 +96,13 @@ defmodule DpExchange.Gemini.SupervisorTest do
       assert %{id: DpExchange.Gemini} = DpExchange.Gemini.child_spec([])
     end
 
+    test "child_spec/1 declares :supervisor, not OTP's default :worker shutdown" do
+      # `start_link/1` starts a `Supervisor`. Without `type: :supervisor` OTP defaults
+      # `:shutdown` to 5_000ms instead of `:infinity`, giving the whole nested tree only
+      # five seconds to unwind gracefully before `:kill`.
+      assert %{type: :supervisor} = DpExchange.Gemini.child_spec([])
+    end
+
     test "start_link/1 starts the tree" do
       unique = System.unique_integer([:positive])
 

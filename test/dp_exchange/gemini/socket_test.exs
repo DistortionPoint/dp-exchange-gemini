@@ -128,9 +128,12 @@ defmodule DpExchange.Gemini.SocketTest do
   describe "control frames" do
     test "a failed subscribe raises a notice rather than passing silently" do
       # Continuing quietly is how a feed reports healthy while delivering nothing.
+      # `:refusal`, not `:coverage_change`: this is the venue's own word about a
+      # subscription it received and declined — `Core.Notice`'s own moduledoc defines
+      # `:refusal` as "a symbol the venue will not carry".
       assert {:ok, _state} = deliver(%{"id" => 1, "status" => 400})
 
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change} = notice}
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :refusal} = notice}
       assert notice.details.subscribe_status == 400
     end
 
