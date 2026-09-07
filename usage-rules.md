@@ -26,6 +26,26 @@ Running two — two credentials, two scopes — needs distinct names:
  {DpExchange.Gemini, name: :gem_b, feed: :gem_b_feed, limiter: :gem_b_limiter}]
 ```
 
+## A socket crash costs one reconnect, never your whole subscription
+
+The one socket this venue uses is a **linked** child of `Feed` — not a supervised
+sibling you can restart independently. As of this version `Feed` traps exits, so the
+socket dying abnormally no longer takes `Feed` down with it: `coverage/1` and
+`coverage_by_kind/1` clear (this venue has one socket carrying both streamable kinds, so
+a crash costs both, not a partial set), you get a `:link_down` `Core.Notice`, and this
+package reconnects and resends your `wanted` symbols on its own, immediately, without
+you calling `subscribe/3` again.
+
+**What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
+the socket-crash path, or anything that kills the `Feed` pid directly.
+`DpExchange.Gemini.Supervisor` restarts `Feed` under `:one_for_one`, but from the
+*static* `opts` your supervision tree started it with; every `subscribe/3`,
+`update_symbols/2` and `subscribe_notices/1` call you made afterward is gone; `coverage/1`
+reads empty until you call `subscribe/3` again. Nothing inside this package can replay
+those calls — it never held onto the functions or the process that made them. If your
+consumer needs to survive a `Feed` restart unattended, monitor the `Feed` pid (or the
+`DpExchange.Gemini` pid it sits under) yourself and re-issue `subscribe/3` on `:DOWN`.
+
 ## Seven candle widths, and the venue's own documentation names three of them wrong
 
 Canonical widths this package serves: **`1m 5m 15m 30m 1h 6h 1d`**. The shared vocabulary

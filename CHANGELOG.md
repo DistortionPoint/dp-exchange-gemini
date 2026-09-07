@@ -22,6 +22,30 @@ acceptable changelog line.
 
 ### Fixed
 
+- **The socket's own crash took the whole `Feed` down with it, silently discarding every
+  subscription this feed had ever been given.** `ensure_socket/1` calls `Socket.
+  start_link/1` from inside `Feed`'s own callback, which links the socket to `Feed` the
+  way `start_link` always does. `Feed` never called `Process.flag(:trap_exit, true)`, so
+  a socket that exited abnormally — an exception inside a WebSockex callback, or
+  anything that killed the socket pid directly — sent an untrappable `EXIT` signal along
+  that link and crashed `Feed` too. `DpExchange.Gemini.Supervisor` then restarted `Feed`
+  from the *static* `opts` it was given at tree-start, which never carry a consumer's
+  later `subscribe/3` calls: a single socket crash cost every symbol this feed was ever
+  asked for. Found by a 2026-09-07 supervision audit — proven by linking a real process
+  into a running `Feed` the way `ensure_socket/1` does and killing it with
+  `Process.exit(pid, :kill)` (not `:normal`, which a non-trapping process ignores),
+  which crashed `Feed` before this fix and does not after.
+
+  `Feed` now traps exits. A crashed socket clears `state.socket` and resets
+  `delivering_by_kind` (this venue has one socket carrying both streamable kinds, so a
+  crash costs both), reports a `:link_down` `Core.Notice`, and immediately calls the same
+  `resubscribe/1` the periodic timer already uses — reconnecting and resending `wanted`
+  right away rather than waiting out the next 60-second tick. The periodic resubscribe
+  itself also gained a matching fix: previously it did nothing at all when `state.socket`
+  was `nil`, even with symbols still `wanted` — now it dials a fresh socket first when
+  that happens, which is what actually lets a crashed connection recover if the immediate
+  reconnect above did not succeed on the first try.
+
 - **A refused subscription reported `:coverage_change` instead of `:refusal`.** A non-200
   subscribe acknowledgement is the venue's own word about a subscription it received and
   declined — `Core.Notice`'s own moduledoc defines `:refusal` as "a symbol the venue will

@@ -526,4 +526,73 @@ defmodule DpExchange.Gemini.FeedTest do
       assert Process.alive?(feed)
     end
   end
+
+  describe "a crashed socket is isolated, not fatal" do
+    # `fake_socket/1` is `spawn_link`ed by the TEST process, then injected via `socket:`
+    # — it is not linked to `feed`, so it cannot prove what a REAL socket crash does
+    # (`ensure_socket/1` links a socket to `Feed` because `Socket.start_link/1` runs
+    # inside a `Feed` callback). `:sys.replace_state/2` runs the given function INSIDE
+    # the target process — the same mechanism `:sys.get_state/1` uses — so `Process.
+    # link/1` inside it creates a link owned by `feed`, matching what `ensure_socket/1`
+    # does in production, from a place this test controls.
+    defp link_socket_into_feed(feed, socket) do
+      :sys.replace_state(feed, fn state ->
+        Process.link(socket)
+        state
+      end)
+    end
+
+    test "the feed survives a linked socket being killed" do
+      feed = start_feed()
+      socket = :sys.get_state(feed).socket
+      # `fake_socket/1` is `spawn_link`ed by THIS test process too — unlinked here so
+      # the `:kill` below only tests what happens to `feed` (the link this test just
+      # created), not the test process itself.
+      Process.unlink(socket)
+      link_socket_into_feed(feed, socket)
+
+      # `:kill`, not `:normal` — a non-trapping process ignores a peer's normal exit,
+      # which would prove nothing about the trap_exit flag this test exists to check.
+      ref = Process.monitor(feed)
+      Process.exit(socket, :kill)
+      refute_receive {:DOWN, ^ref, :process, ^feed, _reason}, 500
+      assert Process.alive?(feed)
+    end
+
+    test "coverage clears, a :link_down notice fires, and it retries the reconnect immediately" do
+      # `url:` points the REPLACEMENT dial (after the crash, `ensure_socket/1` calls the
+      # real `Socket.start_link/1` — `fake_socket/1` only ever stands in for the FIRST
+      # socket, injected directly) at a local address that refuses fast, so the retry
+      # this test is proving actually happens is observable without reaching a venue or
+      # standing up a real local socket server.
+      feed = start_feed(url: "ws://127.0.0.1:1/nowhere")
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      socket = :sys.get_state(feed).socket
+      Process.unlink(socket)
+      link_socket_into_feed(feed, socket)
+
+      Process.exit(socket, :kill)
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 500
+      assert Process.alive?(feed)
+
+      # Cleared immediately — not "eventually, once something else overwrites it" — the
+      # coverage-truthfulness question the audit asked directly: does `coverage/1` still
+      # say `:stream` right after the one socket carrying "BTC-USD" crashed? It must not.
+      assert Feed.coverage(feed) == %{}
+
+      # `isolate_crashed_socket/2` calls `resubscribe/1` immediately, not on the next 60s
+      # `@resubscribe_interval_ms` tick — the reconnect it attempts fails fast against
+      # the unreachable URL above, which is itself the proof an attempt was made right
+      # away: `resubscribe_failed/2` only ever fires from an actual `ensure_socket/1` or
+      # `Socket.subscribe/2` result, never from doing nothing.
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
+                     2_000
+    end
+  end
 end

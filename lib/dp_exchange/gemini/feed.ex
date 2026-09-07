@@ -63,10 +63,34 @@ defmodule DpExchange.Gemini.Feed do
 
   This module now re-issues the current `wanted` set's subscription on a timer,
   unconditionally — not only after a detected reconnect, because a reconnect a consumer's
-  process never learns about (a supervisor restart of `Socket` under `Feed`, for instance)
-  is indistinguishable from one it does. Re-subscribing a stream the socket already carries
-  costs one frame the venue ignores; not re-subscribing one it silently dropped costs this
-  package's whole coverage until someone notices.
+  process never learns about (`Socket` reconnecting on its own, under WebSockex's own
+  handling of a dropped connection, for instance) is indistinguishable from one it does.
+  Re-subscribing a stream the socket already carries costs one frame the venue ignores;
+  not re-subscribing one it silently dropped costs this package's whole coverage until
+  someone notices.
+
+  ## A crashed socket is `Feed`'s crash too, unless `Feed` catches it — and now it does
+
+  `ensure_socket/1` calls `Socket.start_link/1` from inside `Feed`'s own callback, which
+  links the new socket to `Feed` the way `start_link` always does — this is not a
+  supervised sibling `Feed` could lose independently, it is a linked child. Before this
+  fix `Feed` never called `Process.flag(:trap_exit, true)`, so a socket that exited
+  abnormally (an exception inside a WebSockex callback, or anything that killed the
+  socket pid directly) sent an untrappable `EXIT` signal along that link and crashed
+  `Feed` too — every subscriber, the whole `wanted` set, gone, restarted by
+  `DpExchange.Gemini.Supervisor` from the STATIC `opts` it was given at tree-start, which
+  never carry a consumer's later `subscribe/3` calls. Proven by linking a real process
+  into a running `Feed` the way `ensure_socket/1` does and killing it with
+  `Process.exit(pid, :kill)` — `:normal` would not have proven anything, since a
+  non-trapping process ignores a peer's normal exit.
+
+  `Feed` now traps exits, and a crashed socket is handled the same way a reconnect it
+  never even noticed would be: `state.socket` is cleared, `delivering_by_kind` is reset
+  (this venue has one socket carrying both streamable kinds, so a crash costs both, not a
+  partial set the way a per-shard venue's would), a `:link_down` `Core.Notice` reports it,
+  and `resubscribe/1` — the same function the periodic timer already calls — attempts an
+  immediate reconnect and resend of `wanted` rather than waiting out the next
+  `@resubscribe_interval_ms` tick.
 
   ## The resubscribe timer's own failure path was silent — until now
 
@@ -188,6 +212,12 @@ defmodule DpExchange.Gemini.Feed do
 
   @impl true
   def init(opts) do
+    # `ensure_socket/1` calls `Socket.start_link/1` from inside a `Feed` callback, which
+    # links the socket to `Feed` — see the moduledoc's "A crashed socket is Feed's crash
+    # too" section. Without this flag an abnormal socket exit crashes `Feed` itself,
+    # discarding every subscriber and the whole `wanted` set; `handle_info({:EXIT, _,
+    # _}, _)` below is what this flag makes reachable at all.
+    Process.flag(:trap_exit, true)
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
     {:ok,
@@ -288,13 +318,27 @@ defmodule DpExchange.Gemini.Feed do
     {:noreply, resubscribe(state)}
   end
 
+  # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
+  # "A crashed socket is Feed's crash too" section. `pid` matching `state.socket` is what
+  # tells this apart from an `EXIT` this feed cannot attribute to anything it started; a
+  # stale `EXIT` for a socket already replaced (its pid no longer `state.socket`) falls
+  # through to the catch-all below and is correctly ignored.
+  def handle_info({:EXIT, pid, reason}, %{socket: pid} = state) do
+    {:noreply, isolate_crashed_socket(state, reason)}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
 
   # Unconditional: sent whether or not a reconnect actually happened, because a socket
-  # this process never saw go down (a supervisor restart underneath it, for one) reads
-  # identically to a healthy connection from here. `wanted` is what this module already
-  # tracks for exactly this purpose; a socket that is not up yet has nothing to resend to
-  # and is left for the next tick or the caller that eventually re-subscribes it.
+  # this process never saw go down reads identically to a healthy connection from here.
+  # `wanted` is what this module already tracks for exactly this purpose.
+  #
+  # A `nil` socket is no longer left for "the next tick or the caller that eventually
+  # re-subscribes it" alone — see the clause below this one: if anything is `wanted`,
+  # this attempts to dial a fresh socket itself, which is what makes a crashed socket
+  # (cleared by `isolate_crashed_socket/2`) actually recover instead of sitting `nil`
+  # forever, since a socket this module never dialled has nothing for `Process.alive?/1`
+  # to even check.
   defp resubscribe(%{socket: socket} = state) when is_pid(socket) do
     if Process.alive?(socket) and MapSet.size(state.wanted) > 0 do
       case Socket.subscribe(socket, MapSet.to_list(state.wanted)) do
@@ -313,7 +357,28 @@ defmodule DpExchange.Gemini.Feed do
     end
   end
 
-  defp resubscribe(state), do: state
+  # `state.socket` is `nil` and something is still `wanted` — either nothing has ever
+  # subscribed (ordinary boot, `ensure_socket/1` has never run), or a socket crashed and
+  # `isolate_crashed_socket/2` cleared it. Only the second case has anything to recover;
+  # dialling in the first case costs nothing (the venue gets a connection with no
+  # subscription frame, since `Socket.start_link/1` opens without one) but is not the
+  # ordinary path — `ensure_socket/1` from `subscribe/3` normally wins the race. Recurses
+  # into the `is_pid(socket)` clause above once a socket exists, so the actual `Socket.
+  # subscribe/2` call — and the recovery/failure latch — only ever happens in one place.
+  defp resubscribe(%{socket: nil} = state) do
+    if MapSet.size(state.wanted) > 0 do
+      case ensure_socket(state) do
+        {:ok, state} ->
+          resubscribe(state)
+
+        {:error, reason} ->
+          Logger.warning("[Gemini Feed] periodic reconnect failed: #{inspect(reason)}")
+          resubscribe_failed(state, reason)
+      end
+    else
+      state
+    end
+  end
 
   # Fires the recovery notice exactly once, on the transition back OUT of a latched
   # failure — see the moduledoc and `Core.PollingFeed.record_success/2`. An ordinary
@@ -365,6 +430,43 @@ defmodule DpExchange.Gemini.Feed do
       {:ok, socket} -> {:ok, %{state | socket: socket}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # See the moduledoc's "A crashed socket is Feed's crash too" section and `handle_info(
+  # {:EXIT, pid, reason}, %{socket: pid} = state)` above. This venue has one socket
+  # carrying both streamable kinds — unlike a sharded venue, there is no partial loss to
+  # compute, the crash costs everything this feed was delivering, so `delivering_by_kind`
+  # resets to the same empty shape `init/1` starts with rather than being narrowed
+  # symbol-by-symbol the way `drop/2` narrows it for an ordinary unsubscribe.
+  defp isolate_crashed_socket(state, reason) do
+    state = %{state | socket: nil, delivering_by_kind: %{quotes: %{}, top_of_book: %{}}}
+    notify_socket_crashed(state, reason)
+
+    # `resubscribe/1` — the identical function the periodic timer calls — reconnects and
+    # resends `wanted` right away if anything is still wanted, rather than leaving this
+    # feed silent until the next `@resubscribe_interval_ms` tick (60s by default).
+    resubscribe(state)
+  end
+
+  # The one crash-level event this module could not report before: every other notice
+  # this module can send is a reply to a caller's own `subscribe/3`/`unsubscribe/2`
+  # failing outright, or the periodic resubscribe's own latch. A socket crash is
+  # asynchronous, with no caller waiting on it — without this, it is exactly the
+  # "silent half-dead feed" this family's incidents are about,
+  # discoverable only by a consumer polling `coverage/1` and noticing symbols it used to
+  # see are gone. `:link_down` — see `dp_exchange_core`'s `Core.Notice` moduledoc,
+  # "stated without naming the transport" — because this reports the CAUSE (the link
+  # went down), distinct from the `:coverage_change` kind `resubscribe_failed/2` uses for
+  # a resubscribe attempt that never became delivery.
+  defp notify_socket_crashed(state, reason) do
+    notice =
+      Notice.new(:link_down, :gemini,
+        severity: :warning,
+        message: "socket crashed (#{inspect(reason)}) — reconnecting now",
+        details: %{reason: inspect(reason)}
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
   end
 
   defp drop(state, symbols) do
