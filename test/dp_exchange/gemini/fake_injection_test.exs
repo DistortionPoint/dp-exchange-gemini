@@ -115,7 +115,7 @@ defmodule DpExchange.Gemini.FakeInjectionTest do
 
   describe "bypass_credentials/1" do
     test "skips the venue-faithful credential refusal" do
-      assert Fake.get_balances(%{}, []) == {:refused, :missing_credentials}
+      assert Fake.get_balances(%{}, []) == {:error, {:unsupported_auth_scheme, nil}}
 
       FakeInjection.bypass_credentials(:gemini)
 
@@ -123,7 +123,7 @@ defmodule DpExchange.Gemini.FakeInjectionTest do
     end
 
     test "the default, without calling bypass_credentials/1, is still venue-faithful" do
-      assert Fake.get_balances(%{}, []) == {:refused, :missing_credentials}
+      assert Fake.get_balances(%{}, []) == {:error, {:unsupported_auth_scheme, nil}}
     end
   end
 

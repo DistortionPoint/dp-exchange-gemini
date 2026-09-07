@@ -63,14 +63,47 @@ defmodule DpExchange.GeminiTest do
       assert caps.authenticated_ceiling.limit == caps.public_ceiling.limit * 5
     end
 
+    test "has_staking and supports_margin are true, matching the endpoints below them" do
+      # Six staking endpoints and three margin endpoints are `:experimental` in the SAME
+      # declaration `capabilities/0` returns — `has_staking: false` or
+      # `supports_margin: false` beside that map contradicted it. Found in the
+      # 2026-09-06 documentation-accuracy sweep.
+      caps = Gemini.capabilities()
+
+      assert caps.has_staking == true
+      assert caps.supports_margin == true
+      assert Decimal.equal?(caps.max_leverage, Decimal.new("5"))
+
+      staking = [
+        {:get_staking_rates, 1},
+        {:get_staking_balances, 1},
+        {:get_staking_rewards, 1},
+        {:get_staking_history, 1},
+        {:stake, 3},
+        {:unstake, 3}
+      ]
+
+      margin = [{:get_margin_account, 1}, {:get_margin_rates, 1}, {:preview_margin_order, 2}]
+
+      for endpoint <- staking ++ margin do
+        assert Capabilities.maturity(caps, endpoint) == :experimental,
+               "#{inspect(endpoint)} is not :experimental, so the declaration and the " <>
+                 "endpoint map disagree about whether this venue serves it"
+      end
+    end
+
     test "provenance says what was measured AND what was not" do
       caps = Gemini.capabilities()
 
-      assert caps.measured_at == ~D[2026-08-28]
+      assert caps.measured_at == ~D[2026-09-06]
       assert caps.measured_against =~ "measured live against api.gemini.com"
       # The ceilings were read, not probed. An unlabelled number is worse than a missing
       # one, and probing a limit means deliberately exceeding a third party's.
       assert caps.measured_against =~ "NOT probed"
+      # has_staking/supports_margin: one endpoint reprobed live, the rest read from the
+      # vendor's own OpenAPI documentation and said so rather than implied otherwise.
+      assert caps.measured_against =~ "re-measured 2026-09-06"
+      assert caps.measured_against =~ "read from documentation, not probed live"
     end
 
     test "declares no timeframe the venue rejects" do

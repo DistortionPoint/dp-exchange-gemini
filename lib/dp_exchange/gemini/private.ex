@@ -162,9 +162,11 @@ defmodule DpExchange.Gemini.Private do
   @spec place_order(map(), map(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
-    with {:ok, {type, _from_type} = resolved} <-
-           order_type(Map.get(request, :order_type, :limit)),
-         {:ok, options} <- execution_options(Map.get(request, :time_in_force, :gtc), resolved),
+    with {:ok, {type, options}} <-
+           order_wire(
+             Map.get(request, :order_type, :limit),
+             Map.get(request, :time_in_force, :gtc)
+           ),
          {:ok, price} <- required_price(request) do
       params =
         %{
@@ -482,6 +484,23 @@ defmodule DpExchange.Gemini.Private do
   end
 
   # --- order mapping ------------------------------------------------------
+
+  @doc false
+  # Exposed (not `defp`) so `Fake` validates a `{order_type, time_in_force}` pair with
+  # this exact function rather than a second copy of the table below. Two copies is how
+  # the fake ended up silently MORE permissive than the venue — accepting
+  # `order_type: :stop_limit, time_in_force: :ioc` and `order_type: :post_only,
+  # time_in_force: :fok`, both of which the venue's own "at most one execution option"
+  # rule refuses — found in the 2026-09-06 real/fake parity sweep. One implementation
+  # is what `Rest.refusal_reason/1` already does for `Rest` and `Private` sharing a
+  # refusal vocabulary; this is the same fix for the order-validation vocabulary.
+  @spec order_wire(atom(), atom()) :: {:ok, {String.t(), [String.t()]}} | {:error, term()}
+  def order_wire(order_type, time_in_force) do
+    with {:ok, {type, _from_type} = resolved} <- order_type(order_type),
+         {:ok, options} <- execution_options(time_in_force, resolved) do
+      {:ok, {type, options}}
+    end
+  end
 
   # The contract models maker-or-cancel, IOC and fill-or-kill as ORDER TYPES; Gemini
   # models them as execution *options* on a limit order. Both spellings are therefore

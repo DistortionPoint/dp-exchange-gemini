@@ -234,6 +234,39 @@ defmodule DpExchange.Gemini do
       # Spot short selling still needs a margin order, which this package does not place.
       # The perpetuals book is where a short lives here, and `get_positions/1` reports one.
       supports_short_selling: false,
+
+      # **Both were `false` while all six staking endpoints and all three margin
+      # endpoints already shipped as `:experimental` below** — a declaration contradicting
+      # its own endpoint map, found in the 2026-09-06 documentation-accuracy sweep. Fixed
+      # here rather than in the endpoint map, because the map was already honest: kind 1
+      # (activation and maturity) said `:experimental` correctly; these are kind 2
+      # (domain) fields, and kind 2 answers "can the venue do this at all", which it can.
+      #
+      # `get_staking_rates/1` is public and was reprobed live 2026-09-06 against
+      # `GET /v1/staking/rates`, which answered with real provider rates — the same shape
+      # `Rest.get_staking_rates/1` builds from. The other five staking endpoints and all
+      # three margin endpoints are authenticated, and this repo holds no credentials to
+      # probe them with (tier 3 — see the module test-tier note); their claim rests on the
+      # vendor's own OpenAPI paths and response shapes in
+      # `docs/reference/gemini/endpoint-inventory.md`, not on a live call. That is
+      # measured for one and read-from-documentation for the rest, and both are said so
+      # here rather than folded into one claim.
+      #
+      # Gemini gates both features by account eligibility and jurisdiction — margin to US
+      # (excluding NY) Eligible Contract Participants, staking to whichever assets a
+      # region allows — the same way it gates order placement by KYC tier. That is an
+      # entitlement on the *account*, not a statement that the *venue* lacks the feature
+      # or that this *package* cannot reach it once the account has it, so it does not
+      # belong in this declaration any more than a KYC tier belongs beside
+      # `supported_order_types`.
+      has_staking: true,
+      supports_margin: true,
+      # Gemini's own page: "Trade Crypto with Up to 5x Leverage." A single documented
+      # ceiling, unlike Schwab's Reg-T account (`:per_account`, see `Core.Capabilities`'s
+      # own moduledoc) — some collateral assets cap lower than 5x, which is the account's
+      # detail to report, not a second venue-wide number to invent here.
+      max_leverage: Decimal.new("5"),
+
       # `bookTicker` delivers top-of-book; a frame carrying a last trade also delivers a
       # quote. Two kinds from one channel, and each says which it is.
       streamable: [:quotes, :top_of_book],
@@ -276,14 +309,21 @@ defmodule DpExchange.Gemini do
       # `Core.Capabilities` because this declaration needed it.
       public_ceiling: %{limit: 120, per_ms: 60_000, burst: 5},
       authenticated_ceiling: %{limit: 600, per_ms: 60_000, burst: 5},
-      measured_at: ~D[2026-08-28],
+      measured_at: ~D[2026-09-06],
       measured_against:
         "timeframes, the fixed candle windows (all seven bar counts), symbol catalogue, " <>
           "book/ticker/pricefeed shapes and the absence of rate-limit headers measured " <>
-          "live against api.gemini.com; the bookTicker stream measured live against " <>
-          "ws.gemini.com; CEILINGS taken from developer.gemini.com/rate-limit as " <>
-          "published prose and NOT probed — probing a limit means deliberately " <>
-          "exceeding a third party's"
+          "live against api.gemini.com 2026-08-28; the bookTicker stream measured live " <>
+          "against ws.gemini.com the same day; CEILINGS taken from " <>
+          "developer.gemini.com/rate-limit as published prose and NOT probed — probing " <>
+          "a limit means deliberately exceeding a third party's stated rate limit. " <>
+          "has_staking re-measured 2026-09-06: GET /v1/staking/rates against " <>
+          "api.gemini.com answered with real provider rates, live and public. The other " <>
+          "five staking endpoints and all three margin endpoints are authenticated, " <>
+          "this repo holds no credentials, and their inclusion here rests on the " <>
+          "vendor's own OpenAPI paths and response shapes recorded in " <>
+          "docs/reference/gemini/endpoint-inventory.md — read from documentation, not " <>
+          "probed live, and said so rather than implied otherwise."
     )
   end
 

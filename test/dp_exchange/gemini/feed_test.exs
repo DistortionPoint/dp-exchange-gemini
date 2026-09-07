@@ -234,7 +234,10 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
 
-      assert_receive {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}
+      # A generous explicit timeout, not ExUnit's 100ms default — same reasoning as the
+      # resubscribe-latch test below: test -> Feed -> `fan_out/2` -> back to test is a
+      # real hop under this suite's own concurrency.
+      assert_receive {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}, 1_000
     end
 
     test "notices go to notice subscribers, not quote subscribers" do
@@ -243,7 +246,12 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, {:dp_exchange, :gemini, Notice.new(:link_down, :gemini)})
 
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}
+      # A generous explicit timeout, not ExUnit's 100ms default — same reasoning as the
+      # resubscribe-latch test below: test -> Feed -> `fan_out/2` -> back to test is a
+      # real hop under this suite's own concurrency, and a tight default here is an
+      # intermittent, load-dependent failure rather than a real one. Found the same way:
+      # by running the full suite, not this test alone.
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 1_000
     end
 
     test "a dead subscriber does not stop delivery to a live one" do
@@ -258,7 +266,8 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
 
-      assert_receive {:dp_exchange, :gemini, %Quote{}}
+      # See the timeout note on "a quote reaches the subscriber", above.
+      assert_receive {:dp_exchange, :gemini, %Quote{}}, 1_000
     end
 
     test "a subscriber registered by name (not a raw pid) is delivered to rather than crashing the feed" do
@@ -273,7 +282,8 @@ defmodule DpExchange.Gemini.FeedTest do
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: name)
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
 
-      assert_receive {:dp_exchange, :gemini, %Quote{}}
+      # See the timeout note on "a quote reaches the subscriber", above.
+      assert_receive {:dp_exchange, :gemini, %Quote{}}, 1_000
       assert Process.alive?(feed)
 
       Process.unregister(name)

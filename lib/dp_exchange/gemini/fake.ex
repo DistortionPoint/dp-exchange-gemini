@@ -23,8 +23,17 @@ defmodule DpExchange.Gemini.Fake do
 
   A fake where everything works proves half the contract. This one refuses:
 
-    * a symbol it does not carry, with `{:refused, :not_listed}` — permanent, and
-      distinct from a transient error;
+    * a symbol it does not carry, with **the real reason for that endpoint** — Gemini
+      does not refuse a bad symbol the same way everywhere, and neither does this fake:
+      `:invalid_symbol` where `Rest`'s own tests pin a JSON `InvalidSymbol` body
+      (`get_order_book/2`, `quantization/1`, `place_order/3`), `{:unknown_reason, text}`
+      where the venue answers with plain text instead (`get_price/2`, `get_top_of_book/2`
+      — measured live, `/v1/pubticker` — and `get_historical_prices/4` — measured live,
+      `/v2/candles`), or the venue's own unrecognised JSON reason (`get_trades/2`,
+      measured live as `BadRequest`). A single invented `:not_listed` used to stand in
+      for all of these, which is precisely the divergence the 2026-09-06 real/fake
+      parity sweep exists to catch: a consumer's test pattern-matching the real shape
+      passed here for the wrong reason;
     * a timeframe Gemini does not serve, including `2h`, `4h` and `12h`, which the shared
       vocabulary models and this venue does not;
     * a range reaching **before the venue's fixed window**, with `{:range_unavailable,
@@ -40,9 +49,10 @@ defmodule DpExchange.Gemini.Fake do
   `Venue.not_supported()`) checks `DpExchange.Core.FakeInjection.next_outcome/1` or `/2`
   first — a queued or always-set outcome from `FakeInjection.queue_failures/2,3` or
   `fail_always/2,3` short-circuits the fake's normal logic and is returned as-is.
-  `authenticated/1` also checks `FakeInjection.credentials_bypassed?/1` before its normal
-  `{:refused, :missing_credentials}` path. Neither changes anything for a test that never
-  calls `FakeInjection` — see that module for the full contract.
+  `authenticated/2` also checks `FakeInjection.credentials_bypassed?/1` before running the
+  same scheme-resolution `Private`'s `Auth.headers/5` runs — see that function's own
+  comment for the shapes it returns. Neither changes anything for a test that never calls
+  `FakeInjection` — see that module for the full contract.
 
   `subscribe/2`, `unsubscribe/2` and `update_symbols/2` are NOT wired: each takes a list
   of symbols in one call, and "this one symbol in the batch fails, the rest succeed" is a
@@ -52,7 +62,7 @@ defmodule DpExchange.Gemini.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, FakeInjection, Notice, Timeframe, Types, Venue}
-  alias DpExchange.Gemini.{Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
 
@@ -113,7 +123,7 @@ defmodule DpExchange.Gemini.Fake do
            }}
 
         :error ->
-          {:refused, :not_listed}
+          not_listed(symbol)
       end
     end)
   end
@@ -139,7 +149,7 @@ defmodule DpExchange.Gemini.Fake do
            }}
 
         :error ->
-          {:refused, :not_listed}
+          not_listed(symbol)
       end
     end)
   end
@@ -149,14 +159,24 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(symbol, fn ->
       cond do
         symbol not in @symbols ->
-          {:refused, :not_listed}
+          # Measured live 2026-09-06: `/v2/candles/{symbol}/{width}` refuses an unknown
+          # symbol with a plain-text 400, `Supplied value '#{symbol}' is not a valid
+          # symbol` — see `Rest.get_body/2`'s own comment. `:not_listed` never appeared
+          # anywhere in the real vocabulary; found in the parity sweep.
+          {:refused, {:unknown_reason, "Supplied value '#{symbol}' is not a valid symbol"}}
 
         timeframe not in Rest.timeframes() ->
           # Includes `2h`, `4h` and `12h` — modelled by the vocabulary, not served here.
           {:error, {:unsupported_timeframe, timeframe}}
 
         before_window?(timeframe, range) ->
-          {:error, {:range_unavailable, timeframe, earliest: earliest(timeframe)}}
+          # `requested:` matches `Rest.get_historical_prices/4`'s real shape exactly — it
+          # used to be omitted here, so a consumer's tier-1 test asserting the documented
+          # `{earliest:, requested:}` pair passed against this fake and would have failed
+          # against the real venue. Found in the 2026-09-06 real/fake parity sweep.
+          {:error,
+           {:range_unavailable, timeframe,
+            earliest: earliest(timeframe), requested: Keyword.get(range, :start)}}
 
         true ->
           {:ok, [candle(symbol, timeframe)]}
@@ -186,7 +206,10 @@ defmodule DpExchange.Gemini.Fake do
            }}
 
         :error ->
-          {:refused, :not_listed}
+          # `Rest.get_order_book/2`'s own test pins `/v1/book/{symbol}` to a JSON
+          # `InvalidSymbol` refusal for an unlisted symbol, not the invented `:not_listed`
+          # this used to answer — found in the parity sweep.
+          {:refused, :invalid_symbol}
       end
     end)
   end
@@ -194,36 +217,45 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_trades(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      trades = [
-        %Types.Trade{
-          id: "5335307668",
-          symbol: symbol,
-          # The taker's side: a buyer lifted the offer.
-          side: :buy,
-          price: Decimal.new("3610.85"),
-          quantity: Decimal.new("0.27413495"),
-          timestamp: @at,
-          broken: false,
-          provider: :gemini
-        },
-        %Types.Trade{
-          id: "5335307669",
-          symbol: symbol,
-          side: :sell,
-          price: Decimal.new("9999.99"),
-          quantity: Decimal.new("1"),
-          timestamp: @at,
-          # A busted print. The fake carries one so a consumer's suite exercises the
-          # exclusion rather than assuming it.
-          broken: true,
-          provider: :gemini
-        }
-      ]
+      if symbol in @symbols do
+        trades = [
+          %Types.Trade{
+            id: "5335307668",
+            symbol: symbol,
+            # The taker's side: a buyer lifted the offer.
+            side: :buy,
+            price: Decimal.new("3610.85"),
+            quantity: Decimal.new("0.27413495"),
+            timestamp: @at,
+            broken: false,
+            provider: :gemini
+          },
+          %Types.Trade{
+            id: "5335307669",
+            symbol: symbol,
+            side: :sell,
+            price: Decimal.new("9999.99"),
+            quantity: Decimal.new("1"),
+            timestamp: @at,
+            # A busted print. The fake carries one so a consumer's suite exercises the
+            # exclusion rather than assuming it.
+            broken: true,
+            provider: :gemini
+          }
+        ]
 
-      if Keyword.get(opts, :include_broken, false) do
-        {:ok, trades}
+        if Keyword.get(opts, :include_broken, false) do
+          {:ok, trades}
+        else
+          {:ok, Enum.reject(trades, & &1.broken)}
+        end
       else
-        {:ok, Enum.reject(trades, & &1.broken)}
+        # This used to answer unconditionally for ANY symbol — never refusing at all,
+        # which is more capable than `Rest.get_trades/2` rather than less. Measured live
+        # 2026-09-06: `GET /v1/trades/{symbol}` refuses an unlisted symbol with
+        # `{"reason":"BadRequest",...}`, a reason outside `Rest`'s recognised vocabulary
+        # and so `{:unknown_reason, ...}` there too. Found in the parity sweep.
+        {:refused, {:unknown_reason, "BadRequest"}}
       end
     end)
   end
@@ -264,7 +296,7 @@ defmodule DpExchange.Gemini.Fake do
           # Scoped to the credential on the real venue, so the fake requires one: an empty
           # answer means this account cannot move anything on that network, not that the
           # network carries nothing.
-          with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+          with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
             {:ok, [%{"network" => network, "assets" => ["USDC", "USDT"]}]}
           end
 
@@ -304,7 +336,10 @@ defmodule DpExchange.Gemini.Fake do
            }}
 
         :error ->
-          {:refused, :not_listed}
+          # Measured live 2026-09-06: `/v1/symbols/details/{symbol}` refuses an unlisted
+          # symbol with `{"reason":"InvalidSymbol",...}` — the one case in this sweep
+          # confirmed against the venue itself, not just against `Rest`'s own tests.
+          {:refused, :invalid_symbol}
       end
     end)
   end
@@ -325,9 +360,9 @@ defmodule DpExchange.Gemini.Fake do
   # would let a consumer's test pass while the real call fails on a missing key.
 
   @impl true
-  def get_balances(credentials, _opts \\ []) do
+  def get_balances(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         {:ok,
          [
            %Types.Balance{
@@ -352,38 +387,45 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def get_accounts(credentials, _opts \\ []) do
+  def get_accounts(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         {:ok, [%{"account" => "primary", "type" => "exchange"}]}
       end
     end)
   end
 
   @impl true
-  def get_fees(credentials, _opts \\ []) do
+  def get_fees(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         {:ok, %{"api_maker_fee_bps" => 10, "api_taker_fee_bps" => 35}}
       end
     end)
   end
 
   @impl true
-  def get_transfers(credentials, _opts \\ []) do
+  def get_transfers(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials), do: {:ok, []}
+      with :ok <- authenticated(credentials, opts), do: {:ok, []}
     end)
   end
 
   @impl true
-  def place_order(credentials, request, _opts \\ []) do
+  def place_order(credentials, request, opts \\ []) do
     with_injection(fn ->
       # The refusals matter more than the success. A fake where every order works proves
-      # only that the happy path compiles.
-      with :ok <- authenticated(credentials),
-           :ok <- supported_order_type(Map.get(request, :order_type, :limit)),
-           :ok <- supported_tif(Map.get(request, :time_in_force, :gtc)),
+      # only that the happy path compiles. `Private.order_wire/2` is the SAME function
+      # the real adapter validates against — not a second copy of the "at most one
+      # execution option" table, which is how this fake used to accept combinations
+      # (`:stop_limit` with any `time_in_force`, `:post_only` with `:fok`) the venue
+      # refuses outright.
+      with :ok <- authenticated(credentials, opts),
+           {:ok, _wire} <-
+             Private.order_wire(
+               Map.get(request, :order_type, :limit),
+               Map.get(request, :time_in_force, :gtc)
+             ),
            :ok <- priced(request),
            :ok <- listed(Map.get(request, :symbol)) do
         {:ok, order(request)}
@@ -409,18 +451,18 @@ defmodule DpExchange.Gemini.Fake do
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def cancel_order(credentials, order_id, _opts \\ []) do
+  def cancel_order(credentials, order_id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         {:ok, %{order(%{}) | id: order_id, status: :cancelled}}
       end
     end)
   end
 
   @impl true
-  def get_order(credentials, order_id, _opts \\ []) do
+  def get_order(credentials, order_id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         {:ok, %{order(%{}) | id: order_id}}
       end
     end)
@@ -431,7 +473,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # Open and historical are two endpoints on this venue, not one with a filter, and the
       # fake says so rather than answering the same empty list to both.
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         if Keyword.get(opts, :history, false),
           do: {:ok, [%{order(%{}) | status: :filled}]},
           else: {:ok, []}
@@ -444,7 +486,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # The fake enforces the contract's rule, so a consumer's suite cannot go green on a
       # bulk cancel that never said which orders it meant.
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         case Keyword.get(opts, :scope) do
           scope when scope in [:session, :account] ->
             {:ok, %{cancelled: ["fake-gemini-order-1"], rejected: []}}
@@ -464,7 +506,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # The real adapter requires a symbol — Gemini offers no all-symbols variant — so the
       # fake requires one too. Less capable is allowed; differently capable is not.
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         case Keyword.get(opts, :symbol) do
           nil -> {:error, {:missing_option, :symbol}}
           _symbol -> {:ok, []}
@@ -473,17 +515,47 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
-  defp authenticated(credentials) do
+  # Mirrors `Private`'s `auth_scheme/2` + `Auth.headers/5` decision tree exactly — not
+  # the cryptography, which the fake never does, but the SHAPE of what a caller with no
+  # credentials, or the wrong ones, gets back. That tree found here used to be flattened
+  # to one bare `{:refused, :missing_credentials}` for every case, which was wrong on two
+  # axes at once against the real path's most common outcome: the wrong *kind*
+  # (`:refused`, which the real adapter reserves for the venue's own 401/403 body, never
+  # for a call this package refused to even sign and send) and the wrong *shape*
+  # (`:missing_credentials` alone, dropping which scheme was missing it). Found in the
+  # 2026-09-06 real/fake parity sweep — every one of `auth_test.exs`'s cases now has a
+  # pinned equivalent against this fake in `fake_parity_test.exs`.
+  defp authenticated(credentials, opts) do
     if FakeInjection.credentials_bypassed?(:gemini) do
       :ok
     else
-      authenticated_venue_faithful(credentials)
+      scheme = Keyword.get(opts, :auth_scheme, resolve_scheme(credentials))
+      authenticated_venue_faithful(scheme, credentials)
     end
   end
 
-  defp authenticated_venue_faithful(%{api_key: _key, api_secret: _secret}), do: :ok
-  defp authenticated_venue_faithful(%{access_token: _token}), do: :ok
-  defp authenticated_venue_faithful(_other), do: {:refused, :missing_credentials}
+  # The same auto-detection `Private`'s private `auth_scheme/2` runs when the caller
+  # named no scheme explicitly. Both fields present is the venue's own
+  # `AmbiguousAuthentication` (400) waiting to happen, caught here before either header
+  # family is built rather than sent and rejected.
+  defp resolve_scheme(%{api_key: _key, access_token: _token}), do: :ambiguous
+  defp resolve_scheme(%{api_key: _key}), do: :api_key
+  defp resolve_scheme(%{access_token: _token}), do: :oauth
+  defp resolve_scheme(_other), do: nil
+
+  defp authenticated_venue_faithful(:api_key, %{api_key: _key, api_secret: _secret}), do: :ok
+  defp authenticated_venue_faithful(:oauth, %{access_token: token}) when is_binary(token), do: :ok
+
+  defp authenticated_venue_faithful(scheme, _credentials) when scheme in [:api_key, :oauth] do
+    {:error, {:missing_credentials, scheme}}
+  end
+
+  # Covers `nil` (nothing credential-shaped, and no scheme was named — Auth.headers/5 has
+  # no default) and `:ambiguous` (both header families present, refused before either is
+  # built) alike, exactly as `Auth.headers/5`'s own catch-all does.
+  defp authenticated_venue_faithful(scheme, _credentials) do
+    {:error, {:unsupported_auth_scheme, scheme}}
+  end
 
   defp with_injection(symbol \\ nil, fun) do
     case FakeInjection.next_outcome(:gemini, symbol) do
@@ -496,23 +568,25 @@ defmodule DpExchange.Gemini.Fake do
   # facade does, so a consumer wiring them wrong fails here rather than in production.
   defp fake_credentials(opts), do: Keyword.get(opts, :credentials, %{})
 
-  # `:market` and `:stop` are refused because the venue serves neither, and reaching the
-  # nearest thing would mean choosing a price the caller never supplied.
-  defp supported_order_type(type)
-       when type in [:limit, :stop_limit, :post_only, :maker_or_cancel, :ioc, :fok],
-       do: :ok
-
-  defp supported_order_type(other), do: {:error, {:unsupported_order_type, other}}
-
-  defp supported_tif(tif) when tif in [:gtc, :ioc, :fok], do: :ok
-  defp supported_tif(other), do: {:error, {:unsupported_time_in_force, other}}
-
   defp priced(request) do
     if Map.get(request, :price), do: :ok, else: {:error, {:missing_field, :price}}
   end
 
   defp listed(symbol) do
-    if symbol in @symbols, do: :ok, else: {:refused, :not_listed}
+    # `/v1/order/new` shares `Private`'s `refusal(body)` -> `Rest.refusal_reason/1`
+    # vocabulary with every other private POST, and `InvalidSymbol` is the one entry in
+    # that table that names a bad symbol rather than a credential problem.
+    if symbol in @symbols, do: :ok, else: {:refused, :invalid_symbol}
+  end
+
+  # `/v1/pubticker/{symbol}` — the endpoint behind `get_price/2` and `get_top_of_book/2`
+  # — 404s on an unlisted symbol with plain text, not JSON: `'<symbol>' does not have
+  # available data yet`, measured live 2026-09-06 (`rest_test.exs`, "get_price refuses
+  # on a 404, keeping the venue's own words"). `{:refused, :not_listed}` used to stand
+  # in here — an atom absent from the venue's own vocabulary and from `Rest`'s — found
+  # in the parity sweep.
+  defp not_listed(symbol) do
+    {:refused, {:unknown_reason, "'#{symbol}' does not have available data yet"}}
   end
 
   defp order(request) do
@@ -594,9 +668,9 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def test_connection(credentials, _opts \\ []) do
+  def test_connection(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials), do: {:ok, %{reachable: true}}
+      with :ok <- authenticated(credentials, opts), do: {:ok, %{reachable: true}}
     end)
   end
 
@@ -651,7 +725,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_positions(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)) do
+      with :ok <- authenticated(fake_credentials(opts), opts) do
         # A short, because the short is where the sign convention bites: the venue sends a
         # negative quantity and a fake that only ever returned a long would never exercise it.
         {:ok,
@@ -740,7 +814,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_staking_balances(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)) do
+      with :ok <- authenticated(fake_credentials(opts), opts) do
         # The whole position redeemable and none of it tradable — the real shape that breaks
         # a caller reading a single "available".
         {:ok,
@@ -761,7 +835,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_staking_rewards(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)) do
+      with :ok <- authenticated(fake_credentials(opts), opts) do
         {:ok,
          [
            %Types.StakingReward{
@@ -782,7 +856,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_staking_history(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)) do
+      with :ok <- authenticated(fake_credentials(opts), opts) do
         # A redemption mid-unbond: requested, part paid, part outstanding. A fake whose rows
         # all settled would never exercise the field this type exists for.
         {:ok,
@@ -806,7 +880,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def stake(asset, amount, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)),
+      with :ok <- authenticated(fake_credentials(opts), opts),
            {:ok, provider_id} <- fake_provider_id(opts) do
         {:ok,
          %Types.StakingTransaction{
@@ -827,7 +901,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def unstake(asset, amount, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)),
+      with :ok <- authenticated(fake_credentials(opts), opts),
            {:ok, provider_id} <- fake_provider_id(opts) do
         # Nothing has arrived yet. A fake reporting the full amount paid would teach a
         # consumer to spend an asset that is still unbonding.
@@ -859,7 +933,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # The fake refuses the ambiguous direction the real package refuses. A fake that picked
       # one would let a consumer's suite pass on a conversion that spends the wrong asset.
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts),
            :ok <- fake_direction(from, to, opts) do
         {:ok,
          %Types.Conversion{
@@ -883,7 +957,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def commit_conversion(id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         case Enum.reject([:symbol, :side, :amount, :price], &Keyword.has_key?(opts, &1)) do
           [] ->
             {:ok,
@@ -910,7 +984,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # One step and already settled — no rate was held, which is the whole difference from
       # quote_conversion/4.
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts),
            :ok <- fake_direction(from, to, opts) do
         {:ok,
          %Types.Conversion{
@@ -930,9 +1004,9 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def get_trade_volume(credentials, _opts \\ []) do
+  def get_trade_volume(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         {:ok,
          [%{"symbol" => "btcusd", "total_volume_base" => "10.5", "data_date" => "2026-08-31"}]}
       end
@@ -958,7 +1032,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_deposit_address(asset, network, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.DepositAddress{
            asset: asset,
@@ -979,7 +1053,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def list_approved_addresses(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         case Keyword.get(opts, :network) do
           nil ->
             {:error, {:missing_option, :network}}
@@ -1017,7 +1091,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def estimate_withdrawal_fee(_asset, network, _amount, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         case Keyword.get(opts, :address) do
           nil ->
             {:error, {:missing_option, :address}}
@@ -1038,7 +1112,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def withdraw(asset, network, amount, address, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts),
            :ok <- fake_memo(Keyword.get(opts, :memo), Keyword.get(opts, :memo_required, false)) do
         {:ok,
          %Types.Withdrawal{
@@ -1064,9 +1138,9 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def list_payment_methods(credentials, _opts \\ []) do
+  def list_payment_methods(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         # One verified and one pending: a consumer filtering on presence rather than status
         # picks one the venue will refuse.
         {:ok,
@@ -1081,7 +1155,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def add_payment_method(details, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})),
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts),
            {:ok, _path} <- fake_country(Keyword.get(opts, :country, "US")) do
         # **Pending, never verified.** The venue verifies out of band; a fake that returned a
         # usable method would teach a consumer the first transfer will work.
@@ -1097,7 +1171,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def transfer_internal(asset, amount, transfer_opts, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         case {Keyword.get(transfer_opts, :from), Keyword.get(transfer_opts, :to)} do
           {nil, _to} ->
             {:error, {:missing_option, :from}}
@@ -1121,7 +1195,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def request_approved_address(network, address, label, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         # **Pending.** A successful response is not permission to withdraw, and a fake that
         # returned "active" would teach a consumer it is.
         {:ok,
@@ -1138,16 +1212,16 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def remove_approved_address(network, address, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{})) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok, %{"network" => network, "address" => address, "status" => "removed"}}
       end
     end)
   end
 
   @impl true
-  def get_transactions(credentials, _opts \\ []) do
+  def get_transactions(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         # Kinds that are not trades and not transfers, because that is the point of the
         # endpoint and a fake returning only fills would hide it.
         {:ok,
@@ -1161,9 +1235,9 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def get_notional_balances(credentials, currency, _opts \\ []) do
+  def get_notional_balances(credentials, currency, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         # The quantity and its valuation are different keys and different numbers. A fake that
         # made them equal would let a consumer read either as the other and still pass.
         {:ok,
@@ -1182,9 +1256,9 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def list_custody_fees(credentials, _opts \\ []) do
+  def list_custody_fees(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials) do
+      with :ok <- authenticated(credentials, opts) do
         # A charge with no trade behind it — the gap a consumer reconciling against fills
         # alone cannot otherwise explain.
         {:ok,
@@ -1250,7 +1324,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       case Keyword.get(opts, :name) do
         name when is_binary(name) ->
-          with :ok <- authenticated(fake_credentials(opts)) do
+          with :ok <- authenticated(fake_credentials(opts), opts) do
             # The venue answers with a kebab-cased shortname, not the name that was sent —
             # a fake that echoed the name would let a consumer address the wrong thing.
             {:ok,
@@ -1269,7 +1343,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def rename_account(id, name, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)) do
+      with :ok <- authenticated(fake_credentials(opts), opts) do
         # Only the fields that changed come back, as the venue documents.
         {:ok, %{"name" => name, "account" => id}}
       end
@@ -1279,7 +1353,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_roles(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts)) do
+      with :ok <- authenticated(fake_credentials(opts), opts) do
         # Trader and Fund Manager combined, and Auditor false — the combination the venue
         # allows. One role field would not be able to say this.
         {:ok, %{"isAuditor" => false, "isFundManager" => true, "isTrader" => true}}

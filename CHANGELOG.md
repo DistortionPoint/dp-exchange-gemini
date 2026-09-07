@@ -80,6 +80,60 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`capabilities/0` declared `has_staking: false` and `supports_margin: false` while six
+  staking endpoints and three margin endpoints were already `:experimental` in the SAME
+  declaration's endpoint map** — a declaration contradicting itself, found in the
+  2026-09-06 documentation-accuracy sweep. **This is a behaviour change for a consumer
+  routing on either flag**: `has_staking` and `supports_margin` are now `true`, and
+  `max_leverage` is `Decimal.new("5")`, the venue's own published ceiling. The endpoints
+  genuinely work: `get_staking_rates/1` — the one public endpoint in this set — was
+  reprobed live against `api.gemini.com` and returned real provider rates; the other five
+  staking endpoints and all three margin endpoints are authenticated and this repo holds
+  no credentials to probe them with, so their inclusion rests on Gemini's own OpenAPI
+  paths and response shapes, not a live call, and `capabilities/0`'s `measured_against`
+  says so explicitly rather than implying otherwise. Gemini gates both features by account
+  eligibility (Eligible Contract Participant status for margin, jurisdiction for staking
+  assets) the same way it gates order placement by KYC tier — an account entitlement, not
+  a statement that the venue or this package lacks the feature, so it does not belong in
+  this declaration. See `usage-rules.md`'s new section for the full account-eligibility
+  caveat.
+
+- **`Fake` was not equivalent to the real path on several classes of refusal — the "less
+  capable is allowed, differently capable is not" rule was broken, not just the one
+  reported instance.** Found and fixed in the 2026-09-06 real/fake parity sweep, with
+  pinned tests in the new `fake_parity_test.exs` so none of these can drift back silently:
+
+    * `get_historical_prices/4`'s `{:error, {:range_unavailable, tf, …}}` omitted
+      `requested:`, which `Rest.get_historical_prices/4` always carries — a consumer's
+      tier-1 test asserting the documented shape passed here and would have failed
+      against the real venue.
+    * **The credential gate answered `{:refused, :missing_credentials}` for every missing
+      or malformed credential, everywhere in `Fake` — around three dozen functions.** The
+      real path (`Auth.headers/5`, called from `Private.post/4`) answers `{:error,
+      {:unsupported_auth_scheme, nil}}` with no credentials at all and no scheme named,
+      `{:error, {:missing_credentials, scheme}}` when a scheme is known but its fields are
+      incomplete, and `{:error, {:unsupported_auth_scheme, :ambiguous}}` when both header
+      families are present — never `:refused`, which the real adapter reserves for the
+      venue's own 401/403 body. `authenticated/2` now mirrors `Auth.headers/5`'s exact
+      decision tree, including a caller-named `auth_scheme` opt overriding
+      auto-detection, and every call site threads `opts` through to it.
+    * **Every "symbol not carried" refusal used the same invented `:not_listed` atom**,
+      which appears nowhere in the real vocabulary. Each now matches the specific
+      endpoint behind it: `:invalid_symbol` for `get_order_book/2`, `quantization/1` and
+      `place_order/3` (Gemini's JSON `InvalidSymbol` reason, live-confirmed for
+      `quantization/1`); `{:unknown_reason, text}` for `get_price/2`, `get_top_of_book/2`
+      and `get_historical_prices/4` (measured live, plain-text 4xx bodies, not JSON).
+    * **`get_trades/2` never refused an unlisted symbol at all** — more capable than
+      `Rest.get_trades/2`, the forbidden direction. It now refuses, measured live against
+      `GET /v1/trades/{symbol}`.
+    * **`place_order/3` validated `order_type` and `time_in_force` independently**, so it
+      accepted combinations the venue's own "at most one execution option" rule refuses —
+      `order_type: :post_only, time_in_force: :fok`, or any option on a `:stop_limit`
+      order. `Private.order_wire/2` is now a shared, exposed (`@doc false`) function both
+      `Private.place_order/3` and `Fake.place_order/3` validate against, the same pattern
+      `Rest.refusal_reason/1` already uses for the refusal vocabulary shared between
+      `Rest` and `Private` — one implementation rather than two copies that can drift.
+
 - **A differential depth frame (`@depth`/`@depthFast`) was delivered as the raw, undecoded
   venue JSON — `{:depth_update, message}` — instead of a value in the contract's own
   shape.** `WsDecode.depth_changes/1` decodes exactly this frame into `{price, quantity}`

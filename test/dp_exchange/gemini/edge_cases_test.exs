@@ -316,10 +316,29 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert {:error, {:missing_field, :price}} =
                Fake.place_order(credentials, Map.delete(base, :price), [])
 
-      assert {:refused, :not_listed} =
+      assert {:refused, :invalid_symbol} =
                Fake.place_order(credentials, Map.put(base, :symbol, "NOPE-USD"), [])
 
-      assert {:refused, :missing_credentials} = Fake.place_order(%{}, base, [])
+      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.place_order(%{}, base, [])
+
+      # `Private.order_wire/2` is the single implementation both this fake and the real
+      # adapter validate against — see its own `@doc false` comment. Before that sharing,
+      # this fake validated `order_type` and `time_in_force` independently and accepted
+      # both of these, which the venue's own "at most one execution option" rule refuses.
+      assert {:error, {:conflicting_execution_options, ["maker-or-cancel"], ["fill-or-kill"]}} =
+               Fake.place_order(
+                 credentials,
+                 base |> Map.put(:order_type, :post_only) |> Map.put(:time_in_force, :fok),
+                 []
+               )
+
+      assert {:error,
+              {:unsupported_time_in_force, "immediate-or-cancel", :not_allowed_on_stop_limit}} =
+               Fake.place_order(
+                 credentials,
+                 base |> Map.put(:order_type, :stop_limit) |> Map.put(:time_in_force, :ioc),
+                 []
+               )
     end
 
     test "an order the venue does take comes back as an Order" do
@@ -351,7 +370,8 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
     end
 
     test "an unlisted symbol is refused for historical prices too" do
-      assert Fake.get_historical_prices("NOPE-USD", "1d") == {:refused, :not_listed}
+      assert Fake.get_historical_prices("NOPE-USD", "1d") ==
+               {:refused, {:unknown_reason, "Supplied value 'NOPE-USD' is not a valid symbol"}}
     end
 
     test "update_symbols narrows what coverage reports" do

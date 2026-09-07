@@ -419,6 +419,30 @@ number this package chose from a layout the venue can change without notice.
 the other is present, and one alone comes back bounded by `numRows` instead, which is a real
 report over the wrong window.
 
+## `has_staking` and `supports_margin` are `true` — an account entitlement, not a package one
+
+Both flags were `false` while every staking and margin endpoint they should have gated was
+already `:experimental` below them — a declaration contradicting its own endpoint map,
+corrected 2026-09-06. `has_staking: true` covers all six staking endpoints; `supports_margin:
+true` covers the spot-margin trio, `get_margin_account/1`, `get_margin_rates/1` and
+`preview_margin_order/2`; `max_leverage` is `Decimal.new("5")`, the venue's own published
+ceiling — some collateral assets cap lower, which is the account's detail to report, not a
+second venue-wide number.
+
+**Neither flag means every credential can use the feature today.** Gemini gates margin to US
+(excluding NY) Eligible Contract Participants and gates staking assets by jurisdiction, the
+same way it gates order placement by KYC tier — an entitlement on the account, not on the
+package or the venue. A caller whose account lacks the entitlement gets the venue's own
+refusal, same as an unapproved withdrawal address or an unverified payment method; it does
+not mean the endpoint was never implemented.
+
+`get_staking_rates/1` is the one endpoint in this set that is public and was reprobed live
+against `api.gemini.com` on 2026-09-06. The other five staking endpoints and all three margin
+endpoints are authenticated; this repo holds no credentials to probe them with, so their
+inclusion here rests on Gemini's own OpenAPI paths and response shapes rather than a live
+call — read `capabilities/0`'s own `measured_against` field for which is which, not this
+paragraph, if that provenance ever changes.
+
 ## Every negative here is audited
 
 `docs/reference/gemini/negative-claims.md` lists each one with the source and date consulted.
