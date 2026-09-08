@@ -97,10 +97,27 @@ defmodule DpExchange.Gemini.Auth do
 
     * `:nonce_mode` — `:time_based` (default) or `:incremental`. `:api_key` only.
 
-  Returns `{:error, {:unsupported_auth_scheme, scheme}}` for anything else, and
-  `{:error, {:missing_credentials, scheme}}` when the credentials do not carry what the
-  named scheme needs — never a partially-signed request, which would fail at the venue
-  with an error about signatures rather than about the missing field.
+  Returns `{:error, {:unsupported_auth_scheme, scheme}}` when `scheme` names something
+  this module does not implement — a caller-supplied `:auth_scheme` this venue has no
+  handler for, which never happens by inference; `{:error, {:missing_credentials, scheme}}`
+  when a scheme WAS named or inferred but the credentials do not carry what it needs; and
+  `{:error, {:missing_credentials, :gemini}}` when `scheme` is `nil` — nothing
+  credential-shaped was supplied and no `:auth_scheme` was named, so there is no scheme to
+  be unsupported, only a credential that never arrived. Never a partially-signed request,
+  which would fail at the venue with an error about signatures rather than about the
+  missing field.
+
+  ## `nil` is not a scheme the venue could reject
+
+  This used to fall through to `{:error, {:unsupported_auth_scheme, nil}}`, which reads
+  as "you asked for scheme `nil` and this package does not support it" — a claim this
+  package never made and the venue was never asked to evaluate. The caller supplied no
+  credential at all; `{:missing_credentials, :gemini}` is the same shape every other
+  venue in this family returns for that condition (`Core.Venue`'s `:refused` is reserved
+  for the venue's own word about a request it *received*, and a call this module refused
+  to even sign never reached one). `:unsupported_auth_scheme` is reserved for a scheme
+  that was actually named — by the caller's own `:auth_scheme`, since inference never
+  produces one this module does not implement.
   """
   @spec headers(scheme(), String.t(), map(), map(), keyword()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, term()}
@@ -133,6 +150,14 @@ defmodule DpExchange.Gemini.Auth do
 
   def headers(scheme, _path, _params, _credentials, _opts) when scheme in [:api_key, :oauth] do
     {:error, {:missing_credentials, scheme}}
+  end
+
+  # `nil` means no credential-shaped value was supplied and no `:auth_scheme` was named —
+  # there is nothing here to call an unsupported SCHEME, only a credential that never
+  # arrived. See the moduledoc section above for why this is not folded into the
+  # catch-all below, which is reserved for a scheme the caller actually asked for.
+  def headers(nil, _path, _params, _credentials, _opts) do
+    {:error, {:missing_credentials, :gemini}}
   end
 
   def headers(scheme, _path, _params, _credentials, _opts) do

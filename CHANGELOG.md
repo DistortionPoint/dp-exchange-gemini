@@ -22,6 +22,33 @@ acceptable changelog line.
 
 ### Fixed
 
+- **This corrects a mislabel introduced by the "`Fake` was not equivalent to the real
+  path…" entry below: `{:error, {:unsupported_auth_scheme, nil}}` for genuinely absent
+  credentials was the wrong label, even though moving that case out of `:refused` was
+  correct.** That entry fixed a real defect — `Fake` answering the venue's own permanent
+  `:refused` for a credential that never left this package — but the replacement label
+  claimed the wrong thing: `nil` here is not a SCHEME the venue rejected, it is the
+  absence of one, because nothing credential-shaped was supplied and no `:auth_scheme`
+  was named. `Auth.headers/5`'s catch-all could not tell "you asked for an unsupported
+  scheme" apart from "you asked for nothing at all", so both fell through to the same
+  `:unsupported_auth_scheme` tuple. A caller keying off the label — as
+  `dp_crypto_management` does — read this as "Gemini does not support this
+  authentication method" when the true condition was "no credential was given to sign
+  with", the same shape every other venue in this family reports as
+  `{:missing_credentials, venue}`.
+
+  `Auth.headers/5` now answers `{:error, {:missing_credentials, :gemini}}` when `scheme`
+  is `nil`, before falling through to the catch-all — `:unsupported_auth_scheme` is now
+  reserved for a scheme actually named (a caller's own `:auth_scheme`, since
+  auto-detection never produces one this module does not implement) and for `:ambiguous`
+  (both header families present), which really is a scheme this module declines to
+  resolve. `Fake`'s `authenticated_venue_faithful/2` mirrors the same split, so the fake
+  still matches the real path exactly rather than re-diverging. Every test pinned to the
+  old `{:unsupported_auth_scheme, nil}` shape (`auth_test.exs`, `fake_parity_test.exs`,
+  `fake_test.exs`, `fake_injection_test.exs`, `private_test.exs`, `clearing_test.exs`,
+  `edge_cases_test.exs`, `gemini_delegation_test.exs`) now asserts
+  `{:missing_credentials, :gemini}` instead.
+
 - **The socket's own crash took the whole `Feed` down with it, silently discarding every
   subscription this feed had ever been given.** `ensure_socket/1` calls `Socket.
   start_link/1` from inside `Feed`'s own callback, which links the socket to `Feed` the

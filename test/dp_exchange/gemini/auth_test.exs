@@ -32,7 +32,9 @@ defmodule DpExchange.Gemini.AuthTest do
     test "there is no default scheme" do
       # Not a missing feature. Which authentication an application uses is a decision
       # about its users and its deployment, and this package is not entitled to make it.
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      # `nil` here is not an unsupported SCHEME — nothing was named at all, so this is
+      # the same shape as absent credentials: `{:missing_credentials, :gemini}`.
+      assert {:error, {:missing_credentials, :gemini}} =
                Auth.headers(nil, "/v1/balances", %{}, @api_key)
     end
   end

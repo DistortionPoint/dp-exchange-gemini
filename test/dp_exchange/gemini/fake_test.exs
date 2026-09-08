@@ -30,8 +30,8 @@ defmodule DpExchange.Gemini.FakeTest do
     test "an account call with no credentials refuses rather than answering emptily" do
       # A fake that accepted `nil` would let a consumer's test pass while the real call
       # fails on a missing key — differently capable, which is the forbidden kind.
-      assert Fake.get_balances(%{}, []) == {:error, {:unsupported_auth_scheme, nil}}
-      assert Fake.get_accounts(%{}, []) == {:error, {:unsupported_auth_scheme, nil}}
+      assert Fake.get_balances(%{}, []) == {:error, {:missing_credentials, :gemini}}
+      assert Fake.get_accounts(%{}, []) == {:error, {:missing_credentials, :gemini}}
     end
 
     test "it never stamps the current clock" do
@@ -180,8 +180,8 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "both refuse without credentials, as the real adapter does" do
-      assert Fake.get_order(%{}, "abc-123", []) == {:error, {:unsupported_auth_scheme, nil}}
-      assert Fake.cancel_order(%{}, "abc-123", []) == {:error, {:unsupported_auth_scheme, nil}}
+      assert Fake.get_order(%{}, "abc-123", []) == {:error, {:missing_credentials, :gemini}}
+      assert Fake.cancel_order(%{}, "abc-123", []) == {:error, {:missing_credentials, :gemini}}
     end
 
     test "a placed order carries the caller's own values back, unrewritten" do
@@ -257,7 +257,7 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "it refuses without credentials, as every account call does" do
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Fake.cancel_all_orders(%{}, scope: :session)
     end
   end
@@ -327,10 +327,10 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "every conversion call refuses without credentials" do
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Fake.convert("GUSD", "USD", Decimal.new("1"), symbol: "GUSD-USD", side: :sell)
 
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.commit_conversion("q-1", [])
+      assert {:error, {:missing_credentials, :gemini}} = Fake.commit_conversion("q-1", [])
     end
   end
 
@@ -341,7 +341,7 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "it refuses without credentials" do
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.get_trade_volume(%{}, [])
+      assert {:error, {:missing_credentials, :gemini}} = Fake.get_trade_volume(%{}, [])
     end
   end
 
@@ -368,7 +368,7 @@ defmodule DpExchange.Gemini.FakeTest do
       # get_trade_history/2 needs a symbol and credentials; the tape needs neither.
       assert {:ok, [_trade]} = Fake.get_trades("BTC-USD")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Fake.get_trade_history(%{}, symbol: "BTC-USD")
     end
   end
@@ -445,13 +445,13 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "every money call refuses without credentials" do
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Fake.get_deposit_address("BTC", "bitcoin")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Fake.list_approved_addresses(network: "eth")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Fake.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc")
     end
   end
@@ -521,11 +521,11 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "every one refuses without credentials" do
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.list_payment_methods(%{})
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.get_transactions(%{})
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.add_payment_method(%{})
+      assert {:error, {:missing_credentials, :gemini}} = Fake.list_payment_methods(%{})
+      assert {:error, {:missing_credentials, :gemini}} = Fake.get_transactions(%{})
+      assert {:error, {:missing_credentials, :gemini}} = Fake.add_payment_method(%{})
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Fake.request_approved_address("ethereum", "0xabc", nil)
     end
   end
@@ -549,8 +549,8 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "both reporting reads still need credentials" do
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.get_notional_balances(%{}, "usd")
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.list_custody_fees(%{})
+      assert {:error, {:missing_credentials, :gemini}} = Fake.get_notional_balances(%{}, "usd")
+      assert {:error, {:missing_credentials, :gemini}} = Fake.list_custody_fees(%{})
     end
   end
 
@@ -617,11 +617,11 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "the account-scoped staking reads still need credentials" do
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.get_staking_balances()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.get_staking_rewards()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.get_staking_history()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.stake("ETH", Decimal.new("1"))
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.unstake("ETH", Decimal.new("1"))
+      assert {:error, {:missing_credentials, :gemini}} = Fake.get_staking_balances()
+      assert {:error, {:missing_credentials, :gemini}} = Fake.get_staking_rewards()
+      assert {:error, {:missing_credentials, :gemini}} = Fake.get_staking_history()
+      assert {:error, {:missing_credentials, :gemini}} = Fake.stake("ETH", Decimal.new("1"))
+      assert {:error, {:missing_credentials, :gemini}} = Fake.unstake("ETH", Decimal.new("1"))
     end
   end
 end

@@ -548,7 +548,7 @@ defmodule DpExchange.Gemini.PrivateTest do
     end
 
     test "credentials with no recognisable scheme are refused" do
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Private.get_balances(%{something: "else"}, retry_attempts: 0)
     end
 
@@ -997,7 +997,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         raise "must not reach the venue with no credentials to sign the request with"
       end
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Private.list_networks("USDC", plug: exploding, retry_attempts: 0)
     end
 

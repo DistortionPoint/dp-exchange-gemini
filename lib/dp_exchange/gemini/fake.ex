@@ -550,9 +550,20 @@ defmodule DpExchange.Gemini.Fake do
     {:error, {:missing_credentials, scheme}}
   end
 
-  # Covers `nil` (nothing credential-shaped, and no scheme was named — Auth.headers/5 has
-  # no default) and `:ambiguous` (both header families present, refused before either is
-  # built) alike, exactly as `Auth.headers/5`'s own catch-all does.
+  # `nil` — nothing credential-shaped, and no scheme was named — is not an unsupported
+  # SCHEME, it is an absent CREDENTIAL: there was never a scheme to be unsupported.
+  # `Auth.headers/5` used to fall this through to its catch-all and answer
+  # `{:error, {:unsupported_auth_scheme, nil}}`, mislabelling the one condition every
+  # other venue in this family calls `{:error, {:missing_credentials, venue}}`. Fixed in
+  # both places together 2026-09-07 — see `Auth.headers/5`'s own moduledoc for the
+  # argument this mirrors.
+  defp authenticated_venue_faithful(nil, _credentials) do
+    {:error, {:missing_credentials, :gemini}}
+  end
+
+  # What remains is `:ambiguous` — both header families present, refused before either is
+  # built — which really is a scheme this module declines to resolve, exactly as
+  # `Auth.headers/5`'s own catch-all treats it.
   defp authenticated_venue_faithful(scheme, _credentials) do
     {:error, {:unsupported_auth_scheme, scheme}}
   end

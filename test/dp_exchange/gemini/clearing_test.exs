@@ -372,14 +372,14 @@ defmodule DpExchange.Gemini.ClearingTest do
     end
 
     test "the short arities refuse without credentials, reaching no network" do
-      assert {:error, {:unsupported_auth_scheme, nil}} = DpExchange.Gemini.get_clearing_order("c")
+      assert {:error, {:missing_credentials, :gemini}} = DpExchange.Gemini.get_clearing_order("c")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                DpExchange.Gemini.cancel_clearing_order("c")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} = DpExchange.Gemini.list_clearing_orders()
-      assert {:error, {:unsupported_auth_scheme, nil}} = DpExchange.Gemini.list_clearing_brokers()
-      assert {:error, {:unsupported_auth_scheme, nil}} = DpExchange.Gemini.list_clearing_trades()
+      assert {:error, {:missing_credentials, :gemini}} = DpExchange.Gemini.list_clearing_orders()
+      assert {:error, {:missing_credentials, :gemini}} = DpExchange.Gemini.list_clearing_brokers()
+      assert {:error, {:missing_credentials, :gemini}} = DpExchange.Gemini.list_clearing_trades()
 
       assert {:error, :missing_clearing_terms} = DpExchange.Gemini.create_clearing_order(%{})
 

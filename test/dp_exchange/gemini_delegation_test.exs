@@ -606,19 +606,19 @@ defmodule DpExchange.GeminiDelegationTest do
     # is never called at that arity by anything else in this suite.
 
     test "the perpetuals and margin reads refuse" do
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_positions()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_account_margin()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.list_funding_payments()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.funding_payment_report()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_margin_account()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_margin_rates()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_positions()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_account_margin()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.list_funding_payments()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.funding_payment_report()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_margin_account()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_margin_rates()
     end
 
     test "the report files refuse" do
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Gemini.funding_amount_report("BTCGUSDPERP")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.funding_payment_report_file()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.funding_payment_report_file()
     end
 
     test "the margin preview refuses on its own fields before it refuses on credentials" do
@@ -628,9 +628,9 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "the staking reads and writes refuse" do
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_staking_balances()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_staking_rewards()
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.get_staking_history()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_staking_balances()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_staking_rewards()
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_staking_history()
       assert {:error, :missing_provider_id} = Gemini.stake("ETH", Decimal.new("1"))
       assert {:error, :missing_provider_id} = Gemini.unstake("ETH", Decimal.new("1"))
     end
@@ -644,21 +644,21 @@ defmodule DpExchange.GeminiDelegationTest do
       assert {:error, {:missing_option, :address}} =
                Gemini.estimate_withdrawal_fee("BTC", "bitcoin", Decimal.new("1"))
 
-      assert {:error, {:unsupported_auth_scheme, nil}} = Gemini.add_payment_method(%{})
+      assert {:error, {:missing_credentials, :gemini}} = Gemini.add_payment_method(%{})
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Gemini.get_deposit_address("BTC", "bitcoin")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Gemini.withdraw("BTC", "bitcoin", Decimal.new("1"), "addr")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Gemini.transfer_internal("BTC", Decimal.new("1"), from: "a", to: "b")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Gemini.request_approved_address("ethereum", "0xabc", "label")
 
-      assert {:error, {:unsupported_auth_scheme, nil}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Gemini.remove_approved_address("ethereum", "0xabc")
     end
 

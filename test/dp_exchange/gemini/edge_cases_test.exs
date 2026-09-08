@@ -319,7 +319,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert {:refused, :invalid_symbol} =
                Fake.place_order(credentials, Map.put(base, :symbol, "NOPE-USD"), [])
 
-      assert {:error, {:unsupported_auth_scheme, nil}} = Fake.place_order(%{}, base, [])
+      assert {:error, {:missing_credentials, :gemini}} = Fake.place_order(%{}, base, [])
 
       # `Private.order_wire/2` is the single implementation both this fake and the real
       # adapter validate against — see its own `@doc false` comment. Before that sharing,

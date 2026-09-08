@@ -43,12 +43,12 @@ defmodule DpExchange.Gemini.FakeParityTest do
   end
 
   describe "the credential gate matches Auth.headers/5's own decision, everywhere it is wired" do
-    test "no credentials at all: nil scheme, Auth.headers/5's own catch-all" do
+    test "no credentials at all: nil scheme, Auth.headers/5's own missing-credentials clause" do
       assert Auth.headers(nil, "/v1/balances", %{}, %{}) ==
-               {:error, {:unsupported_auth_scheme, nil}}
+               {:error, {:missing_credentials, :gemini}}
 
-      assert Fake.get_balances(%{}, []) == {:error, {:unsupported_auth_scheme, nil}}
-      assert Fake.get_accounts(%{}, []) == {:error, {:unsupported_auth_scheme, nil}}
+      assert Fake.get_balances(%{}, []) == {:error, {:missing_credentials, :gemini}}
+      assert Fake.get_accounts(%{}, []) == {:error, {:missing_credentials, :gemini}}
     end
 
     test "an API key with no secret: scheme resolves, credentials do not satisfy it" do
