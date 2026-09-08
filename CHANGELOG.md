@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`Rest.get_order_book/2`'s `depth` default of `50` had no citation — the value was
+  correct but unlabelled.** Found by a family-wide sweep for the
+  `@pairs_per_socket`/`@shard_spacing_ms` defect class (`dp_exchange_coinbase`): a venue
+  fact sitting where a cited one belongs. Gemini's own market-data reference
+  (`developer.gemini.com/rest/market-data`, read 2026-09-08) states `limit_bids` and
+  `limit_asks` both "Default is 50" — now `docs/reference/gemini/order-book.md`, quoted
+  verbatim, and cited from the function's own `@doc` and an inline comment. No value
+  changed.
+
 ### Added
 
 - **`1w` and `1M` (the venue's own `1mo`) candle widths.** Re-verifying

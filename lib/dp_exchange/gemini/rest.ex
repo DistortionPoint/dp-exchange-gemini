@@ -373,11 +373,17 @@ defmodule DpExchange.Gemini.Rest do
 
   Each level carries the venue's own `timestamp`, so unlike a quote there is nothing to
   derive: the book's time is the newest level's time.
+
+  `opts[:depth]` defaults to the venue's own documented default — see
+  `docs/reference/gemini/order-book.md`, which quotes `limit_bids`/`limit_asks`'s "Default
+  is 50" verbatim — rather than to a plausible-looking guess.
   """
   @spec get_order_book(String.t(), keyword()) ::
           {:ok, OrderBook.t()} | {:error, term()} | {:refused, term()}
   def get_order_book(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
+    # 50 is the venue's own documented default for both limit_bids and limit_asks — see
+    # this function's own @doc and docs/reference/gemini/order-book.md.
     depth = Keyword.get(opts, :depth, 50)
     params = [limit_bids: depth, limit_asks: depth]
 
