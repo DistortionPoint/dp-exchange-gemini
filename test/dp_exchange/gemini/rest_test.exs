@@ -236,8 +236,15 @@ defmodule DpExchange.Gemini.RestTest do
 
     test "maps canonical widths to the literals the venue actually accepts" do
       # The venue rejects `1h`, `6h` and `1d` — all three of which its own documentation
-      # lists. What goes on the wire is `1hr`, `6hr`, `1day`.
-      for {canonical, native} <- [{"1h", "1hr"}, {"6h", "6hr"}, {"1d", "1day"}] do
+      # lists. What goes on the wire is `1hr`, `6hr`, `1day`. `1w` and `1mo` (Core's `1M`)
+      # joined the venue's accepted set 2026-09-08 — see `Rest`'s moduledoc.
+      for {canonical, native} <- [
+            {"1h", "1hr"},
+            {"6h", "6hr"},
+            {"1d", "1day"},
+            {"1w", "1w"},
+            {"1M", "1mo"}
+          ] do
         plug = fn conn ->
           assert String.ends_with?(conn.request_path, "/#{native}")
           Req.Test.json(conn, @candles)
@@ -246,6 +253,25 @@ defmodule DpExchange.Gemini.RestTest do
         assert {:ok, _candles} =
                  Rest.get_historical_prices("BTC-USD", canonical, [],
                    plug: plug,
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "1w and 1M skip the pre-flight window refusal, but still filter what comes back" do
+      # Neither has a `Timeframe.seconds/1` width, so `range_within_window/2` cannot
+      # compute an "earliest reachable" instant for them — see `Rest`'s moduledoc. No
+      # `{:error, {:range_unavailable, …}}` fires here the way it would for `1d`; the two
+      # fixture rows above are both older than `after_the_fixture`, so the ordinary
+      # post-response filter (`within?/2`, the same one every width goes through) drops
+      # them, proving the venue's answer is still checked against the range, just not
+      # pre-emptively.
+      after_the_fixture = DateTime.from_unix!(1_787_935_740_000 + 1, :millisecond)
+
+      for canonical <- ~w(1w 1M) do
+        assert {:ok, []} =
+                 Rest.get_historical_prices("BTC-USD", canonical, [start: after_the_fixture],
+                   plug: responding(@candles),
                    retry_attempts: 0
                  )
       end
@@ -386,8 +412,10 @@ defmodule DpExchange.Gemini.RestTest do
   end
 
   describe "timeframes/0" do
-    test "is the seven the venue serves, shortest first" do
-      assert Rest.timeframes() == ~w(1m 5m 15m 30m 1h 6h 1d)
+    test "is the nine the venue serves, shortest first" do
+      # `1w` and `1M` joined 2026-09-08 — measured live, the venue's 400 body grew from
+      # seven accepted widths to nine. See `Rest`'s moduledoc.
+      assert Rest.timeframes() == ~w(1m 5m 15m 30m 1h 6h 1d 1w 1M)
     end
 
     test "excludes every width the venue rejects" do

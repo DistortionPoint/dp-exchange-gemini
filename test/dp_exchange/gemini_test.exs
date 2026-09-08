@@ -95,7 +95,7 @@ defmodule DpExchange.GeminiTest do
     test "provenance says what was measured AND what was not" do
       caps = Gemini.capabilities()
 
-      assert caps.measured_at == ~D[2026-09-06]
+      assert caps.measured_at == ~D[2026-09-08]
       assert caps.measured_against =~ "measured live against api.gemini.com"
       # The ceilings were read, not probed. An unlabelled number is worse than a missing
       # one, and probing a limit means deliberately exceeding a third party's.
@@ -109,6 +109,12 @@ defmodule DpExchange.GeminiTest do
     test "declares no timeframe the venue rejects" do
       for absent <- ~w(2h 4h 12h) do
         refute absent in Gemini.capabilities().historical_timeframes
+      end
+    end
+
+    test "declares 1w and 1M, found live 2026-09-08 — see Rest's moduledoc" do
+      for present <- ~w(1w 1M) do
+        assert present in Gemini.capabilities().historical_timeframes
       end
     end
 

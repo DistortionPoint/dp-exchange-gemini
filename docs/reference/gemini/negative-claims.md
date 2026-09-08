@@ -32,10 +32,12 @@ must never be substituted for a missing one; this is the same rule pointed at do
 | No options | inventory | **holds.** Gemini lists none |
 | **A documented WebSocket endpoint that had vanished** | **measured** | **the inverse case, and worth keeping.** This package once pointed at a socket URL the documentation still named and the venue no longer served. A *positive* claim can go stale exactly as a negative can, and only a live check tells you |
 | 401 on unauthenticated private calls, where the docs say 400 | **measured 2026-08-28** | **documented divergence.** Gemini's own error table lists `MissingApikeyHeader` at 400; the live environment returns 401 `MissingSecurityHeaders`. Recorded because the next reader will otherwise assume the table |
+| **"The accepted candle set is `[1m, 5m, 15m, 30m, 1hr, 6hr, 1day]`"** | **measured 2026-08-28, re-measured 2026-09-08** | **was true, went stale.** A second instance of the row above, not a new pattern: the venue's own 400 body grew from seven accepted widths to nine — `1w` and `1mo` now answer `200` with real bars. See `docs/reference/gemini/candles.md`'s "Drift found 2026-09-08" section. Both are now implemented and declared |
 
 ## What this venue teaches that the others do not
 
 **Positives go stale too.** Every other package in this family learned to check negatives.
 Gemini is where a *documented, positive* claim — a socket URL the vendor still published —
-turned out to be false. The rule that follows is symmetric: **a claim about a venue is only
-as current as the last time someone looked**, whichever way it points.
+turned out to be false, twice now: the vanished socket URL, and the seven-width candle set
+that grew to nine without notice. The rule that follows is symmetric: **a claim about a
+venue is only as current as the last time someone looked**, whichever way it points.

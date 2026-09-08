@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`1w` and `1M` (the venue's own `1mo`) candle widths.** Re-verifying
+  `docs/reference/gemini/candles.md` against the live venue on 2026-09-08 found the
+  `/v2/candles` endpoint's own self-describing 400 body had grown from seven accepted
+  widths to nine since the 2026-08-28 capture this package shipped with — `1w` and `1mo`
+  both now answer `200` with real bars (240 weekly, 115 monthly, measured). Consumers
+  reading `historical_timeframes` (via `capabilities/0`) or calling
+  `get_historical_prices/4` with `"1w"` or `"1M"` now reach real venue data where they
+  previously received `{:error, {:unsupported_timeframe, …}}`. Neither width gets the
+  pre-flight `{:error, {:range_unavailable, …}}` the other seven do — see
+  `DpExchange.Gemini.Rest`'s moduledoc for why, and what a caller sees instead (a real,
+  filtered, possibly-empty result rather than a named refusal).
+
 ### Fixed
 
 - **`dp_exchange_core` was pinned to `~> 0.1.48`, but `WsDecode.to_order_book_delta/2`

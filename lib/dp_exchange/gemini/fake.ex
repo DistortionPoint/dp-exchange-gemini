@@ -176,7 +176,7 @@ defmodule DpExchange.Gemini.Fake do
           # against the real venue. Found in the 2026-09-06 real/fake parity sweep.
           {:error,
            {:range_unavailable, timeframe,
-            earliest: earliest(timeframe), requested: Keyword.get(range, :start)}}
+            earliest: earliest_reached(timeframe), requested: Keyword.get(range, :start)}}
 
         true ->
           {:ok, [candle(symbol, timeframe)]}
@@ -710,15 +710,27 @@ defmodule DpExchange.Gemini.Fake do
     }
   end
 
+  # `1w` and `1M` (Gemini's own `1mo`, added to `Rest.timeframes/0` 2026-09-08 — see
+  # `Rest`'s moduledoc) have no `Timeframe.seconds/1` width and no `@window_bars` entry,
+  # by design: mirrors `Rest.range_within_window/2`'s own fallback exactly, rather than
+  # inventing a fixed-seconds width for a calendar month.
   defp before_window?(timeframe, range) do
-    case Keyword.get(range, :start) do
-      nil -> false
-      start -> DateTime.compare(start, earliest(timeframe)) == :lt
+    with %DateTime{} = start <- Keyword.get(range, :start),
+         {:ok, width} <- Timeframe.seconds(timeframe) do
+      DateTime.compare(start, earliest(timeframe, width)) == :lt
+    else
+      _no_start_or_unknown_width -> false
     end
   end
 
-  defp earliest(timeframe) do
+  # Only reached from `before_window?/2`'s `true` branch, which only fires for a
+  # timeframe `Timeframe.seconds/1` already resolved — `1w`/`1M` never reach here.
+  defp earliest_reached(timeframe) do
     {:ok, width} = Timeframe.seconds(timeframe)
+    earliest(timeframe, width)
+  end
+
+  defp earliest(timeframe, width) do
     DateTime.add(@at, -Map.fetch!(@window_bars, timeframe) * width, :second)
   end
 

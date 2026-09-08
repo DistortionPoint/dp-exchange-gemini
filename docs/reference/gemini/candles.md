@@ -72,7 +72,42 @@ this package to guess at, and no way for a wrong width to be mistaken for "no da
 
 `4h` and `12h` are absent. The shared `DpExchange.Core.Timeframe` vocabulary models both,
 so this package's `historical_timeframes` is a subset of that vocabulary and asking for a
-missing width is an error, never a substitution.
+missing width is an error, never a substitution. (`1w` and `1M`/`1mo` are no longer absent
+— see "Drift found 2026-09-08" below.)
+
+## Drift found 2026-09-08: the accepted set grew from seven widths to nine
+
+**Re-measured live 2026-09-08**, eleven days after this file's original capture. The same
+self-describing 400 body now names two more accepted values:
+
+```
+GET /v2/candles/BTCUSD/1h    → 400
+{"result":"error","reason":"InvalidParameterValue",
+ "message":"time_frame expects one of the following: [1m, 5m, 15m, 30m, 1hr, 6hr, 1day, 1w, 1mo]"}
+```
+
+`1w` and `1mo` are new since 2026-08-28. Both answer `200` with real bars, not the `400`
+an unserved width returns — measured the same day:
+
+```
+GET /v2/candles/BTCUSD/1w    → 200, 240 weekly bars,  oldest 2021-09-13 (≈4.6 years)
+GET /v2/candles/BTCUSD/1mo   → 200, 115 monthly bars, oldest 2016-10-01 (≈9.6 years)
+```
+
+`limit`, `start` and `end` are still ignored for both — `/v2/candles/BTCUSD/1w` and
+`/v2/candles/BTCUSD/1w?limit=5` returned byte-identical bodies (15,486 bytes), the same
+fixed-window shape as every other width.
+
+**This is the file's own named failure mode, pointed at itself.** "The accepted set is
+`[1m, 5m, 15m, 30m, 1hr, 6hr, 1day]`" below was true on 2026-08-28 and had silently
+stopped being true by 2026-09-08. `1w` maps directly to the shared
+`DpExchange.Core.Timeframe` vocabulary's `1w`; `1mo` maps from Core's `1M` (calendar
+month) — Core has no `1mo` label of its own. Neither width is in Core's `known/0`: a
+week's start-of-week is venue-defined and a month is not a fixed number of seconds, so
+neither gets the fixed-window pre-flight refusal the other seven have below; see
+`lib/dp_exchange/gemini/rest.ex`'s moduledoc for exactly what that gap does and does not
+cost a caller. Both are implemented and appear in `historical_timeframes` as of this
+release.
 
 ## The window is fixed, and every parameter is ignored
 

@@ -21,11 +21,38 @@ defmodule DpExchange.Gemini.Rest do
   | `1hr` | 1463 | 61 days |
   | `6hr` | 367 | 92 days |
   | `1day` | 364 | 1 year |
+  | `1w` | ~240 | ~4.6 years |
+  | `1mo` | ~115 | ~9.6 years |
 
   So a range is honoured by **filtering here**, and a range the window cannot cover is an
-  **error** rather than a short answer. Handing back 364 daily bars to a caller who asked
-  for five years is the family's named failure mode in its quietest form: every value real,
-  only the meaning wrong.
+  **error** rather than a short answer for the five widths above whose window this package
+  can compute — see the next section for why `1w` and `1mo` are the two exceptions.
+  Handing back 364 daily bars to a caller who asked for five years is the family's named
+  failure mode in its quietest form: every value real, only the meaning wrong.
+
+  ## `1w` and `1mo` — real widths the venue added, that this package cannot window-check
+
+  **Found 2026-09-08, live.** The venue's own 400 body used to name seven accepted widths;
+  it now names nine: `[1m, 5m, 15m, 30m, 1hr, 6hr, 1day, 1w, 1mo]`. `/v2/candles/BTCUSD/1w`
+  and `/v2/candles/BTCUSD/1mo` both answer `200` with real bars — 240 weekly and 115 monthly,
+  measured the same day — not the `400` a genuinely unserved width returns. This is the same
+  failure mode `negative-claims.md` exists to catch, pointed at a positive claim this file
+  made instead of a negative one: "the accepted set is `[…]`" was true on 2026-08-28 and
+  stopped being true some time before 2026-09-08.
+
+  Both widths are in `DpExchange.Core.Timeframe.nameable/0` (`1w`, and `1M` for calendar
+  months) but neither is in `known/0` — `Timeframe.seconds/1` returns `:error` for both,
+  deliberately: a week's boundary depends on which weekday a venue starts it, and a month is
+  not a fixed number of seconds. `range_within_window/2` needs that width to compute how far
+  back the fixed window reaches, so it cannot be computed for these two the way it is for the
+  other seven. Rather than approximate a month as a fixed number of seconds — which is
+  exactly the kind of guess this family refuses — `1w` and `1M` are simply not in
+  `@window_bars`, and `range_within_window/2`'s existing fallback for an unmapped width
+  applies: no pre-flight refusal, and the real rows returned are still filtered against
+  `range` client-side by `within?/2` on their own real `opened_at`, same as every width. A
+  `:start` older than the venue's actual window on one of these two returns an empty list
+  rather than `{:error, {:range_unavailable, …}}` — a real gap from the other seven widths,
+  disclosed here rather than hidden behind a fabricated window size.
 
   ## Neither ticker carries a quote timestamp, so the venue's own clock is used
 
@@ -95,6 +122,10 @@ defmodule DpExchange.Gemini.Rest do
   # its own accepted set in the 400 body — `[1m, 5m, 15m, 30m, 1hr, 6hr, 1day]` — while
   # its documentation lists `1h`, `6h` and `1d`, none of which work. Three of the seven
   # documented values are rejected by the venue that documents them.
+  #
+  # Re-measured 2026-09-08: the venue's accepted set grew to nine — `1w` and `1mo` joined
+  # without notice, both serving real bars, not a 400. See the moduledoc's "`1w` and `1mo`"
+  # section for why `1mo` maps from Core's `1M` rather than `1mo` itself.
   @time_frames %{
     "1m" => "1m",
     "5m" => "5m",
@@ -102,11 +133,20 @@ defmodule DpExchange.Gemini.Rest do
     "30m" => "30m",
     "1h" => "1hr",
     "6h" => "6hr",
-    "1d" => "1day"
+    "1d" => "1day",
+    "1w" => "1w",
+    "1M" => "1mo"
   }
 
   # Bars served per width, measured 2026-08-28 and identical to the host's independent
   # 2026-08-06 measurement on all seven. Used to refuse a range the window cannot cover.
+  #
+  # Deliberately missing `1w` and `1M`, added to `@time_frames` 2026-09-08: `Timeframe.
+  # seconds/1` returns `:error` for both (see `DpExchange.Core.Timeframe`'s moduledoc —
+  # a week's start-of-week is venue-defined and a month is not a fixed second count), so
+  # `range_within_window/2` cannot turn a bar count into an "earliest reachable" instant
+  # for them the way it can for the other seven, and approximating one would substitute a
+  # guess for the thing this map exists to avoid guessing about. See the moduledoc.
   @window_bars %{
     "1m" => 1_440,
     "5m" => 2_015,
@@ -994,6 +1034,13 @@ defmodule DpExchange.Gemini.Rest do
   # The window is fixed, so a start older than it can reach is unanswerable. Returning
   # what the window happens to hold would look like a complete answer for a period the
   # venue simply does not serve.
+  #
+  # `1w` and `1M` fall through to the `:ok` branch below every time: neither is in
+  # `@window_bars`, because neither has a `Timeframe.seconds/1` width to multiply a bar
+  # count by. That is a real, disclosed gap — see the moduledoc's "`1w` and `1mo`" section
+  # — not an oversight; `get_historical_prices/4` still filters their real rows against
+  # `range` afterward, so a caller reaching before the actual window gets an empty list
+  # rather than wrong data, just without this pre-flight refusal naming the boundary.
   defp range_within_window(timeframe, range) do
     with %DateTime{} = start <- Keyword.get(range, :start),
          {:ok, bars} <- Map.fetch(@window_bars, timeframe),
@@ -1092,8 +1139,16 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
+  # Sort key only — never used to bucket or window-check a real candle, so an
+  # approximation here is not the family's forbidden kind. `1w` and `1M` have no
+  # `Timeframe.seconds/1` width; this places them after `1d` and in their own
+  # calendar order without claiming either is a fixed number of seconds anywhere else.
+  @approx_sort_seconds %{"1w" => 604_800, "1M" => 2_629_800}
+
   defp width!(timeframe) do
-    {:ok, seconds} = Timeframe.seconds(timeframe)
-    seconds
+    case Timeframe.seconds(timeframe) do
+      {:ok, seconds} -> seconds
+      :error -> Map.fetch!(@approx_sort_seconds, timeframe)
+    end
   end
 end

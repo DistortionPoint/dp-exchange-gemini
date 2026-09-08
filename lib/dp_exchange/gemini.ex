@@ -13,17 +13,24 @@ defmodule DpExchange.Gemini do
 
   ## What is specific to Gemini, and what a caller can therefore rely on
 
-  **Seven candle widths, and the venue's own documentation names three of them wrong.**
-  The accepted set is `1m 5m 15m 30m 1h 6h 1d` in canonical form. Gemini's documentation
-  lists values that its API rejects; this package sends what the venue accepts, measured.
-  Asking for a width Gemini does not serve — `2h`, `4h`, `12h` — is an **error**, never
-  the nearest one.
+  **Nine candle widths, and the venue's own documentation names three of the original
+  seven wrong.** The accepted set is `1m 5m 15m 30m 1h 6h 1d 1w 1M` in canonical form —
+  `1w` and `1M` (the venue's own `1mo`) joined 2026-09-08, found live, after this package
+  had shipped with only the original seven. Gemini's documentation lists values that its
+  API rejects; this package sends what the venue accepts, measured. Asking for a width
+  Gemini does not serve — `2h`, `4h`, `12h` — is an **error**, never the nearest one.
 
-  **The candle window is fixed and unbounded requests are refused.** Gemini ignores
-  `start`, `end` and `limit` entirely and returns a fixed window per width, from 1 day of
-  one-minute bars to a year of daily ones. This package filters to your range, and refuses
+  **The candle window is fixed and unbounded requests are refused, for seven of the nine
+  widths.** Gemini ignores `start`, `end` and `limit` entirely and returns a fixed window
+  per width, from 1 day of one-minute bars to a year of daily ones (about 4.6 years of
+  weekly, about 9.6 years of monthly). This package filters to your range, and refuses
   with `{:error, {:range_unavailable, …}}` when your range starts before the window can
-  reach — rather than handing back a shorter period that reads as a complete answer.
+  reach — rather than handing back a shorter period that reads as a complete answer. `1w`
+  and `1M` are the two exceptions: neither has a fixed-seconds width the shared
+  `DpExchange.Core.Timeframe` vocabulary will compute one for, so the pre-flight refusal
+  does not fire for them — the real rows the venue returns are still filtered against your
+  range afterward, so a range outside the true window still comes back empty rather than
+  wrong, just without the named boundary. See `DpExchange.Gemini.Rest`'s moduledoc.
 
   **Quote timestamps come from the venue's clock, or the call fails.** Neither Gemini
   ticker publishes a quote timestamp — `/v1/pubticker`'s only timestamp stamps its
@@ -320,12 +327,15 @@ defmodule DpExchange.Gemini do
       # `Core.Capabilities` because this declaration needed it.
       public_ceiling: %{limit: 120, per_ms: 60_000, burst: 5},
       authenticated_ceiling: %{limit: 600, per_ms: 60_000, burst: 5},
-      measured_at: ~D[2026-09-06],
+      measured_at: ~D[2026-09-08],
       measured_against:
-        "timeframes, the fixed candle windows (all seven bar counts), symbol catalogue, " <>
-          "book/ticker/pricefeed shapes and the absence of rate-limit headers measured " <>
-          "live against api.gemini.com 2026-08-28; the bookTicker stream measured live " <>
-          "against ws.gemini.com the same day; CEILINGS taken from " <>
+        "timeframes, the fixed candle windows (the original seven bar counts), symbol " <>
+          "catalogue, book/ticker/pricefeed shapes and the absence of rate-limit headers " <>
+          "measured live against api.gemini.com 2026-08-28; two more timeframes, 1w and " <>
+          "1M (the venue's own 1mo), found live against api.gemini.com 2026-09-08, not " <>
+          "window-checked the way the other seven are — see DpExchange.Gemini.Rest's " <>
+          "moduledoc; the bookTicker stream measured live " <>
+          "against ws.gemini.com 2026-08-28; CEILINGS taken from " <>
           "developer.gemini.com/rate-limit as published prose and NOT probed — probing " <>
           "a limit means deliberately exceeding a third party's stated rate limit. " <>
           "has_staking re-measured 2026-09-06: GET /v1/staking/rates against " <>

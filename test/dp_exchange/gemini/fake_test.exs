@@ -77,6 +77,19 @@ defmodule DpExchange.Gemini.FakeTest do
 
       assert {:ok, [_candle]} = Fake.get_historical_prices("BTC-USD", "1d", start: recent)
     end
+
+    test "1w and 1M never refuse on range — no Timeframe.seconds/1 width to check against" do
+      # Real venue behaviour, found live 2026-09-08: `range_within_window/2` has no bar
+      # count to compute an earliest instant from for either width, so it never refuses
+      # here — see `Rest`'s moduledoc. The fake mirrors that rather than crashing on the
+      # `Timeframe.seconds/1` mismatch a naive port of the five-width logic would hit.
+      long_ago = ~U[2000-01-01 00:00:00Z]
+
+      for canonical <- ~w(1w 1M) do
+        assert {:ok, [_candle]} =
+                 Fake.get_historical_prices("BTC-USD", canonical, start: long_ago)
+      end
+    end
   end
 
   describe "the shapes it returns are the real ones" do
