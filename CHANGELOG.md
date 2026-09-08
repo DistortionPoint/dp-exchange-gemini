@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`dp_exchange_core` was pinned to `~> 0.1.48`, but `WsDecode.to_order_book_delta/2`
+  calls `Types.OrderBookDelta.new/1`, which Core has only defined since `0.1.53`.**
+  `OrderBookDelta.new/1` is a plain function call, not a struct literal, so a resolution
+  below 0.1.53 compiles with a warning rather than an error and only raises
+  `UndefinedFunctionError` the first time a `depth`/`depthFast` frame decodes — the same
+  failure shape already found and fixed in `websockex`'s `~> 0.4` pin across this family
+  (`dp_exchange_webull` 0.2.20). `~> 0.1.48` passed every test here because CI always
+  resolves the newest allowed Core (0.1.68, per `mix.lock`); a consumer whose own
+  dependency graph forced 0.1.48–0.1.52 would not. Raised to `~> 0.1.53`. Found in a
+  family-wide audit of declared-vs-actual dependency floors.
+
+  A prior commit ("Move to dp_exchange_core 0.1.68") bumped only `mix.lock`'s resolved
+  version, not this floor — it correctly noted `no_venue_contact` and the
+  `market_status/1` exemption did not apply here, but the `mix.exs` constraint itself
+  was never audited against what this package's own code already required.
+
+  A new test in `ws_channels_test.exs` asserts the resolved Core defines
+  `Types.OrderBookDelta.new/1`, so a future loosening of this pin without a matching
+  code change fails here first, not only for a consumer.
+
 - **This corrects a mislabel introduced by the "`Fake` was not equivalent to the real
   path…" entry below: `{:error, {:unsupported_auth_scheme, nil}}` for genuinely absent
   credentials was the wrong label, even though moving that case out of `:refused` was

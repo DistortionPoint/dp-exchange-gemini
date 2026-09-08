@@ -304,6 +304,19 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert {:error, :missing_venue_timestamp} =
                WsDecode.to_order_book_delta(Map.delete(@depth_frame, "E"), "BTC-USD")
     end
+
+    test "the resolved dp_exchange_core defines Types.OrderBookDelta.new/1" do
+      # `WsDecode.to_order_book_delta/2` calls `OrderBookDelta.new/1` as a plain function
+      # call, not a struct literal, so a Core resolution too old to have this module
+      # compiles with only a warning here and fails with `UndefinedFunctionError` at
+      # runtime on the first depth frame — the same shape the `websockex` `send_frame/3`
+      # incident took. `mix.exs` pins `dp_exchange_core` to `~> 0.1.53`, where
+      # `Types.OrderBookDelta` shipped, for exactly this reason.
+      # `Code.ensure_loaded!/1` first: `function_exported?/3` answers `false` for a
+      # module that is merely not yet loaded, not only for one that is genuinely absent.
+      Code.ensure_loaded!(Types.OrderBookDelta)
+      assert function_exported?(Types.OrderBookDelta, :new, 1)
+    end
   end
 
   describe "partial depth snapshots" do

@@ -47,8 +47,13 @@ defmodule DpExchangeGemini.MixProject do
   defp deps do
     [
       # The contract. Three-part pin: while Core is 0.x a minor bump may break us, and
-      # that is the signal it is meant to send.
-      {:dp_exchange_core, "~> 0.1.48"},
+      # that is the signal it is meant to send. `0.1.53` is the floor because it is where
+      # `Types.OrderBookDelta` shipped — `WsDecode.to_order_book_delta/2` decodes `depth`
+      # and `depthFast` frames straight into it, and `Socket` forwards that value without
+      # building a book here at all (see `socket.ex`'s moduledoc). A lower resolution has
+      # no `OrderBookDelta` module to alias; `~> 0.1.48` previously allowed one and only
+      # compiled here because CI always resolves the newest allowed version.
+      {:dp_exchange_core, "~> 0.1.53"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
