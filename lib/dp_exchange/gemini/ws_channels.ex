@@ -43,6 +43,24 @@ defmodule DpExchange.Gemini.WsChannels do
     {:balances_account_snapshot, "balances@account@1s", true},
     {:positions_account, "positions@account", true},
     {:positions_account_snapshot, "positions@account@1s", true},
+    # **The venue stopped publishing this one, and that is all anybody here knows.**
+    # `settlementsAccount` was a channel in Gemini's own AsyncAPI specification on
+    # 2026-08-31 and is absent from it as of 2026-09-09 — removed with no changelog entry,
+    # which is this venue's documented habit (it withdrew an entire WebSocket market-data
+    # API the same way; see `docs/reference/gemini/websocket-api-replacement.md`). Found by
+    # `script/check_endpoint_inventory.sh` on its first run.
+    #
+    # **The row stays, deliberately.** Deleting it would assert "this venue has no
+    # settlements channel", and that is not something anyone here has established: the
+    # channel is private, so probing it needs a credential this repository must never hold,
+    # and this venue has already proven that its documentation and its behaviour diverge in
+    # BOTH directions — a socket URL it still published and no longer served, and candle
+    # widths it served before it documented them. Absent from the spec is not the same fact
+    # as absent from the venue.
+    #
+    # Nothing reaches this from the facade: `capabilities/0` declares
+    # `streamable: [:quotes, :top_of_book]`, and no other module in `lib/` names this
+    # channel. So the honest state is a labelled row, not a silent one and not a deletion.
     {:settlements_account, "settlements@account", true},
     {:request_for_quote, "requestForQuote", false},
     {:request_for_quote_account, "requestForQuote@account", true},

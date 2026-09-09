@@ -1,6 +1,15 @@
 # Gemini — every documented operation, from the published specifications
 #
 # Fetched 2026-08-31 from developer.gemini.com/specs/
+#
+# Re-diffed 2026-09-09 by `script/check_endpoint_inventory.sh`. REST (75) and prediction
+# markets (31) unchanged. ONE WebSocket channel removed by the vendor: `settlementsAccount`,
+# present 2026-08-31, absent 2026-09-09, with no changelog entry — this venue announces a
+# removal by absence and nothing else. It is struck from this list because this list is
+# "what the vendor publishes", and the vendor no longer publishes it. What that means for
+# the package is recorded at `WsChannels`'s own entry, which is kept rather than deleted:
+# absent from the spec is not the same fact as absent from the venue, and this venue has
+# diverged from its own documentation in both directions before.
 
 ## REST (specs/openapi/rest.yaml)
 GET /v1/book/{symbol}
@@ -133,5 +142,4 @@ positionsAccountSnapshot
 requestForQuote
 requestForQuoteAccount
 requestForQuoteSession
-settlementsAccount
 trade

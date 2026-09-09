@@ -20,6 +20,46 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`script/check_endpoint_inventory.sh`** — diffs this venue's committed endpoint
+  inventory against Gemini's own **machine-readable specifications** (OpenAPI for REST and
+  prediction markets, AsyncAPI for the socket) and reports anything that appeared or
+  vanished. Weekly and non-blocking, via `.github/workflows/inventory-check.yml`.
+
+  This is the deeper half of an idea `dp_exchange_core`'s vendor-change design doc already
+  settled: across five vendors a *changelog* diff caught nothing, and an **index diff** was
+  the only mechanism that ever fired — on this venue, which withdrew the entire WebSocket
+  market-data API this family's price feed ran on and announced it by nothing but its
+  absence. `check_doc_sources.sh` watches whether cited pages still resolve; this compares
+  what the vendor says it serves. **Gemini is the venue where that is possible at all**,
+  because it publishes specifications rather than only prose.
+
+  It is a **spec** diff, not a content diff, and that distinction is why it is not noise: an
+  operation list is structured and every entry means something, where the rendered pages
+  around it carry build hashes and rotating banners.
+
+### Fixed
+
+- **The vendor stopped publishing the `settlementsAccount` WebSocket channel, and the
+  checker caught it on its first run.** It was in Gemini's AsyncAPI on 2026-08-31 and is
+  absent as of 2026-09-09, with no changelog entry — this venue's documented habit, and now
+  the **third** time a *positive* claim about it has gone stale (the withdrawn socket URL,
+  the seven candle widths that became nine, and now this).
+
+  **No consumer-facing claim broke**: nothing in `lib/` subscribes to it and
+  `capabilities/0` declares `streamable: [:quotes, :top_of_book]`, which does not rest on
+  it. The address stays in `WsChannels`, **labelled rather than deleted** — removing it
+  would assert "this venue has no settlements channel", and nobody here has established
+  that. The channel is private, so probing it needs a credential this repository must never
+  hold, and this venue has diverged from its own documentation in *both* directions before.
+  **Absent from the spec is not the same fact as absent from the venue.**
+
+  REST (75 operations) and prediction markets (31) were re-diffed in the same pass and are
+  unchanged, so the inventory-derived negative claims in
+  `docs/reference/gemini/negative-claims.md` still hold. That file now carries the new
+  instance and its audit date.
+
 ### Fixed
 
 - **Reads now carry `@call_timeout` explicitly, exactly as writes already did.**
