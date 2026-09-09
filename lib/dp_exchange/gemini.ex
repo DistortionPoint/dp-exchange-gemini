@@ -199,6 +199,15 @@ defmodule DpExchange.Gemini do
 
   @impl true
   def child_spec(opts) do
+    # Credentials are wrapped HERE, and not in `start_link/1` or `init/1` — that
+    # distinction IS the fix. A supervisor stores the `{module, :start_link, [opts]}` MFA
+    # it was handed, and OTP writes that argument list through `inspect/1` into the
+    # `Start Call:` line of the report it logs on ANY child termination. Wrapping any later
+    # does nothing: the raw list has already been captured by the supervisor above.
+    # dp-exchange-core issue #29 — live API keys, in cleartext, in ordinary application
+    # logs, produced by any crash at all.
+    opts = DpExchange.Gemini.Credentials.wrap_opt(opts)
+
     # `type: :supervisor`: `start_link/1` starts an OTP `Supervisor`, and without this key
     # OTP defaults `:type` to `:worker`, which also defaults `:shutdown` to `5_000`ms
     # instead of `:infinity`. A consumer terminating this child would then give the whole
