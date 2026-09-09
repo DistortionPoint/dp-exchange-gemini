@@ -1,0 +1,28 @@
+# Vendor documentation pages this package cites, and what each one DID when a person read
+# it. Checked by `script/check_doc_sources.sh`; see that script's header for why this is
+# status-and-destination rather than a content diff, and why a redirect is the signal.
+#
+# Columns, tab-separated:
+#   url  expect_status  expect_location  observed_on  class  note
+#
+# `expect_location` is `-` when the page does not redirect. It is never left blank: TAB is
+# IFS whitespace, so a run of tabs collapses into one delimiter and every later column
+# shifts silently.
+#
+# `class` is `auto` (a machine can verify this) or `manual` (it cannot — a human must
+# re-read it, and the row goes STALE past 180 days to force that).
+#
+# Do not edit a row to make the check pass. The row records what someone READ; rewriting
+# it to match a fetch nobody looked at turns this file into a rubber stamp.
+https://docs.gemini.com/rest-api/	301	https://developer.gemini.com/rest-api/rest-api	2026-09-09	auto	A dead documentation host this package's history turns on. The host adapter cited this URL; it now 301s to a different site. A 301 is invisible to a browser and to `curl -L` and reads like a rename — here it was the ONLY notice given that Gemini replaced the WebSocket market-data API the price feed ran on. Watched so a change of target, or its removal, is seen.
+https://developer.gemini.com/sitemap.xml	200	-	2026-09-09	auto	The index. Gemini proved the index diff is the mechanism that works: the streaming API's removal was announced by absence from this list and by nothing else.
+https://developer.gemini.com/changelog/revision-history	200	-	2026-09-09	auto	A well-maintained dated changelog going back to 2022-06. Kept for provenance and as a standing negative result: searching four years of it finds `marketdata` 0 times, `l2_updates` 0, `sunset` 0, `breaking` 0. It told us nothing about the one change that mattered.
+https://developer.gemini.com/specs/index.json	200	-	2026-09-09	auto	Machine-readable spec index — the cheapest place a newly added or withdrawn specification shows up.
+https://developer.gemini.com/specs/openapi/rest.yaml	200	-	2026-09-09	auto	The REST OpenAPI document `operations-from-specs.txt` was enumerated from.
+https://developer.gemini.com/specs/asyncapi/websocket.yaml	200	-	2026-09-09	auto	The AsyncAPI document for the REPLACEMENT websocket API, at a different host from the one this family's feed was built against.
+https://developer.gemini.com/trading/rest-api/market-data/list-candles	200	-	2026-09-09	auto	The candles page that lists seven `time_frame` values, three of which the live API rejects, and which contradicts itself (prose `1day`, enum `1d`; only the prose is right). Watched because it is wrong: documentation can be wrong about the thing it exists to specify, and this page is the family's proof.
+https://developer.gemini.com/rest/market-data	200	-	2026-09-09	auto	Market-data REST index.
+https://developer.gemini.com/websocket/streams	200	-	2026-09-09	auto	The replacement streaming API's own page.
+https://developer.gemini.com/rate-limit	200	-	2026-09-09	auto	The published rate ceilings and the stated burst depth this venue's limiter uses — one of the few venues in the family that documents a burst at all.
+https://developer.gemini.com/authentication/api-key	200	-	2026-09-09	auto	API-key auth scheme.
+https://developer.gemini.com/get-started/sandbox	200	-	2026-09-09	auto	Sandbox hosts, which tier-2 tests and `demo-environment.md` depend on.
