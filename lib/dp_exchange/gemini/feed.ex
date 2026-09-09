@@ -196,13 +196,25 @@ defmodule DpExchange.Gemini.Feed do
   def update_symbols(feed, symbols),
     do: GenServer.call(feed, {:update_symbols, symbols}, @call_timeout)
 
+  # NOTE — reads carry `@call_timeout` explicitly, exactly as the writes above do.
+  #
+  # They used to take `GenServer.call/2`'s implicit five seconds, and that asymmetry is what
+  # turned a bounded delay into a dead caller in dp-exchange-core issue #28: `coverage/1` is
+  # the call a consumer's health check makes, so any moment this Feed was busy for longer
+  # than five seconds turned a health check into an EXIT — killing the consumer's own
+  # process when it read from inside its own `handle_call/3`. Asking whether the venue was
+  # healthy was what made it unhealthy.
+  #
+  # The blocking is fixed at its sources rather than papered over here; this is the second
+  # line of defence. A read that has to queue behind something should WAIT for it, never
+  # die of it.
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
-  def coverage(feed), do: GenServer.call(feed, :coverage)
+  def coverage(feed), do: GenServer.call(feed, :coverage, @call_timeout)
 
   @spec coverage_by_kind(GenServer.server()) :: %{
           Capabilities.data_kind() => %{String.t() => :stream | :internal_poll | :not_covered}
         }
-  def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind)
+  def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind, @call_timeout)
 
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed, opts),

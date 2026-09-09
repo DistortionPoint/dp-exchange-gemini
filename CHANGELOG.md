@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reads now carry `@call_timeout` explicitly, exactly as writes already did.**
+  `coverage/1`, `coverage_by_kind/1`, `status/1` and `wanted/1` took `GenServer.call/2`'s
+  implicit **five seconds** while every write named a generous one, and that asymmetry is
+  what turned a bounded delay into a dead caller in dp-exchange-core issue #28: `coverage/1`
+  is the call a consumer's health check makes, so any moment the Feed was legitimately busy
+  for longer than five seconds turned a health check into an **exit** — and into a dead
+  consumer process, when the read happened inside the consumer's own `handle_call/3`. The
+  blocking is fixed at its sources rather than papered over here; this is the second line of
+  defence. A read that has to queue behind something should wait for it, not die of it.
+
 ### Documentation
 
 - **`Credentials`' moduledoc now says that the redaction wrap lives in `child_spec/1`, and
