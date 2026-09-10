@@ -932,9 +932,44 @@ defmodule DpExchange.Gemini.Rest do
   # them to the same `%{}`-shaped fallback a 2xx body uses. An empty body (Gemini's 404 on
   # `/v1/fundingamount/{symbol}`, measured the same day) names nothing to keep, so it stays
   # a bare `:refused` rather than `{:unknown_reason, ""}`.
-  @spec refusal_reason(term()) :: atom() | {:unknown_reason, String.t()}
-  def refusal_reason(%{"reason" => reason}) when is_binary(reason) do
-    Map.get(@refusal_reasons, reason, {:unknown_reason, reason})
+  #
+  # ## A KNOWN reason must never be less informative than an unknown one
+  #
+  # This function used to answer a known reason with a bare atom and throw the venue's
+  # `message` away, while an unknown one kept the venue's words. That asymmetry contradicted
+  # the paragraph directly above it, and it broke a consumer (dp-exchange-gemini issue #1).
+  #
+  # Gemini's nonce rejection is the case that proves it:
+  #
+  #     {"result": "error", "reason": "InvalidNonce",
+  #      "message": "Nonce '1757...' has not increased since your last call ..."}
+  #
+  # `:invalid_nonce` names the category. The **message** is the entire diagnosis, because
+  # the two situations it distinguishes have opposite remedies: a stored high-water nonce
+  # above what we send (bump the scale — a key poisoned to ~1.4e19 needed nonces above
+  # 2^64), or a key whose mark has climbed past anything we can emit (rotate it, which only
+  # a human can do). Without the sentence a caller cannot tell those apart, and 164
+  # occurrences of `"gemini refused: :invalid_nonce"` in one log span told its reader
+  # nothing at all.
+  #
+  # So a known reason carries the venue's sentence when there is one:
+  #
+  #   * `{reason, message}` — the venue named a category AND said more.
+  #   * `reason` alone — the venue named a category and nothing else.
+  #   * `{:unknown_reason, word}` — unchanged; the venue's own word IS the diagnosis when
+  #     nothing here recognises it.
+  #
+  # Two shapes for a known reason is deliberate, and it is not "sometimes a tuple". The
+  # tuple means *the venue said more*, which is a different fact from *the venue named a
+  # category*, and flattening them would either invent a `nil` message for refusals that
+  # never had one or throw away the sentence that made this issue worth filing. It also
+  # keeps every message-less refusal matching exactly as it did — including the `Fake`'s,
+  # which builds refusals literally and must stay shape-identical to the real venue
+  # (assertion 9). The only callers that change are the ones that were being under-informed.
+  @spec refusal_reason(term()) ::
+          :refused | atom() | {atom(), String.t()} | {:unknown_reason, String.t()}
+  def refusal_reason(%{"reason" => reason} = body) when is_binary(reason) do
+    classify(reason, message_from(body))
   end
 
   def refusal_reason(body) when is_binary(body) do
@@ -944,8 +979,8 @@ defmodule DpExchange.Gemini.Rest do
 
       trimmed ->
         case Jason.decode(trimmed) do
-          {:ok, %{"reason" => reason}} when is_binary(reason) ->
-            Map.get(@refusal_reasons, reason, {:unknown_reason, reason})
+          {:ok, %{"reason" => reason} = decoded} when is_binary(reason) ->
+            classify(reason, message_from(decoded))
 
           {:ok, _other} ->
             :refused
@@ -957,6 +992,29 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   def refusal_reason(_other), do: :refused
+
+  # An unknown reason keeps the venue's own word as the payload, exactly as before — that
+  # word IS the diagnosis when nothing here recognises it, and the message (if any) rarely
+  # adds to a reason nobody has seen. A known one carries the message instead, since the
+  # atom already says what the word would have.
+  defp classify(reason, message) do
+    case Map.fetch(@refusal_reasons, reason) do
+      {:ok, known} when is_binary(message) -> {known, message}
+      {:ok, known} -> known
+      :error -> {:unknown_reason, reason}
+    end
+  end
+
+  # Only a non-empty binary counts. An absent, null or blank `message` becomes `nil`, so a
+  # caller can test one thing — "did the venue say more?" — instead of also guarding "" .
+  defp message_from(%{"message" => message}) when is_binary(message) do
+    case String.trim(message) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp message_from(_no_message), do: nil
 
   # The venue's own clock, from the response it served. Absent, and the request fails —
   # a quote whose freshness cannot be stated must not be returned.

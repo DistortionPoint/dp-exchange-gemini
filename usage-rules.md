@@ -120,6 +120,35 @@ plain text rather than the usual `{"reason": …}` shape — the text itself is 
 `{:refused, {:unknown_reason, "Supplied value 'X' is not a valid symbol"}}`, not a bare
 `{:refused, :refused}` that throws the venue's own words away.
 
+### A refusal carries the venue's sentence, not only its category
+
+Three shapes, and each means something different:
+
+```elixir
+{:refused, {:invalid_nonce, "Nonce '1757…' has not increased since your last call"}}
+{:refused, :invalid_symbol}
+{:refused, {:unknown_reason, "SomethingNewGeminiAdded"}}
+```
+
+- **`{reason, message}`** — the venue named a category *and said more*. Match on `reason`;
+  log the `message`, because on some refusals it is the entire diagnosis.
+- **`reason` alone** — the venue named a category and stopped. There is no `nil` message to
+  test for.
+- **`{:unknown_reason, word}`** — nothing here recognises the word, so the word is the
+  diagnosis. Unchanged.
+
+**`InvalidNonce` is the one to handle deliberately.** The atom tells you the category; the
+message tells you which of two opposite remedies you need. If the venue's stored high-water
+nonce is above what you send, send larger ones — Gemini compares nonces as arbitrary-
+precision integers, so a key poisoned near `2^64` needs values above it. If the mark has
+climbed past anything you can emit, only rotating the key fixes it, and that is a human
+action. Both are `:invalid_nonce`; only the sentence separates them.
+
+This changed in response to dp-exchange-gemini issue #1, where 164 log lines reading
+`refused: :invalid_nonce` told their reader nothing at all. If you match on the bare atom
+today, add the two-tuple clause: a reason this package recognises is no longer less
+informative than one it does not.
+
 ## The demo environment is one option, on both transports
 
 Gemini runs a full exchange with test funds — bots make the order book, and a new account

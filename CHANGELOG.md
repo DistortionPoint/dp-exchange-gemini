@@ -20,6 +20,37 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A known refusal dropped the venue's `message`, which for `InvalidNonce` is the whole
+  diagnosis (issue #1).** `refusal_reason/1` answered a reason it recognised with a bare
+  atom and discarded `body["message"]`, while a reason it did *not* recognise kept the
+  venue's words. That asymmetry contradicted the rationale written directly above the
+  function — "the venue's wording is the only thing that says what actually happened" — and
+  it left a real failure undiagnosable.
+
+  `:invalid_nonce` names the category; the message is the entire diagnosis, because the two
+  situations it separates have **opposite remedies**. A stored high-water nonce above what
+  we send means send larger ones (a key poisoned near `2^64` needs values above it, since
+  Gemini compares nonces as arbitrary-precision integers). A mark that has climbed past
+  anything we can emit means rotating the key, which only a person can do. The consumer who
+  filed this had **164 log lines** reading `refused: :invalid_nonce` and no way to tell
+  which they were looking at.
+
+  A known reason now carries the sentence: `{:refused, {:invalid_nonce, "Nonce '…' has not
+  increased since your last call"}}`.
+
+  **Two shapes, deliberately.** `{reason, message}` means the venue named a category *and
+  said more*; a bare `reason` means it named a category and stopped. Flattening them would
+  either invent a `nil` message for refusals that never had one or throw away the sentence
+  that made this worth filing — and it would break `Fake` parity, since the fake builds
+  refusals literally and must stay shape-identical to the real venue (assertion 9). Every
+  message-less refusal matches exactly as it did; only callers that were being under-informed
+  need a new clause. `{:unknown_reason, word}` is unchanged.
+
+  The property, in the filer's words: **a known reason is never less informative than an
+  unknown one.**
+
 ### Documentation
 
 - **A read time sits in a field the contract documents as the venue's own, and it is now

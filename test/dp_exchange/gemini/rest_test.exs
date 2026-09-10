@@ -136,12 +136,67 @@ defmodule DpExchange.Gemini.RestTest do
       refute quote_struct.timestamp == volume_time
     end
 
-    test "a 400 is a REFUSAL carrying the venue's own reason" do
-      # Permanent versus transient is what a caller acts on. Gemini names its reason, so
-      # the refusal can carry it rather than flattening to a generic atom.
+    test "a 400 is a REFUSAL carrying the venue's own reason AND its message" do
+      # Permanent versus transient is what a caller acts on. Gemini names its reason, so the
+      # refusal carries it rather than flattening to a generic atom — and it carries the
+      # venue's sentence too, which is the half this used to throw away.
       body = %{"result" => "error", "reason" => "InvalidSymbol", "message" => "no such symbol"}
 
+      assert {:refused, {:invalid_symbol, "no such symbol"}} =
+               Rest.get_price("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
+    end
+
+    test "a known reason is never less informative than an unknown one (issue #1)" do
+      # The property the fix exists for, in the words of the consumer who filed it. A reason
+      # this package RECOGNISES used to answer with a bare atom and drop the venue's
+      # `message`, while a reason it did not recognise kept the venue's words — the exact
+      # opposite of useful, and a contradiction of the rationale written above
+      # `refusal_reason/1` itself.
+      #
+      # `InvalidNonce` is where it bit. The atom names the category; the message is the
+      # entire diagnosis, because "the stored nonce is above what we send" (bump the scale)
+      # and "this key's mark is past anything we can emit" (a human must rotate it) are the
+      # same atom and opposite remedies. 164 log lines reading `refused: :invalid_nonce`
+      # told their reader nothing.
+      message = "Nonce '1757000000' has not increased since your last call to /v1/balances"
+      body = %{"result" => "error", "reason" => "InvalidNonce", "message" => message}
+
+      assert {:refused, {:invalid_nonce, ^message}} =
+               Rest.get_price("BTC-USD", plug: responding(body, status: 400), retry_attempts: 0)
+
+      # And the comparison the consumer's own diagnostic procedure needs is now reachable:
+      # the nonce is in the text, so a caller can weigh it against 2^64.
+      assert {:refused, {:invalid_nonce, text}} =
+               Rest.get_price("BTC-USD", plug: responding(body, status: 400), retry_attempts: 0)
+
+      assert text =~ "1757000000"
+    end
+
+    test "a known reason the venue said nothing more about stays a bare atom" do
+      # The other half of the shape, and why it is two shapes rather than one. A tuple means
+      # *the venue said more*; a bare atom means *the venue named a category and stopped*.
+      # Inventing a `nil` message for the second case would make every caller test for
+      # something that never existed — and it would break the `Fake`, which builds refusals
+      # literally and must stay shape-identical to the real venue.
+      body = %{"result" => "error", "reason" => "InvalidSymbol"}
+
       assert {:refused, :invalid_symbol} =
+               Rest.get_price("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
+    end
+
+    test "a blank message counts as no message, not as an empty one" do
+      body = %{"result" => "error", "reason" => "InvalidSymbol", "message" => "   "}
+
+      assert {:refused, :invalid_symbol} =
+               Rest.get_price("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
+    end
+
+    test "an UNRECOGNISED reason still keeps the venue's own word, unchanged" do
+      # This path was already right and must stay right: the word IS the diagnosis when
+      # nothing here recognises it.
+      body = %{"result" => "error", "reason" => "SomethingNewGeminiAdded", "message" => "hi"}
+
+      assert {:refused, {:unknown_reason, "SomethingNewGeminiAdded"}} =
                Rest.get_price("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
     end
 
