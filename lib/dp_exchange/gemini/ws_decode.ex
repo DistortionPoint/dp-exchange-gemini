@@ -112,6 +112,21 @@ defmodule DpExchange.Gemini.WsDecode do
        symbol: symbol,
        bids: levels(frame["bids"]),
        asks: levels(frame["asks"]),
+       # **This is a READ time in a field `Core.Types.OrderBook` documents as the venue's
+       # own**, and it is a known divergence rather than an oversight — see that type's
+       # "Known divergence" section and `dp_exchange_core`'s
+       # `docs/design/2026-09-09_venue-time-and-observed-time.md`.
+       #
+       # The venue publishes no time for this frame, and its own AsyncAPI says so:
+       # `OrderBookSnapshot` requires `[lastUpdateId, bids, asks]`, where `BookTicker`
+       # requires an `E` event time. So there is nothing venue-stamped to use, and this
+       # struct — unlike `TopOfBook`, which carries `venue_time` and `observed_at`
+       # separately — has no way to say "the venue did not date this".
+       #
+       # The consequence worth knowing: a consumer measuring staleness from this field sees
+       # these books as always fresh. Milliseconds of network latency on a healthy stream;
+       # invisible lag if the venue itself falls behind. Closing it means changing a
+       # published type, which is the design document's subject.
        timestamp: observed_at,
        sequence: frame["lastUpdateId"],
        provider: :gemini
