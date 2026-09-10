@@ -6,7 +6,7 @@ defmodule DpExchangeGemini.MixProject do
   # change is signalled. The bump script matches the attribute assignment below by its
   # exact literal form — do not reformat it, and do not repeat that form anywhere else
   # in this file, comments included, or the script will rewrite the wrong line.
-  @version "0.1.43"
+  @version "0.2.0"
   @source_url "https://github.com/DistortionPoint/dp-exchange-gemini"
 
   def project do
@@ -53,7 +53,7 @@ defmodule DpExchangeGemini.MixProject do
       # building a book here at all (see `socket.ex`'s moduledoc). A lower resolution has
       # no `OrderBookDelta` module to alias; `~> 0.1.48` previously allowed one and only
       # compiled here because CI always resolves the newest allowed version.
-      {:dp_exchange_core, "~> 0.1.53"},
+      {:dp_exchange_core, "~> 0.2.1"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

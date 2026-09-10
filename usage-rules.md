@@ -7,6 +7,40 @@ Everything general is in
 [`dp_exchange_core`'s usage rules](https://hexdocs.pm/dp_exchange_core/usage-rules.html).
 This file is only what is **specific to Gemini**.
 
+
+## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
+
+They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
+**`:observed_at`** (when this package read it, always present) — the shape
+`Core.Types.TopOfBook` has always had. Requires `dp_exchange_core ~> 0.2.1`.
+
+```elixir
+# before
+quote.timestamp
+
+# after
+quote.venue_time  # may be nil — the venue did not date this
+quote.observed_at # always present
+```
+
+**Why it had to break.** `:timestamp` was documented as the venue's own, "never invented",
+and two packages in this family could not keep that promise: the frames they decode carry no
+venue time at all. With one field their only options were to lie or to drop real data, and
+they lied. Now they can say `nil` and mean it.
+
+**What to do with `nil`.** Whatever you would have done with a wrong answer, but knowingly.
+The consumer who decided this design stores `venue_time` as their time-series point time
+where it is present, and where it is `nil` stores `observed_at` **and records that they
+did** — so a mis-bucketed value is attributable rather than invisible. That decision was not
+expressible before, because there was no way to see which kind of time you had.
+
+`Trade`, `Fill`, `Balance` and `OrderBookDelta` are **unchanged** — they keep a single
+`:timestamp`, because every one of them is built from a venue-supplied time and fails closed
+without it.
+
+Full reasoning and the options that were weighed:
+[`dp_exchange_core` issue #31](https://github.com/DistortionPoint/dp-exchange-core/issues/31).
+
 ## Start it, and it brings its own rate limiter
 
 ```elixir

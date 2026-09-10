@@ -41,7 +41,7 @@ defmodule DpExchange.Gemini.FakeTest do
       Process.sleep(5)
       {:ok, second} = Fake.get_price("BTC-USD")
 
-      assert first.timestamp == second.timestamp
+      assert first.venue_time == second.venue_time
     end
   end
 

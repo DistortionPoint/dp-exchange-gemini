@@ -130,7 +130,7 @@ defmodule DpExchange.GeminiLiveTest do
       # consumer would want to know why.
       assert {:ok, %Types.Quote{} = quote_struct} = Gemini.get_price("BTC-USD", limiter: nil)
 
-      assert DateTime.diff(DateTime.utc_now(), quote_struct.timestamp, :second) < 120
+      assert DateTime.diff(DateTime.utc_now(), quote_struct.venue_time, :second) < 120
     end
   end
 
@@ -172,7 +172,7 @@ defmodule DpExchange.GeminiLiveTest do
       assert_receive {:dp_exchange, :gemini, %Types.Quote{symbol: "BTC-USD"} = quote_struct},
                      30_000
 
-      assert quote_struct.timestamp.year == DateTime.utc_now().year
+      assert quote_struct.venue_time.year == DateTime.utc_now().year
       assert Decimal.positive?(quote_struct.bid)
     end
   end

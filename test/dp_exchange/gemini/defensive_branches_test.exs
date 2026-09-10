@@ -95,7 +95,7 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
       }
 
       assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: json(body), retry_attempts: 0)
-      assert book.timestamp == DateTime.from_unix!(0)
+      assert book.venue_time == DateTime.from_unix!(0)
     end
   end
 

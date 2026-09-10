@@ -346,7 +346,8 @@ defmodule DpExchange.Gemini.WsChannelsTest do
                  observed
                )
 
-      assert book.timestamp == observed
+      assert is_nil(book.venue_time)
+      assert book.observed_at == observed
     end
   end
 end

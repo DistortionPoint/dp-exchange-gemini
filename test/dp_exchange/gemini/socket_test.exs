@@ -58,7 +58,7 @@ defmodule DpExchange.Gemini.SocketTest do
       # 58,000 and every staleness check passes forever.
       assert {:ok, _state} = deliver(@book_ticker)
 
-      assert_receive {:dp_exchange, :gemini, %Quote{timestamp: timestamp}}
+      assert_receive {:dp_exchange, :gemini, %Quote{venue_time: timestamp}}
       assert timestamp.year == 2026
     end
 

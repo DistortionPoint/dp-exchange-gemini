@@ -75,7 +75,7 @@ defmodule DpExchange.Gemini.RestTest do
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
-      assert quote_struct.timestamp == ~U[2026-08-28 17:00:01Z]
+      assert quote_struct.venue_time == ~U[2026-08-28 17:00:01Z]
     end
 
     test "volume is the BASE asset's, recovered from the symbol" do
@@ -133,7 +133,7 @@ defmodule DpExchange.Gemini.RestTest do
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
-      refute quote_struct.timestamp == volume_time
+      refute quote_struct.venue_time == volume_time
     end
 
     test "a 400 is a REFUSAL carrying the venue's own reason AND its message" do
@@ -418,7 +418,7 @@ defmodule DpExchange.Gemini.RestTest do
       assert [{bid_price, bid_size}] = book.bids
       assert Decimal.equal?(bid_price, Decimal.new("77792.91"))
       assert Decimal.equal?(bid_size, Decimal.new("0.0031"))
-      assert book.timestamp == DateTime.from_unix!(1_787_936_377)
+      assert book.venue_time == DateTime.from_unix!(1_787_936_377)
       assert book.provider == :gemini
     end
 

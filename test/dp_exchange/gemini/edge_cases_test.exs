@@ -184,7 +184,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
 
       assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: responding(body))
       # The newest level's time, across both sides and both representations.
-      assert book.timestamp == DateTime.from_unix!(1_787_936_378)
+      assert book.venue_time == DateTime.from_unix!(1_787_936_378)
     end
   end
 

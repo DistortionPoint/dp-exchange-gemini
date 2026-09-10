@@ -78,7 +78,8 @@ defmodule DpExchange.Gemini.FeedTest do
     %Quote{
       symbol: symbol,
       price: Decimal.new("77845.79"),
-      timestamp: ~U[2026-08-28 12:00:00Z],
+      venue_time: ~U[2026-08-28 12:00:00Z],
+      observed_at: ~U[2026-08-28 12:00:00Z],
       provider: :gemini
     }
   end

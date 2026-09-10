@@ -191,7 +191,8 @@ defmodule DpExchange.Gemini.Rest do
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: price,
          volume: base_volume(body, native),
-         timestamp: timestamp,
+         venue_time: timestamp,
+         observed_at: DateTime.utc_now(),
          provider: :gemini
        }}
     end
@@ -394,7 +395,8 @@ defmodule DpExchange.Gemini.Rest do
          symbol: SymbolFormat.to_canonical_symbol(native),
          bids: levels(body["bids"]),
          asks: levels(body["asks"]),
-         timestamp: timestamp,
+         venue_time: timestamp,
+         observed_at: DateTime.utc_now(),
          provider: :gemini
        }}
     end

@@ -118,7 +118,8 @@ defmodule DpExchange.Gemini.Fake do
              symbol: symbol,
              price: Decimal.new(price),
              volume: Decimal.new("183.72"),
-             timestamp: @at,
+             venue_time: @at,
+             observed_at: @at,
              provider: :gemini
            }}
 
@@ -201,7 +202,8 @@ defmodule DpExchange.Gemini.Fake do
              symbol: symbol,
              bids: [{bid, Decimal.new("0.0031")}],
              asks: [{Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")}],
-             timestamp: @at,
+             venue_time: @at,
+             observed_at: @at,
              provider: :gemini
            }}
 

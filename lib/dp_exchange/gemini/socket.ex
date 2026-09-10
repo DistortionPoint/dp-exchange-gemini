@@ -373,7 +373,8 @@ defmodule DpExchange.Gemini.Socket do
           symbol: symbol,
           price: price,
           volume: nil,
-          timestamp: timestamp,
+          venue_time: timestamp,
+          observed_at: DateTime.utc_now(),
           provider: :gemini
         })
     end

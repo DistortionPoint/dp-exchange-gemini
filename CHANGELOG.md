@@ -20,6 +20,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **`Core.Types.Quote` and `Core.Types.OrderBook` no longer carry `:timestamp`.** They carry
+  **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
+  **`:observed_at`** (when this package read it, always present). Requires
+  `dp_exchange_core ~> 0.2.1`; this package's own version takes a minor bump to signal it.
+
+  `:timestamp` was documented as the venue's own and "never invented", and two packages in
+  this family could not keep that promise, because the frames they decode carry no venue time
+  at all. With one field their only options were to lie or drop real data, and they lied.
+
+  **One path in this package was the reason.** `WsDecode.to_order_book/3` — partial-depth
+  snapshots — put the local clock in `:timestamp` because the vendor's own AsyncAPI requires
+  only `[lastUpdateId, bids, asks]` there, where `BookTicker` requires an `E`. It now reports
+  `venue_time: nil`, which is the truth it could not previously express. Every other
+  `Quote`/`OrderBook` this package builds has a real venue time and carries it unchanged.
+
+  The full reasoning, the three options weighed and the consumer's own argument for this one
+  are in `dp_exchange_core`'s
+  `docs/design/closed/2026-09-09_venue-time-and-observed-time.md`, announced and answered as
+  dp-exchange-core issue #31. `Trade`, `Fill`, `Balance` and `OrderBookDelta` are unchanged.
+
 ### Documentation
 
 - **Three things the consumer learned by using the restored `InvalidNonce` message
