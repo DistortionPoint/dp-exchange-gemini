@@ -129,6 +129,28 @@ defmodule DpExchange.Gemini.FeedTest do
 
       assert Feed.coverage(feed) == %{}
     end
+
+    test "a link drop clears what the dead connection had been delivering" do
+      # `Socket.handle_disconnect/2` returns `{:reconnect, state}`, so a transport drop
+      # leaves the socket PROCESS alive and no `EXIT` reaches `isolate_crashed_socket/2`.
+      # Before this, the delivery records from the connection that just died kept answering
+      # `:stream` — and a reconnect that restored the socket while silently failing to
+      # restore a symbol left that symbol answering `:stream` forever, which is the exact
+      # incident `coverage/1` exists to make visible. See `Core.Venue`'s `coverage/1` doc.
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+
+      send(feed, {:dp_exchange, :gemini, Notice.new(:link_down, :gemini)})
+      assert Feed.coverage(feed) == %{}
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}}
+
+      # `wanted` is untouched: the host still asked for it, and the next frame after the
+      # resubscribe puts it straight back. Only the evidence was scoped to the dead link.
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+    end
   end
 
   describe "coverage_by_kind/1" do

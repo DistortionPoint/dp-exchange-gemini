@@ -251,7 +251,7 @@ defmodule DpExchange.Gemini.Feed do
        # Both of this venue's declared streamable kinds, pre-populated so
        # `coverage_by_kind/1` always answers with both keys — an absent key would read as
        # "unknown" where an empty map honestly reads as "nothing observed yet".
-       delivering_by_kind: %{quotes: %{}, top_of_book: %{}},
+       delivering_by_kind: empty_delivery(),
        # Latches to `:dead` the instant a periodic resubscribe fails, and back to `:ok` on
        # the next one that succeeds — see the moduledoc's "the resubscribe timer's own
        # failure path was silent" section. `resubscribe/1` reads and writes this to fire a
@@ -313,6 +313,24 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
+
+  # A TRANSPORT drop is not a process death, and until this clause existed nothing here
+  # noticed the difference. `Socket.handle_disconnect/2` returns `{:reconnect, state}`, so
+  # the socket process survives and no `EXIT` ever reaches `isolate_crashed_socket/2` —
+  # which meant the delivery records observed on the connection that just died went on
+  # answering `:stream` for symbols arriving from nowhere, and a reconnect that restored the
+  # socket while silently failing to restore a symbol left that symbol answering `:stream`
+  # indefinitely. That is the 325-subscribed/174-delivering shape `coverage/1` was written
+  # for, reappearing one level down. See `Core.Venue`'s `coverage/1` doc: observation is
+  # scoped to the current transport session.
+  #
+  # One socket carries both streamable kinds here, so there is no partial loss to compute
+  # and the whole map resets — the same shape `init/1` starts with, and the same reset the
+  # crash path performs, for the same reason.
+  def handle_info({:dp_exchange, :gemini, %Notice{kind: :link_down} = notice}, state) do
+    fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
+    {:noreply, %{state | delivering_by_kind: empty_delivery()}}
+  end
 
   @impl true
   def handle_info({:dp_exchange, :gemini, %Notice{} = notice}, state) do
@@ -451,7 +469,7 @@ defmodule DpExchange.Gemini.Feed do
   # resets to the same empty shape `init/1` starts with rather than being narrowed
   # symbol-by-symbol the way `drop/2` narrows it for an ordinary unsubscribe.
   defp isolate_crashed_socket(state, reason) do
-    state = %{state | socket: nil, delivering_by_kind: %{quotes: %{}, top_of_book: %{}}}
+    state = %{state | socket: nil, delivering_by_kind: empty_delivery()}
     notify_socket_crashed(state, reason)
 
     # `resubscribe/1` — the identical function the periodic timer calls — reconnects and
@@ -497,6 +515,13 @@ defmodule DpExchange.Gemini.Feed do
       {kind, Map.take(by_symbol, symbols)}
     end)
   end
+
+  # Both of this venue's declared streamable kinds, present with empty maps. One function
+  # rather than the literal repeated at each of its three call sites — `init/1`, a socket
+  # crash and a link drop — because a third streamable kind added to two of the three is a
+  # silent, plausible-looking divergence, which is the shape of defect this family keeps
+  # writing rules against.
+  defp empty_delivery, do: %{quotes: %{}, top_of_book: %{}}
 
   # The union of every kind's delivery map — what `coverage/1` reports before the
   # `:stream` atom is stamped on. Deriving this from `delivering_by_kind` rather than
