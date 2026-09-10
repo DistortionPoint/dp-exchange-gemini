@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`usage-rules.md` now answers the question a consumer actually has after 0.2.0: when is
+  `venue_time` `nil` here?** The migration note said what the fields mean; it did not say
+  what this venue does with them, which is the part a caller writes a branch for.
+
+  **Never on a REST `Quote` or `OrderBook`** — a response with no `Date` header fails the
+  call outright, so the field is always populated. `nil` appears only on a **streamed**
+  partial-depth snapshot, where the vendor's own AsyncAPI requires no event time. The
+  moduledocs that still described this as a "quote timestamp" were updated to name the
+  field, since after a rename prose pointing at the old name sends a reader looking for
+  something that no longer exists.
+
 ### Changed — BREAKING
 
 - **`Core.Types.Quote` and `Core.Types.OrderBook` no longer carry `:timestamp`.** They carry

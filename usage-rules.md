@@ -1,3 +1,15 @@
+
+**Since 0.2.0 this has a consequence worth knowing**: this venue's `Quote.venue_time` is
+**never `nil`**. The field is nullable across the family precisely because some venues
+publish no time for some frames — but here a response without a `Date` header fails the call
+outright, so a `Quote` that reaches you always carries the venue's own instant. A `nil`
+branch for this venue's quotes is dead code.
+
+`get_order_book/2` is the same. The **stream** is where `nil` appears: a partial-depth
+snapshot (`@depth5`/`@depth10`/`@depth20`) carries `venue_time: nil`, because the vendor's
+own AsyncAPI requires only `[lastUpdateId, bids, asks]` for `OrderBookSnapshot` where
+`BookTicker` requires an `E`. Deltas and `bookTicker` frames do carry a real nanosecond event
+time.
 # Using `dp_exchange_gemini`
 
 > **EXPERIMENTAL.** Not run in production. Pin three-part. Maturity is per endpoint —
@@ -124,9 +136,9 @@ answer for a period the venue does not serve.
 **There is nothing to paginate.** `max_candles_per_request` is `nil`, not a number — one
 call is the whole history the venue offers at that width. Do not build a paging loop.
 
-## A quote's timestamp is the venue's HTTP `Date`, and without it the call fails
+## `Quote.venue_time` is the venue's HTTP `Date` — and on this venue it is never `nil`
 
-Neither Gemini ticker publishes a quote timestamp. `/v1/pubticker` has one, but it sits
+Neither Gemini ticker publishes a quote time. `/v1/pubticker` has one, but it sits
 **inside the `volume` object** — it stamps the 24-hour volume window and lags about a
 minute. `/v2/ticker` has none at all.
 
@@ -136,6 +148,18 @@ clock, which is what makes a stale quote indistinguishable from a live one.
 
 If you need sub-second freshness, use `subscribe/2` — the stream carries a real
 nanosecond event time per update.
+
+**Since 0.2.0 this has a consequence worth knowing**: this venue's `Quote.venue_time` is
+**never `nil`**. The field is nullable across the family precisely because some venues
+publish no time for some frames — but here a response without a `Date` header fails the call
+outright, so a `Quote` that reaches you always carries the venue's own instant. A `nil`
+branch for this venue's quotes is dead code.
+
+`get_order_book/2` is the same. The **stream** is where `nil` appears: a partial-depth
+snapshot (`@depth5`/`@depth10`/`@depth20`) carries `venue_time: nil`, because the vendor's
+own AsyncAPI requires only `[lastUpdateId, bids, asks]` for `OrderBookSnapshot` where
+`BookTicker` requires an `E`. Deltas and `bookTicker` frames do carry a real nanosecond event
+time.
 
 ## A 404 on a market-data call is a refusal, not a retryable error
 

@@ -32,11 +32,11 @@ defmodule DpExchange.Gemini do
   range afterward, so a range outside the true window still comes back empty rather than
   wrong, just without the named boundary. See `DpExchange.Gemini.Rest`'s moduledoc.
 
-  **Quote timestamps come from the venue's clock, or the call fails.** Neither Gemini
-  ticker publishes a quote timestamp — `/v1/pubticker`'s only timestamp stamps its
-  24-hour volume window, about a minute stale. This package uses the venue's HTTP `Date`
-  header and returns `{:error, :missing_venue_timestamp}` when it is absent. It never
-  substitutes the local clock.
+  **`Quote.venue_time` comes from the venue's clock, or the call fails — so on this venue it
+  is never `nil`.** Neither Gemini ticker publishes a quote time: `/v1/pubticker`'s only
+  timestamp stamps its 24-hour volume window, about a minute stale. This package uses the
+  venue's HTTP `Date` header and returns `{:error, :missing_venue_timestamp}` when it is
+  absent. It never substitutes the local clock.
 
   **Gemini publishes no rate-limit headers.** Measured 2026-08-28: a response carries
   `date`, `x-request-id` and `x-envoy-upstream-service-time`, and nothing else. It does

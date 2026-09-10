@@ -54,7 +54,7 @@ defmodule DpExchange.Gemini.Rest do
   rather than `{:error, {:range_unavailable, …}}` — a real gap from the other seven widths,
   disclosed here rather than hidden behind a fabricated window size.
 
-  ## Neither ticker carries a quote timestamp, so the venue's own clock is used
+  ## Neither ticker carries a quote time, so `:venue_time` comes from the `Date` header
 
   `/v1/pubticker` returns a `timestamp`, but it is **inside the `volume` object** — it
   stamps the 24-hour volume window, updates about once a minute, and is not when the bid
@@ -67,6 +67,12 @@ defmodule DpExchange.Gemini.Rest do
   when it served the answer, which bounds the quote's age and is not our clock. When that
   header is absent the request fails with `{:error, :missing_venue_timestamp}` rather than
   returning a quote whose freshness cannot be stated.
+
+  **A consequence worth stating since Core 0.2.0**: this venue's `Quote.venue_time` is
+  therefore **never `nil`**. The field is nullable across the family precisely because some
+  venues publish no time — but here, a response with no `Date` header fails the call
+  outright, so a `Quote` that reaches a caller always carries the venue's own instant. A
+  consumer writing a `nil` branch for this venue's quotes is writing dead code.
   """
 
   alias DpExchange.Core.{HttpClient, Timeframe}
