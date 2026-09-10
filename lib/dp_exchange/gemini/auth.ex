@@ -67,6 +67,30 @@ defmodule DpExchange.Gemini.Auth do
   result.
 
   OAuth requests carry no nonce at all.
+
+  ## Raising the mark is a one-way door, and why this module cannot walk through it
+
+  Every nonce the venue **accepts** becomes that key's stored high-water mark, and Gemini
+  compares nonces as arbitrary-precision integers. So a caller who clears a stuck mark by
+  emitting something enormous — a real consumer used `counter × 1_000` ≈ `1.78e21` — does
+  clear it, and permanently sets the mark to `1.78e21`. Nothing lowers it again, and no mode
+  here can ever satisfy that key afterwards: `:incremental` is anchored to epoch
+  milliseconds (~`1.789e12`), and even nanosecond magnitudes reach only ~`1.789e18`, below
+  `2^64` ≈ `1.844e19` let alone `1.78e21`. The key must be rotated, which is a human action.
+
+  **`nonce(:incremental)` is structurally incapable of that escalation**, and that is the
+  property to preserve if this function is ever changed: `max(now_ms, previous + 1)` is
+  anchored to the wall clock and advances past it by exactly one, only when calls land
+  inside the same millisecond. Reaching `1e21` would take on the order of `1e21` calls.
+
+  There is deliberately **no runtime guard** against a nonce "too far ahead of the clock",
+  even though a large forward jump of the system clock is the one path by which this module
+  could raise a mark. A guard would turn ordinary NTP corrections into a dead feed — a worse
+  failure, and a far more frequent one, than the case it would prevent. Recorded so the
+  absence reads as a decision rather than an oversight.
+
+  Reported by a consumer on dp-exchange-gemini issue #1, who reached the diagnosis using the
+  venue `message` that same issue restored.
   """
 
   @nonce_counter {__MODULE__, :nonce_counter}

@@ -149,6 +149,67 @@ This changed in response to dp-exchange-gemini issue #1, where 164 log lines rea
 today, add the two-tuple clause: a reason this package recognises is no longer less
 informative than one it does not.
 
+
+
+#### "Has not increased" while you are sending epoch seconds means the key wants `:incremental`
+
+The most useful diagnosis to come out of issue #1, and neither of the two the reporter
+expected. Their nonces were rising normally — `1789013700` → `1789014601` → `1789015200`,
+exactly epoch seconds — and the venue still answered *"has not increased"*.
+
+A **time-based** key would have accepted those: it validates against a ±30 s window, not
+against a previous value. *"Has not increased"* is the **incremental** validator's sentence.
+So the key was provisioned for incremental validation, the caller was sending the
+`:time_based` default, and the mismatch is exactly the one this package's `Auth` moduledoc
+warns fails loudly on the first request.
+
+The fix is to pass the mode the key was made with:
+
+```elixir
+DpExchange.Gemini.get_balances(credentials, nonce_mode: :incremental)
+```
+
+There is no way for this package to infer it — the venue exposes no way to ask how a key
+was provisioned, which is why the option exists and has no default that could be right for
+everyone. But the sentence in the error is diagnostic, and now that it reaches you, this is
+what it means.
+
+#### A nonce far above wall-clock time is a one-way door
+
+Read this before "fixing" `InvalidNonce` by making the number bigger.
+
+Gemini compares nonces as **arbitrary-precision integers**, and every accepted call
+**raises the key's stored high-water mark to whatever you sent**. So a workaround that
+emits, say, `counter × 1_000` ≈ `1.78e21` to clear a stuck mark does clear it — and
+permanently sets the mark to `1.78e21`. Nothing can lower it again.
+
+After that, no mode this package offers can ever satisfy that key. `:incremental` is
+anchored to epoch **milliseconds** (~`1.789e12`); even nanosecond magnitudes only reach
+~`1.789e18`, still far below `2^64` ≈ `1.844e19`, let alone `1.78e21`. **The key has to be
+rotated**, which is a human action. A consumer learned this the expensive way and reported
+it (issue #1); it is written down here so the next one does not have to.
+
+**This package cannot put you through that door.** `Auth.nonce(:incremental)` is
+`max(now_ms, previous + 1)` — anchored to the wall clock, advancing past it by one only
+when calls land inside the same millisecond. Reaching `1e21` would take on the order of
+`1e21` calls. The magnitudes that brick a key come from hand-rolled counters, not from here.
+
+The one caveat worth naming rather than hiding: a **large forward jump of the system
+clock** would anchor the counter high, and that value would set the venue's mark. There is
+deliberately no runtime guard against it, because a guard that refused to emit a nonce
+"too far ahead" would turn ordinary NTP corrections into a dead feed — a worse and far more
+frequent failure than the one it would prevent. Keep your clocks sane; that is the whole
+mitigation.
+
+#### If you match on `{:refused, reason}`, check your clause before upgrading
+
+Reported by the consumer who filed issue #1, and worth repeating because it fails
+**silently**: their `normalize_error/1` matched a bare atom, so a `{reason, message}`
+2-tuple fell through to a passthrough clause and skipped their canonical mapping entirely.
+`order_not_found` would have quietly stopped becoming `:unknown_order` the moment the venue
+attached a message. **Nothing would have raised.** If you pattern-match refusal reasons as
+atoms, add the two-tuple clause deliberately rather than discovering it by a mapping that
+stopped happening.
 ## The demo environment is one option, on both transports
 
 Gemini runs a full exchange with test funds — bots make the order book, and a new account

@@ -20,6 +20,43 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Three things the consumer learned by using the restored `InvalidNonce` message
+  (issue #1), written down so nobody re-learns them.** No code changed; they confirmed the
+  package's shape was already right and the gap was in their own host.
+
+  **The diagnosis neither of us predicted.** Their nonces were rising normally — exactly
+  epoch seconds — and the venue still said *"has not increased"*. A time-based key validates
+  against a ±30 s window, not a previous value; *"has not increased"* is the **incremental**
+  validator's sentence. The key was provisioned incremental, the caller was sending the
+  `:time_based` default, and that is precisely the mismatch `Auth`'s moduledoc says fails
+  loudly on the first request. `usage-rules.md` now names the symptom and the fix, because
+  the venue exposes no way to ask how a key was provisioned — the error sentence is the only
+  signal, and it now reaches the caller.
+
+  **Raising the mark is a one-way door.** Every accepted nonce becomes the key's stored
+  high-water mark, and Gemini compares them as arbitrary-precision integers. Clearing a
+  stuck mark by emitting something enormous — a real host used `counter × 1_000` ≈ `1.78e21`
+  — works once and permanently sets the mark there. No mode this package offers can ever
+  satisfy that key afterwards (`:incremental` tops out near `1.789e12`; even nanoseconds
+  reach only ~`1.789e18`, under `2^64`). Rotation is the only remedy, and it is a human
+  action.
+
+  **This package cannot walk through that door**, and `Auth`'s moduledoc now records that as
+  a property to preserve rather than an accident: `nonce(:incremental)` is
+  `max(now_ms, previous + 1)`, anchored to the wall clock and advancing past it by one only
+  within a single millisecond — reaching `1e21` would take `1e21` calls. It also records why
+  there is deliberately **no runtime guard** against a nonce far ahead of the clock: a guard
+  would turn ordinary NTP corrections into a dead feed, which is a worse and much more
+  frequent failure than the one it would prevent.
+
+- **A caution for anyone else upgrading past 0.1.42.** The same consumer found that their
+  `normalize_error/1` matched a bare refusal atom, so the new `{reason, message}` 2-tuple
+  fell through to a passthrough clause and skipped their canonical mapping — silently.
+  Nothing raised. If you pattern-match refusal reasons as atoms, add the two-tuple clause
+  deliberately rather than discovering it through a mapping that quietly stopped happening.
+
 ### Fixed
 
 - **A known refusal dropped the venue's `message`, which for `InvalidNonce` is the whole
