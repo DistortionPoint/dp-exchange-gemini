@@ -24,6 +24,28 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A `200` this package could not decode became an empty object, and then an empty
+  everything.** `decode/1` collapsed any unparseable body to `%{}` on the success path of
+  both `Rest` and `Private`. `%{}` is a map, so it passed straight through the readers and
+  came out as a well-formed struct with every field `nil`, returned as `{:ok, value}`.
+
+  There was already a test for this on the public path — "a 200 whose body is not JSON at
+  all" — and it passed, which is why the defect survived: `get_price/2`'s reader happened to
+  reject `%{}` for carrying no ticker fields. The authenticated readers do not reject it.
+  `to_order/1` accepted `%{}` and built an order with no id and no status; the balance reader
+  built an empty portfolio. Each was returned as success. Two substitutions in sequence,
+  where catching either one alone would have been enough.
+
+  The realistic source is not malformed JSON from Gemini. It is a `200` that never reached
+  Gemini: an interstitial, a captive portal or a CDN maintenance page, each of which answers
+  `200 text/html`. "You hold nothing" and "I could not read the answer" demand opposite
+  responses from a caller.
+
+  Success bodies now refuse with `{:error, {:undecodable_response, :gemini}}`. Refusal bodies
+  are unchanged — they were already passed raw to `refusal_reason/1`, for the reason recorded
+  there: a plain-text `4xx` body is the venue's own words, and routing it through a decoder
+  discards them.
+
 - **`"NaN"` and `"Inf"` from a venue became real `Decimal` prices and flowed through
   untouched.** Every numeric field in this package funnels through a `decimal/1` helper whose
   binary clause uses `Decimal.parse/1` and requires the whole string be consumed — the

@@ -831,7 +831,7 @@ defmodule DpExchange.Gemini.Rest do
 
     case HttpClient.request(:get, url, [], nil, request_opts(opts)) do
       {:ok, %{status: status, body: body, headers: headers}} when status in 200..299 ->
-        {:ok, decode(body), headers}
+        with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, headers}
 
       {:ok, %{status: status, body: body}} when status in [400, 404] ->
         {:refused, refusal(body)}
@@ -887,26 +887,45 @@ defmodule DpExchange.Gemini.Rest do
     |> Keyword.merge(provider: :gemini, raw_status: true)
   end
 
-  defp decode(body) when is_binary(body) do
+  # A 2xx body this package cannot decode is NOT an empty object.
+  #
+  # This used to collapse any unparseable body to `%{}` and hand it on as success. Nothing
+  # downstream could tell that apart from a real but sparse response: `%{}` flows through
+  # every `to_*` reader in this module and comes out as a well-formed struct with each
+  # field `nil`, returned as `{:ok, value}`. The realistic way to get there is not malformed
+  # JSON from the venue but a `200` that is not the venue at all — an interstitial, a
+  # captive portal, or a CDN maintenance page, all of which answer `200 text/html`. A
+  # caller polling through one of those was told, truthfully-looking, that the book was
+  # empty.
+  #
+  # Refuse instead. Refusal bodies do NOT come through here — see `refusal/1` below, which
+  # reads the venue's own text and has its own reason to stay lenient.
+  defp decoded_body(body) when is_binary(body) do
     case Jason.decode(body) do
-      {:ok, decoded} -> decoded
-      {:error, _reason} -> %{}
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> {:error, {:undecodable_response, :gemini}}
     end
   end
 
-  defp decode(body), do: body
+  defp decoded_body(body), do: {:ok, body}
 
   # A 400 or 404 from Gemini names its own reason, and the ones below are permanent for
   # the request as sent — no retry can make an unknown symbol known. That is a refusal,
   # not an error, and the distinction is the whole point of having two shapes.
   #
-  # `body` is passed RAW, not through `decode/1`: `decode/1`'s own fallback collapses
-  # unparseable JSON to `%{}`, which is right for a 2xx body but wrong for a refusal one —
-  # it would discard the venue's own text before `refusal_reason/1` ever saw it. Measured
-  # live 2026-09-06: `/v2/candles/{symbol}/{width}`'s 400 body is plain text (`"Supplied
-  # value 'X' is not a valid symbol"`), not JSON, so `decode/1` here used to turn it into
+  # `body` is passed RAW, not through the shared decoder: that decoder's fallback used to
+  # collapse unparseable JSON to `%{}`, which would discard the venue's own text before
+  # `refusal_reason/1` ever saw it. Measured live 2026-09-06:
+  # `/v2/candles/{symbol}/{width}`'s 400 body is plain text (`"Supplied value 'X' is not a
+  # valid symbol"`), not JSON, so routing it through that decoder used to turn it into
   # `{:refused, :refused}` — the venue's only stated reason, discarded. `refusal_reason/1`
   # now does its own decode and keeps the text when there is nothing else to keep.
+  #
+  # The `%{}` collapse is gone from the 2xx path too — `decoded_body/1` above refuses there
+  # rather than inventing an empty success — but this clause would still be wrong to route
+  # through it. A plain-text refusal body is not an undecodable *response*; it is the
+  # venue's answer in the form the venue chose, and refusing it would swap a specific
+  # `{:refused, reason}` for a generic error.
   defp refusal(body), do: refusal_reason(body)
 
   @doc false

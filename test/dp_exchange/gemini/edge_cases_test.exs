@@ -112,14 +112,22 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                )
     end
 
-    test "a 200 whose body is not JSON at all is an error too" do
+    test "a 200 whose body is not JSON at all names the decode failure, not a shape failure" do
       plug = fn conn ->
         conn
         |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
         |> Plug.Conn.resp(200, "<html>maintenance</html>")
       end
 
-      assert {:error, :unexpected_response_shape} =
+      # This asserted `:unexpected_response_shape` until the decoder was fixed, and it
+      # passed — but for the wrong reason, which is why the assertion moved rather than the
+      # test being deleted. `decode/1` collapsed an unparseable body to `%{}`, and the
+      # *reader* then rejected `%{}` for carrying no ticker fields. Two substitutions in
+      # sequence, where only the second happened to be caught: any reader whose fields are
+      # all optional — an order, a balance — accepted the same `%{}` and returned a struct
+      # with every field `nil` as `{:ok, value}`. The refusal now happens where the fact is
+      # known, so it holds whatever the caller was reading.
+      assert {:error, {:undecodable_response, :gemini}} =
                Rest.get_price("BTC-USD", plug: plug, retry_attempts: 0)
     end
 
@@ -469,6 +477,31 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert Decimal.equal?(order.price, Decimal.new(100))
       assert Decimal.equal?(order.quantity, Decimal.from_float(1.5))
       assert order.id == "1234"
+    end
+
+    test "a 200 that is not JSON refuses on the authenticated path too" do
+      # The public path already had a test for this (see "a 200 whose body is not JSON at
+      # all" above) and it passed only because `get_price/2`'s reader rejected the `%{}`
+      # that `decode/1` substituted. The authenticated readers do not: `%{}` is a map, so
+      # `to_order/1` accepted it and built an order with no id and no status, and the
+      # balance reader built an empty portfolio — each returned as `{:ok, value}`.
+      #
+      # A caller cannot act on that. "You hold nothing" and "I could not read the answer"
+      # demand opposite responses, and the venue is not even necessarily involved: a `200
+      # text/html` is what a captive portal or a CDN maintenance page answers.
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+        |> Plug.Conn.resp(200, "<html>maintenance</html>")
+      end
+
+      opts = [plug: plug, retry_attempts: 0]
+
+      assert {:error, {:undecodable_response, :gemini}} =
+               DpExchange.Gemini.Private.get_balances(@credentials, opts)
+
+      assert {:error, {:undecodable_response, :gemini}} =
+               DpExchange.Gemini.Private.get_order(@credentials, "1234", opts)
     end
   end
 

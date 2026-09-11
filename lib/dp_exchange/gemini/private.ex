@@ -373,7 +373,7 @@ defmodule DpExchange.Gemini.Private do
       case HttpClient.request(:post, url, headers, "", request_opts(opts)) do
         {:ok, %{status: status, body: body, headers: response_headers}}
         when status in 200..299 ->
-          {:ok, decode(body), response_headers}
+          with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
         # Permanent for the request as sent. A caller refreshes a token and calls again —
         # that is a different request, not a retry of this one.
@@ -440,7 +440,7 @@ defmodule DpExchange.Gemini.Private do
       case HttpClient.request(:get, base_url(opts) <> path, headers, nil, request_opts(opts)) do
         {:ok, %{status: status, body: body, headers: response_headers}}
         when status in 200..299 ->
-          {:ok, decode(body), response_headers}
+          with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
         {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
           {:refused, refusal(body)}
@@ -2129,7 +2129,7 @@ defmodule DpExchange.Gemini.Private do
 
     case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
-        {:ok, decode(body)}
+        decoded_body(body)
 
       {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
         {:refused, body}
@@ -2456,20 +2456,31 @@ defmodule DpExchange.Gemini.Private do
   # carried had to be found and fixed twice — and could as easily have been fixed in only
   # one of the two. One implementation, one place to get it right.
   #
-  # `body` is passed RAW, not through this module's own `decode/1` — see
-  # `Rest.refusal_reason/1`'s moduledoc. `decode/1`'s fallback collapses unparseable JSON
+  # `body` is passed RAW, not through this module's own `decoded_body/1` — see
+  # `Rest.refusal_reason/1`'s moduledoc. That decoder's old fallback collapsed unparseable JSON
   # to `%{}`, which would discard a plain-text refusal body before `refusal_reason/1` gets
   # a chance to keep it; `refusal_reason/1` now decodes a raw body itself.
   defp refusal(body), do: Rest.refusal_reason(body)
 
-  defp decode(body) when is_binary(body) do
+  # A 2xx body this package cannot decode is NOT an empty object. See
+  # `DpExchange.Gemini.Rest.decoded_body/1` for the full note; the short version is that
+  # collapsing an unparseable success body to `%{}` produces a well-formed struct with
+  # every field `nil`, handed back as `{:ok, value}`, and the realistic source is a `200`
+  # that never reached the venue — a captive portal or CDN maintenance page answering
+  # `200 text/html`.
+  #
+  # On THIS module it is worse than on the public one, because these are the authenticated
+  # calls. `%{}` reached `to_order/1` as a map and became an order with no id and no status
+  # reported as success from `place_order/4`, and reached the balance readers as an empty
+  # portfolio. Refuse instead.
+  defp decoded_body(body) when is_binary(body) do
     case Jason.decode(body) do
-      {:ok, decoded} -> decoded
-      {:error, _reason} -> %{}
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> {:error, {:undecodable_response, :gemini}}
     end
   end
 
-  defp decode(body), do: body
+  defp decoded_body(body), do: {:ok, body}
 
   defp stringify(params), do: Map.new(params, fn {k, v} -> {to_string(k), v} end)
 
