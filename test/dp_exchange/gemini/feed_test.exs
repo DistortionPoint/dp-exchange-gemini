@@ -234,6 +234,88 @@ defmodule DpExchange.Gemini.FeedTest do
     end
   end
 
+  describe "a dead subscriber is dropped, not walked forever" do
+    # `Core.Fanout.resolve/1` already skipped a dead subscriber at send time, so no EVENTS
+    # accumulated for one — but nothing removed the pid, so a supervised consumer that
+    # restarts left one behind on every restart, for the life of this feed. `deliver/4` walks
+    # the whole set calling `Process.alive?/1` once per message, so the cost was linear in
+    # uptime: 0.095 us per fan-out against a clean set, 22.8 us against one carrying a
+    # thousand dead pids.
+    test "a subscriber that dies is removed from the subscriber set" do
+      feed = start_feed()
+      subscriber = spawn(fn -> Process.sleep(:infinity) end)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: subscriber)
+      assert MapSet.member?(:sys.get_state(feed).subscribers, subscriber)
+
+      ref = Process.monitor(subscriber)
+      Process.exit(subscriber, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}
+
+      # A call is answered only after the feed's own `:DOWN` has been handled.
+      _settled = Feed.coverage(feed)
+
+      state = :sys.get_state(feed)
+      refute MapSet.member?(state.subscribers, subscriber)
+      refute Map.has_key?(state.monitors, subscriber)
+    end
+
+    test "a notice subscriber that dies is removed too" do
+      feed = start_feed()
+      watcher = spawn(fn -> Process.sleep(:infinity) end)
+
+      :ok = Feed.subscribe_notices(feed, to: watcher)
+      assert MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
+
+      ref = Process.monitor(watcher)
+      Process.exit(watcher, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}
+      _settled = Feed.coverage(feed)
+
+      refute MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
+    end
+
+    test "a REGISTERED NAME is never monitored, and survives its holder dying" do
+      # The half that must not be pruned. A name is not a process: `subscribe/2` accepts one
+      # precisely so a consumer can restart under it, and pruning when the current holder
+      # dies would silently unsubscribe a consumer whose supervisor is about to bring it
+      # straight back — data loss with nothing to notice it by. A name cannot leak anyway:
+      # the set holds one atom however many restarts happen.
+      feed = start_feed()
+      name = :"named_subscriber_#{System.unique_integer([:positive])}"
+      holder = spawn(fn -> Process.sleep(:infinity) end)
+      Process.register(holder, name)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: name)
+      assert :sys.get_state(feed).monitors == %{}
+
+      ref = Process.monitor(holder)
+      Process.exit(holder, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}
+      _settled = Feed.coverage(feed)
+
+      # Still subscribed under the name, ready for whatever registers next.
+      assert MapSet.member?(:sys.get_state(feed).subscribers, name)
+    end
+
+    test "subscribing twice from one pid monitors it once" do
+      # Each monitor delivers its own `:DOWN`, so stacking them means N-1 messages nothing
+      # will match.
+      feed = start_feed()
+      subscriber = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(subscriber, :kill) end)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: subscriber)
+      first = :sys.get_state(feed).monitors
+
+      :ok = Feed.subscribe(feed, ["ETH-USD"], to: subscriber)
+      :ok = Feed.subscribe_notices(feed, to: subscriber)
+
+      assert :sys.get_state(feed).monitors == first
+      assert map_size(first) == 1
+    end
+  end
+
   describe "coverage is observed, never intended" do
     test "a subscribed symbol that has delivered nothing is absent" do
       # The strongest guarantee in the contract. A venue once reported 325 symbols
