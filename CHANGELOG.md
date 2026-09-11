@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-09-11
+
 ### Fixed
 
 - **The socket reconnected with no delay, forever, against a venue that would not have it
