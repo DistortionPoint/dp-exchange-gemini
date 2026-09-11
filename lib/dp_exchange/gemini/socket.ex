@@ -51,7 +51,7 @@ defmodule DpExchange.Gemini.Socket do
 
   use WebSockex
 
-  alias DpExchange.Core.Notice
+  alias DpExchange.Core.{Notice, Telemetry}
   alias DpExchange.Core.Types.Quote
   alias DpExchange.Gemini.{Environment, SymbolFormat, WsChannels, WsDecode}
 
@@ -213,17 +213,39 @@ defmodule DpExchange.Gemini.Socket do
   @impl true
   def handle_connect(_conn, state) do
     notify(state, Notice.new(:link_up, :gemini))
+
+    # The metrics channel alongside the notice channel, never instead of it. A `Core.Notice`
+    # is a condition a consumer must ACT on; telemetry is aggregate and lossy by design. A
+    # consumer that alarmed on a telemetry gauge would be acting on a channel documented as
+    # droppable, and one that graphed notices would be graphing something it is meant to
+    # handle. Both fire here because this one event is genuinely both.
+    Telemetry.link_up(:gemini)
     {:ok, state}
   end
 
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
     notify(state, Notice.new(:link_down, :gemini, details: %{reason: inspect(reason)}))
+    Telemetry.link_down(:gemini, inspect(reason))
+
+    # No `link_reconnect_attempt` here, deliberately. This socket reconnects immediately and
+    # keeps no attempt counter, so the only number it could report is `attempt: 1` — every
+    # time. A reconnect LOOP would then render as an endless series of first attempts, which
+    # is worse than no event: it looks like a venue flapping once, repeatedly, rather than a
+    # socket that cannot get back. `dp_exchange_schwab` tracks `login_failures` and does
+    # emit it. An invented counter is exactly the plausible-wrong-value this family keeps
+    # writing rules against.
     {:reconnect, state}
   end
 
   @impl true
   def handle_frame({:text, raw}, state) do
+    # Emitted BEFORE the decode, and counted whether or not it parses — the question this
+    # event answers is "is the venue sending", and a frame this package could not read is
+    # still a frame the venue sent. Counting only what parsed would make a decoder bug here
+    # look like a silent venue.
+    Telemetry.link_event(:gemini, :frame, byte_size(raw))
+
     case Jason.decode(raw) do
       {:ok, message} -> handle_message(message, state)
       {:error, _reason} -> {:ok, state}

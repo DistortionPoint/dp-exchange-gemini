@@ -20,6 +20,47 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **This package now emits the `[:dp_exchange, :link, …]` telemetry the contract has
+  documented since it was written.** `Core.Telemetry` said these are the events "every venue
+  package emits"; there was not one `:telemetry.execute/3` call anywhere in the family for
+  as long as the spec existed. `:telemetry.attach/4` against a name nobody emits **succeeds**
+  — so a consumer wired a dashboard to it, got no error, and saw an empty panel, which reads
+  as a venue with no traffic rather than as an unimplemented spec.
+
+  `:link, :up` and `:link, :down` on the connection transitions, and `:link, :event` per
+  frame with its wire size. The request and rate-limit events come free with
+  `dp_exchange_core` 0.2.8, since every venue's REST goes through `Core.HttpClient` and every
+  metered call through `Core.DefaultRateLimiter`.
+
+  **The metrics channel is alongside the notice channel, never instead of it.** A
+  `Core.Notice` is a condition a consumer must ACT on; telemetry is aggregate and lossy by
+  design. A consumer that alarmed on a telemetry gauge would be acting on a channel
+  documented as droppable, and one that graphed notices would be graphing something it is
+  meant to handle.
+
+  Two details worth stating, because both are places a plausible-looking number would have
+  been wrong:
+
+  A frame is counted **whether or not it parses**. The question the event answers is "is the
+  venue sending", and a frame this package could not read is still a frame the venue sent —
+  counting only what parsed would make a decoder bug here look like a silent venue.
+
+  There is **no `:link, :reconnect_attempt`** from this package. It reconnects immediately
+  and keeps no attempt counter, so the only number it could report is `attempt: 1`, every
+  time — which renders a reconnect loop as an endless series of first attempts. That is
+  worse than no event. `dp_exchange_schwab` tracks `login_failures` and does emit it.
+
+### Changed
+
+- **`dp_exchange_core` floor raised to `~> 0.2.8`**, which is where `Core.Telemetry`'s
+  emitter functions live. A venue calling `:telemetry.execute/3` directly would be naming
+  events by hand in five places — five chances to write `:link_up` instead of
+  `[:dp_exchange, :link, :up]`, with the drift invisible, since a wrong name emits
+  successfully and simply never reaches a handler — and would be using a transitive
+  dependency it never declared.
+
 ## [0.2.6] - 2026-09-11
 
 ### Added

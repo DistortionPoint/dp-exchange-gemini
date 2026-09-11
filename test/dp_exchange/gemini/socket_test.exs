@@ -218,4 +218,68 @@ defmodule DpExchange.Gemini.SocketTest do
              ]
     end
   end
+
+  describe "the link reports itself on the metrics channel too" do
+    # `Core.Telemetry` documented `[:dp_exchange, :link, …]` as events "every venue package
+    # emits" and nothing in the family emitted any of them, for as long as the spec existed.
+    # `:telemetry.attach/4` against a name nobody emits SUCCEEDS, so a consumer's dashboard
+    # showed an empty panel — which reads as a venue with no traffic, not as an unimplemented
+    # spec. These tests attach real handlers: one that only called an emitter and checked it
+    # returned `:ok` would pass just as happily against the version that emitted nothing.
+    setup do
+      test_pid = self()
+      handler_id = "link-telemetry-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:dp_exchange, :link, :up],
+          [:dp_exchange, :link, :down],
+          [:dp_exchange, :link, :event]
+        ],
+        fn event, measurements, metadata, _config ->
+          # Scoped by provider: `:telemetry` handlers are global to the VM, so an unscoped
+          # one also receives every other concurrently-running test's events.
+          if metadata.provider == :gemini do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+      :ok
+    end
+
+    test "connecting emits link up" do
+      assert {:ok, _state} = Socket.handle_connect(:conn, state())
+      assert_receive {:telemetry, [:dp_exchange, :link, :up], %{count: 1}, _metadata}
+    end
+
+    test "disconnecting emits link down with an already-inspected reason" do
+      # Aggregators group by value; a raw reason carrying a pid or a socket ref would make
+      # every occurrence a distinct series.
+      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, state())
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, metadata}
+      assert is_binary(metadata.reason)
+      assert metadata.reason =~ "closed"
+    end
+
+    test "every frame is a link event, counted with its wire size" do
+      payload = Jason.encode!(%{"e" => "bookTicker"})
+      assert {:ok, _state} = Socket.handle_frame({:text, payload}, state())
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], measurements, metadata}
+      assert measurements.bytes == byte_size(payload)
+      assert measurements.count == 1
+      assert metadata.type == :frame
+    end
+
+    test "a frame that does NOT parse is still counted — the venue still sent it" do
+      # Counting only what parsed would make a decoder bug here look like a silent venue.
+      assert {:ok, _state} = Socket.handle_frame({:text, "{not json"}, state())
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], %{bytes: 9}, _metadata}
+    end
+  end
 end
