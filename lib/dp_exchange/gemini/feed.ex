@@ -216,9 +216,22 @@ defmodule DpExchange.Gemini.Feed do
         }
   def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind, @call_timeout)
 
+  # `@call_timeout`, not `GenServer.call/2`'s five-second default.
+  #
+  # This was the one public call in this module left on the default, and it is the worst one
+  # to leave short. `@call_timeout` is the authors' own statement of how long this feed may
+  # legitimately take to answer, and every sibling call — `subscribe/3`, `unsubscribe/2`,
+  # `update_symbols/2`, `coverage/1` — is allowed it on the same mailbox. A consumer
+  # registers for notices at start-up, which is precisely when that mailbox is deepest: the
+  # transport is coming up, symbols are being resolved, and this handler itself may replay a
+  # notice to the newly-registered subscriber.
+  #
+  # A `GenServer.call/3` timeout exits in the CALLER, not in the feed. So the channel a host
+  # uses to *hear that something is wrong* was the one call that could kill the host's
+  # calling process for asking during exactly the conditions it exists to report.
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed, opts),
-    do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())})
+    do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())}, @call_timeout)
 
   # --- server ------------------------------------------------------------
 
