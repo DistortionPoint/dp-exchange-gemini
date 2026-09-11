@@ -282,4 +282,60 @@ defmodule DpExchange.Gemini.SocketTest do
       assert_receive {:telemetry, [:dp_exchange, :link, :event], %{bytes: 9}, _metadata}
     end
   end
+
+  describe "reconnect backoff — the storm websockex has no delay of its own against" do
+    test "attempt 1 waits nothing: a healthy session that dropped reconnects at once" do
+      assert Socket.reconnect_delay_ms(1) == 0
+    end
+
+    test "each consecutive failure doubles, capped at 30 seconds" do
+      # `on_disconnect/5` in the transport calls `open_connection/3` and, on failure, calls
+      # ITSELF with `attempt + 1` — nothing between the turns. Without this the socket
+      # retries at full connect speed forever against whatever is refusing it, and the
+      # causes are the ones that do not fix themselves by being retried sooner: a credential
+      # the venue stopped honouring, an IP it started refusing, a maintenance window.
+      assert Socket.reconnect_delay_ms(2) == 1_000
+      assert Socket.reconnect_delay_ms(3) == 2_000
+      assert Socket.reconnect_delay_ms(4) == 4_000
+      assert Socket.reconnect_delay_ms(5) == 8_000
+      assert Socket.reconnect_delay_ms(6) == 16_000
+      assert Socket.reconnect_delay_ms(7) == 30_000
+      assert Socket.reconnect_delay_ms(50) == 30_000
+    end
+
+    test "the cap holds against an attempt number large enough to overflow a naive shift" do
+      # `:math.pow(2, attempt - 2)` on a long-lived storm produces a float far beyond any
+      # integer anyone wants to multiply. `min/2` is applied to the result, so the only
+      # thing that matters is that it stays pinned and stays an integer.
+      delay = Socket.reconnect_delay_ms(2_000)
+
+      assert delay == 30_000
+      assert is_integer(delay)
+    end
+
+    test "handle_disconnect/2 reconnects immediately when the transport reports attempt 1" do
+      # The healthy-blip path, and the one every other test in this file exercises by
+      # calling the callback with a bare `%{reason: ...}`. Timed rather than assumed: a
+      # regression that slept here would stall a socket on every ordinary drop.
+      started = System.monotonic_time(:millisecond)
+
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, state())
+
+      assert System.monotonic_time(:millisecond) - started < 500
+    end
+
+    test "handle_disconnect/2 actually waits once reconnects are failing" do
+      # Attempt 3 is `@base_reconnect_delay_ms * 2` = 2000ms. Asserting the elapsed time
+      # rather than only the pure function is what proves the delay is WIRED IN — the
+      # function existed in `dp_exchange_schwab` all along, and the bug in the other three
+      # packages was never that the arithmetic was wrong, it was that nothing called it.
+      started = System.monotonic_time(:millisecond)
+
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 3}, state())
+
+      assert System.monotonic_time(:millisecond) - started >= 2_000
+    end
+  end
 end

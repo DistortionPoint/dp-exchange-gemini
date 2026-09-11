@@ -20,6 +20,43 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The socket reconnected with no delay, forever, against a venue that would not have it
+  back.** `handle_disconnect/2` returned `{:reconnect, state}` unconditionally, and
+  `websockex` supplies no delay of its own: `on_disconnect/5` in
+  `deps/websockex/lib/websockex.ex` calls `open_connection/3` and, on failure, calls itself
+  with `attempt + 1` — a synchronous loop with nothing between the turns. Verified in the
+  dependency's source, not assumed.
+
+  So any refusal that does not fix itself by being retried sooner — a credential the venue
+  has stopped honouring, an IP it has started refusing, a maintenance window, a 503 — became
+  a connect storm at full speed for as long as it lasted. CLAUDE.md's testing tiers already
+  say what a venue does about traffic like that: "a venue that sees a package polling it on
+  a timer will rate-limit or block". A reconnect storm is that, without the timer.
+
+  `dp_exchange_schwab` was the only package in the family with reconnect backoff, and its
+  moduledoc had described this exact hazard, in these exact terms, the whole time.
+
+  **The attempt counter was in the argument all along.** This module used to state that it
+  "keeps no attempt counter", and declined to emit `Core.Telemetry.link_reconnect_attempt/3`
+  rather than invent one — refusing to invent was right, and the premise was wrong.
+  `attempt_number` is a documented key of the `connection_status_map` that
+  `handle_disconnect/2` already pattern-matches on, incremented by `websockex` for each
+  consecutive failed reconnect and reset each time a live session drops. Backoff and
+  telemetry now both run on it: attempt 1 still reconnects at once, every attempt after
+  doubles from 1s, capped at 30s.
+
+- **The backoff arithmetic crashed during a long storm — the one thing it existed to
+  survive.** `min(base * round(:math.pow(2, n)), max)` raises `ArithmeticError` once the
+  exponent passes 1023, because the float range ends at ~1.8e308, and clamping the *result*
+  does not help when the raise happens while computing the argument to `min/2`. At the
+  30-second cap that is roughly 8.5 hours of continuous failure — an ordinary overnight
+  outage — and the crash lands inside `handle_disconnect/2`, where it reads as this socket's
+  fault rather than the venue's. Now `Bitwise.bsl/2` with the exponent clamped before the
+  shift: no ceiling, exact, and every clamped value gives the identical answer since the cap
+  is already reached at exponent 5.
+
 ## [0.2.16] - 2026-09-11
 
 ### Fixed

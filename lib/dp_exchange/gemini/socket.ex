@@ -67,6 +67,59 @@ defmodule DpExchange.Gemini.Socket do
   @socket_connect_timeout_ms 3_000
   @socket_recv_timeout_ms 2_000
 
+  @base_reconnect_delay_ms 1_000
+  @max_reconnect_delay_ms 30_000
+
+  @doc """
+  How long to wait before the reconnect that `attempt` is about to make.
+
+  **`websockex` reconnects with no delay of its own.** `on_disconnect/5` in
+  `deps/websockex/lib/websockex.ex` calls `open_connection/3` and, on failure, calls itself
+  with `attempt + 1` — a synchronous loop with nothing between the turns. So a socket the
+  venue will not accept back reconnects at full connect speed, forever, and the things that
+  cause it are exactly the things that do not fix themselves by being retried sooner:
+  credentials the venue has stopped honouring, an IP it has started refusing, a maintenance
+  window, a 503. CLAUDE.md's own testing tiers say what a venue does about traffic like
+  that — "a venue that sees a package polling it on a timer will rate-limit or block" — and
+  a reconnect storm is that, without the timer.
+
+  **Attempt 1 waits nothing.** It is a live session that just dropped, and nothing about an
+  ordinary network blip suggests waiting helps. Every attempt after it is a reconnect that
+  has already failed at least once, so the wait doubles from #{@base_reconnect_delay_ms}ms,
+  capped at #{@max_reconnect_delay_ms}ms.
+
+  The same shape, and the same two constants, as `DpExchange.Schwab.Socket`'s
+  `reconnect_delay_ms/1`, which had this venue family's only reconnect backoff until now.
+  Its counter is `LOGIN_DENIED`s specifically because that venue can name its own auth
+  rejection; here the counter is `websockex`'s consecutive-failure count, which needs no
+  venue-specific signal and is already correct for every reason a reconnect can fail.
+  """
+  # Integer shifting, not `:math.pow/2`, and the exponent is clamped BEFORE the shift.
+  #
+  # `:math.pow(2, n)` is float arithmetic and raises `ArithmeticError` once `n` passes 1023,
+  # because the float range ends at ~1.8e308. Clamping the RESULT — `min(base * pow, max)` —
+  # does not help: the raise happens while computing the argument to `min/2`. So the
+  # function written to survive a reconnect storm crashed during a long one, at roughly
+  # attempt 1025, which at the 30-second cap is about 8.5 hours of continuous failure. That
+  # is an ordinary overnight outage or an access token nobody has refreshed yet, and the
+  # crash lands inside `handle_disconnect/2` where it reads as this socket's fault rather
+  # than the venue's.
+  #
+  # `Bitwise.bsl/2` has no such ceiling and is exact. The clamp exists only so the
+  # intermediate cannot grow without bound — the cap is already reached at exponent 5
+  # (`2^5 * @base_reconnect_delay_ms` exceeds `@max_reconnect_delay_ms`), so every clamped
+  # value produces the identical answer the unclamped one would have.
+  @max_backoff_exponent 30
+
+  @spec reconnect_delay_ms(pos_integer()) :: non_neg_integer()
+  def reconnect_delay_ms(attempt) when is_integer(attempt) and attempt <= 1, do: 0
+
+  def reconnect_delay_ms(attempt) when is_integer(attempt) do
+    exponent = min(attempt - 2, @max_backoff_exponent)
+
+    min(@base_reconnect_delay_ms * Bitwise.bsl(1, exponent), @max_reconnect_delay_ms)
+  end
+
   @doc """
   The `websockex` connection opts `start_link/1` passes to `WebSockex.start_link/4` —
   `:socket_connect_timeout` and `:socket_recv_timeout`, defaulted to this module's own
@@ -224,17 +277,32 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   @impl true
-  def handle_disconnect(%{reason: reason}, state) do
+  def handle_disconnect(%{reason: reason} = status, state) do
     notify(state, Notice.new(:link_down, :gemini, details: %{reason: inspect(reason)}))
     Telemetry.link_down(:gemini, inspect(reason))
 
-    # No `link_reconnect_attempt` here, deliberately. This socket reconnects immediately and
-    # keeps no attempt counter, so the only number it could report is `attempt: 1` — every
-    # time. A reconnect LOOP would then render as an endless series of first attempts, which
-    # is worse than no event: it looks like a venue flapping once, repeatedly, rather than a
-    # socket that cannot get back. `dp_exchange_schwab` tracks `login_failures` and does
-    # emit it. An invented counter is exactly the plausible-wrong-value this family keeps
-    # writing rules against.
+    # `attempt_number` comes from `websockex` itself. It is a documented key of the
+    # `connection_status_map` this function already pattern-matches on
+    # (`WebSockex.connection_status_map/0`), and `on_disconnect/5` increments it for each
+    # CONSECUTIVE failed reconnect, starting fresh at 1 each time a live session drops.
+    #
+    # This module used to state that it "keeps no attempt counter", and declined to emit
+    # `link_reconnect_attempt` rather than invent one. Refusing to invent was right; the
+    # premise was wrong — the real counter was in the argument all along. Both the backoff
+    # below and the event now run on the venue's own number rather than a local guess.
+    #
+    # `Map.get/3` rather than a pattern, so the unit tests that call this callback directly
+    # with a bare `%{reason: ...}` keep describing what they mean: one healthy session
+    # dropping, which still reconnects at once.
+    attempt = Map.get(status, :attempt_number, 1)
+    delay = reconnect_delay_ms(attempt)
+
+    Telemetry.link_reconnect_attempt(:gemini, attempt, delay)
+
+    # Blocks THIS socket process only, and only while it has no connection to serve anyway —
+    # the same trade `dp_exchange_schwab.Socket` already makes.
+    if delay > 0, do: Process.sleep(delay)
+
     {:reconnect, state}
   end
 
