@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-09-11
+
 ### Fixed
 
 - **`subscribe_notices/2` could kill the caller for asking during trouble.** It was the one
