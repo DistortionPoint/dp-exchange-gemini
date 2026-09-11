@@ -159,7 +159,7 @@ defmodule DpExchange.Gemini.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.{Capabilities, Notice}
+  alias DpExchange.Core.{Capabilities, Fanout, Notice}
   alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini.Socket
 
@@ -257,7 +257,14 @@ defmodule DpExchange.Gemini.Feed do
        # failure path was silent" section. `resubscribe/1` reads and writes this to fire a
        # `Core.Notice` exactly once per transition, matching `Core.PollingFeed`'s
        # `notice_state` field.
-       resubscribe_notice_state: :ok
+       resubscribe_notice_state: :ok,
+       # Back-pressure, per `Core.Venue`'s `subscribe/2` doc and implemented by
+       # `Core.Fanout`: `dropping` is the set of subscribers currently over their mailbox
+       # bound, carried across calls so a stalled consumer produces one `:degraded` notice
+       # when delivery to it stops and one when it resumes — never one per dropped message,
+       # which would arrive at the rate of the stream it already cannot keep up with.
+       dropping: MapSet.new(),
+       max_queue_len: Fanout.max_queue_len!(opts, :gemini)
      }}
   end
 
@@ -338,9 +345,13 @@ defmodule DpExchange.Gemini.Feed do
     {:noreply, state}
   end
 
+  # `track_delivery/2` runs whether or not the payload reached anybody. `coverage/1` reports
+  # what the VENUE delivered to this package, not what this package forwarded — a symbol
+  # whose frames are being dropped for a stalled consumer is still arriving, and reporting it
+  # as `:not_covered` would blame the venue for a consumer's backlog.
   def handle_info({:dp_exchange, :gemini, payload} = message, state) do
-    fan_out(state.subscribers, message)
-    {:noreply, track_delivery(state, payload)}
+    state = state |> deliver(message) |> track_delivery(payload)
+    {:noreply, state}
   end
 
   def handle_info(:resubscribe, state) do
@@ -557,6 +568,33 @@ defmodule DpExchange.Gemini.Feed do
   # A dead subscriber stops delivery. The venue must not accumulate events for a process
   # that no longer exists.
   #
+  # The venue's data stream, bounded — see `Core.Fanout`. Only a subscriber under its
+  # mailbox bound is sent to; one past it is skipped and reported once, in a `:degraded`
+  # notice, and reported again when it catches up.
+  #
+  # Notices themselves keep going through `fan_out/2` unbounded, and must: the notice saying
+  # a subscriber is being dropped cannot be the first casualty of that same subscriber being
+  # dropped. Notices are low-volume by construction here — link transitions, coverage
+  # changes, refusals — and have never been produced at a rate that could bury a consumer.
+  defp deliver(state, message) do
+    {_sent, dropping, transitions} =
+      Fanout.deliver(state.subscribers, message, state.dropping,
+        max_queue_len: state.max_queue_len
+      )
+
+    Enum.each(transitions, fn transition ->
+      fan_out(
+        state.notice_subscribers,
+        {:dp_exchange, :gemini, Fanout.notice_for(transition, :gemini, state.max_queue_len)}
+      )
+    end)
+
+    %{state | dropping: dropping}
+  end
+
+  # The UNBOUNDED path — notices only. See `deliver/2` above for why the data stream does not
+  # come through here and why notices deliberately still do.
+  #
   # A subscriber may be a raw pid or a registered name — `subscribe/2`'s `to:` accepts
   # either, matching ordinary OTP practice (a consumer registering itself by name and
   # handing that name to a producer). `Process.alive?/1` only accepts a pid and raises on
@@ -565,18 +603,16 @@ defmodule DpExchange.Gemini.Feed do
   # DpCryptoManagement's issue #15). Resolving first, uniformly, fixes both: a dead pid
   # resolves to itself and `Process.alive?/1` filters it; an unregistered name resolves
   # to `nil` and is silently skipped, the same as a dead subscriber already was.
+  #
+  # `Core.Fanout.resolve/1` is that resolution, shared: all five venues had written it
+  # identically, and `deliver/2` and this function have to agree on what counts as a
+  # reachable subscriber or a notice could go to a pid the data stream considers gone.
   defp fan_out(subscribers, message) do
     Enum.each(subscribers, fn subscriber ->
-      case resolve_subscriber(subscriber) do
+      case Fanout.resolve(subscriber) do
         pid when is_pid(pid) -> send(pid, message)
         nil -> :ok
       end
     end)
   end
-
-  defp resolve_subscriber(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: pid
-  end
-
-  defp resolve_subscriber(name) when is_atom(name), do: Process.whereis(name)
 end

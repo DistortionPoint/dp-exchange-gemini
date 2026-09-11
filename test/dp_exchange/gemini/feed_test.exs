@@ -97,6 +97,143 @@ defmodule DpExchange.Gemini.FeedTest do
     }
   end
 
+  describe "back-pressure — a slow subscriber does not get an unbounded mailbox" do
+    # `Core.Venue`'s `subscribe/2` doc promised this from the day the contract was written
+    # and no venue in this family implemented any of it: every one fanned out with a bare
+    # `send/2` and had never looked at a subscriber's mailbox. A consumer that stalls against
+    # a live book stream accumulated a mailbox until the node died, with no notice, no log
+    # line, and `coverage/1` reporting perfect health the whole time — because the feed
+    # genuinely was delivering.
+
+    # A subscriber that never consumes, so everything sent to it stays queued. That is what
+    # a stalled consumer looks like from the sender's side, and the only way to build a real
+    # backlog without guessing at timing.
+    defp stalled_subscriber do
+      pid = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp queue_len(pid) do
+      {:message_queue_len, len} = Process.info(pid, :message_queue_len)
+      len
+    end
+
+    test "past its bound, a subscriber stops being sent to and its mailbox stops growing" do
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 3)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: slow)
+
+      for _each <- 1..10 do
+        send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      end
+
+      # Synchronise: a call is answered only after every send above has been handled.
+      _settled = Feed.coverage(feed)
+
+      # Three got through, then the bound stopped it. Not ten, and — the point — not
+      # unbounded.
+      assert queue_len(slow) == 3
+    end
+
+    test "a stalled subscriber is reported once, and again when it catches up" do
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 1)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: slow)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert_receive {:dp_exchange, :gemini,
+                      %Notice{kind: :degraded, severity: :warning, details: details}}
+
+      assert details.bound == 1
+      assert details.dropping == :newest
+      assert details.subscriber == inspect(slow)
+
+      # Not once per dropped message: that would arrive at the rate of the stream the
+      # consumer already cannot keep up with, into the same fan-out that is overloaded.
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+      refute_receive {:dp_exchange, :gemini, %Notice{kind: :degraded}}, 100
+    end
+
+    test "one stalled subscriber does not cost a healthy one its data" do
+      # The property that makes dropping acceptable at all. A fan-out that stalled or
+      # dropped for everyone because one consumer fell behind would turn one misbehaving
+      # consumer into an outage for every other.
+      #
+      # The healthy subscriber is a forwarder rather than the test process itself: this test
+      # process is also `fake_socket/1`'s report target and never drains, so subscribing it
+      # would make it a second stalled consumer and prove the opposite of what is meant.
+      # That is not a quirk of the test — it is what a real slow consumer looks like, and it
+      # is why the first draft of this test failed.
+      slow = stalled_subscriber()
+      healthy = forwarding_subscriber(self())
+      feed = start_feed(max_queue_len: 2)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: slow)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: healthy)
+
+      for _each <- 1..6 do
+        send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      end
+
+      _settled = Feed.coverage(feed)
+
+      assert queue_len(slow) == 2
+      for _each <- 1..6, do: assert_receive({:forwarded, {:dp_exchange, :gemini, %Quote{}}}, 500)
+    end
+
+    # Consumes immediately and hands everything to `to`, so its own mailbox stays empty and
+    # it never trips the bound — a consumer keeping up, which is the case a stalled one has
+    # to be told apart from.
+    defp forwarding_subscriber(to) do
+      pid = spawn(fn -> forward_loop(to) end)
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp forward_loop(to) do
+      receive do
+        message ->
+          send(to, {:forwarded, message})
+          forward_loop(to)
+      end
+    end
+
+    test "a symbol whose frames are dropped for a slow consumer is still covered" do
+      # `coverage/1` reports what the VENUE delivered to this package, not what this package
+      # forwarded. Reporting `:not_covered` here would blame the venue for a consumer's own
+      # backlog — and send an operator looking at the wrong system entirely.
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 1)
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: slow)
+
+      for _each <- 1..5 do
+        send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
+      end
+
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+    end
+
+    test "an invalid bound fails at init, loudly, rather than falling back to the default" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(
+                 name: :"bad_bound_#{System.unique_integer([:positive])}",
+                 socket: fake_socket(self()),
+                 max_queue_len: "3"
+               )
+
+      assert message =~ ":gemini"
+      assert message =~ ":max_queue_len"
+    end
+  end
+
   describe "coverage is observed, never intended" do
     test "a subscribed symbol that has delivered nothing is absent" do
       # The strongest guarantee in the contract. A venue once reported 325 symbols
