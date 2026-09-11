@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A balance the venue did not attribute to an asset was returned as success.**
+  `Core.Types.Balance`'s `new/1` refuses a `nil` in `:currency`, and this decoder never
+  called `new/1` — it builds the struct literally, as all five venue packages do, 85 call
+  sites between them — so the check never ran and the field came straight out of the venue's
+  JSON by key. A renamed or absent key produced `%Balance{currency: nil}`: an amount
+  attributable to no asset, inside `{:ok, balances}`, which a consumer cannot size, book or
+  reconcile against. It is precisely the renamed-field scenario `Core.Types.Validate`'s
+  moduledoc was written for, arriving through the one path that bypassed the constructor
+  written to catch it.
+
+  Such a row now refuses the whole reply rather than being emitted or silently dropped —
+  dropping it would read as "you hold none of that asset", a different and more dangerous
+  claim than "this response could not be read".
+
+  **`:balance` is deliberately not guarded the same way.** `Core.Types.Balance` now states
+  that it may honestly be `nil` while `:currency` may not, and the two are not the same kind
+  of required: an unknown quantity is still a balance, an unattributable one is not.
+
 ## [0.2.15] - 2026-09-11
 
 ### Fixed

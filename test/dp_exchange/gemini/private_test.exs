@@ -318,6 +318,10 @@ defmodule DpExchange.Gemini.PrivateTest do
       # Decimal.new/1 used to raise here. balance is required by the type but this
       # package already tolerates nil there when the venue omits the field outright —
       # a malformed one is treated the same way rather than crashing the whole page.
+      #
+      # `Core.Types.Balance` now states this outright rather than leaving it to this test:
+      # `:balance` may honestly be `nil`, `:currency` may not. The two tests below are the
+      # other half of that rule.
       body = [%{"currency" => "USD", "amount" => "not-a-number", "available" => "90.00"}]
 
       assert {:ok, [balance]} =
@@ -325,6 +329,32 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       assert balance.balance == nil
       assert balance.hold == nil
+    end
+
+    test "a row with no currency refuses the whole reply" do
+      # `Core.Types.Balance`'s `new/1` refuses a nil `:currency`, and nothing here ever
+      # called `new/1` — this decoder builds the struct literally, as all five venues do —
+      # so the check never ran and the field came straight out of the venue's JSON by key.
+      # A renamed or absent `"currency"` gave `%Balance{currency: nil}`: an amount
+      # attributable to no asset, inside `{:ok, balances}`. Unlike a missing amount there is
+      # no reading of that a consumer can act on.
+      body = [%{"amount" => "100.00", "available" => "90.00"}]
+
+      assert {:error, :unexpected_response_shape} =
+               Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "one unattributable row refuses even when the others are fine" do
+      # Dropping it silently would be worse than refusing: a balance list with an entry
+      # missing reads as "you hold none of that currency", a different and more dangerous
+      # claim than "this response could not be read".
+      body = [
+        %{"currency" => "USD", "amount" => "100.00"},
+        %{"amount" => "5.00"}
+      ]
+
+      assert {:error, :unexpected_response_shape} =
+               Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
     end
   end
 
