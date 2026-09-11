@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`dp_exchange_core` floor raised to `~> 0.3.1`.** Core 0.3.0 deleted
+  `Core.DataProvider` and `Core.FeedBehaviour` — two contracts with zero implementers, one
+  of which was a **second, competing definition of the venue interface** carrying every
+  shape this family has since fixed (prices as strings, providers as strings, balances with
+  no timestamp, a single quote timestamp, `{:error, String.t()}` flattening the
+  refusal/error distinction). A venue author who found it first would have built all of
+  those, plausibly, and every one would have compiled.
+
+  **No code changes here**: this package referenced neither module. The floor moves because
+  a pin of `~> 0.2.8` would not resolve 0.3.x — the pin doing its job, not a problem to
+  route around — and because staying behind would leave this package on a Core that still
+  ships the contradicting contract.
+
+  Resolved and compiled against before the pin was written, per the rule this file's own
+  dependency comment already records: a floor is only correct once it has been *resolved*,
+  never once it has been reasoned about.
+
 ## [0.2.7] - 2026-09-11
 
 ### Added
