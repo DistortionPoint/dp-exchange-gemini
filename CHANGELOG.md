@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-09-11
+
 ### Changed
 
 - **CI runs `mix test --cover --warnings-as-errors`.** `mix compile --warnings-as-errors`
