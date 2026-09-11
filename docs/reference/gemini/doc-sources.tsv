@@ -26,3 +26,5 @@ https://developer.gemini.com/websocket/streams	200	-	2026-09-09	auto	The replace
 https://developer.gemini.com/rate-limit	200	-	2026-09-09	auto	The published rate ceilings and the stated burst depth this venue's limiter uses — one of the few venues in the family that documents a burst at all.
 https://developer.gemini.com/authentication/api-key	200	-	2026-09-09	auto	API-key auth scheme.
 https://developer.gemini.com/get-started/sandbox	200	-	2026-09-09	auto	Sandbox hosts, which tier-2 tests and `demo-environment.md` depend on.
+https://developer.gemini.com/websocket/introduction	200	-	2026-09-11	auto	The streams document `websocket-api-replacement.md` names as its source — the page whose ABSENCE of the old `marketdata` API was the only notice this venue gave that it had replaced the one this family ran on. Unlisted until 2026-09-11, found by this manifest's own coverage check.
+https://developer.gemini.com/specs/openapi/prediction-markets.yaml	200	-	2026-09-11	auto	One of the four OpenAPI/AsyncAPI documents `endpoint-inventory.md` diffs. The other three were listed and this one was not, which is precisely the kind of gap a manifest nobody audits accumulates.

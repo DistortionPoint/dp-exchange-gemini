@@ -20,6 +20,50 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`check_doc_sources.sh` now checks whether its own manifest is COMPLETE.** Everything it
+  did before verified the sources that were listed; nothing verified that the list covered
+  what this package's `docs/reference/` actually cites. A checker whose coverage nobody
+  audits reports "all sources resolve" while saying nothing about the sources it was never
+  told about.
+
+  The gap was real: `dp_exchange_gemini` cited 22 distinct URLs and listed 12, leaving two
+  genuine vendor documentation pages — the WebSocket streams introduction that
+  `websocket-api-replacement.md` names as its source, and one of the four API specifications
+  `endpoint-inventory.md` diffs — unchecked by anything.
+
+  Two classes, reported separately, because only one can be judged mechanically:
+
+  **UNLISTED** — cited on a host the manifest already names as documentation. Same vendor,
+  same docs site, different page: near-certainly a source that belongs in the manifest.
+
+  **UNKNOWN** — cited on a host the manifest does not name at all. Deliberately **not**
+  assumed to be documentation, because most are not: `api.gemini.com`,
+  `api.sandbox.webull.com` and `api.schwabapi.com` are venue APIs, and adding one here would
+  put a live venue into a **weekly scheduled fetch**. D7 is explicit that a venue seeing a
+  package poll it on a timer will rate-limit or block. These are listed for a person to
+  classify and never auto-added.
+
+  Non-blocking, like the rest of the script: it prints and does not change the exit code. An
+  unlisted page is a gap in evidence, not a broken build.
+
+- **Two vendor documentation sources this package cites were never being checked**, found by
+  the coverage check above on its first run: `developer.gemini.com/websocket/introduction` —
+  the streams document `websocket-api-replacement.md` names as its source, which is the page
+  whose *absence* of the old `marketdata` API was the only notice this venue ever gave that
+  it had replaced the API this family's price feed ran on — and
+  `specs/openapi/prediction-markets.yaml`, one of the four specification documents
+  `endpoint-inventory.md` diffs. The other three were listed; that one was not. Both read,
+
+- **All three of this package's scheduled checkers were run by hand for the first time, and
+  they pass.** Every one of them had never executed: they are scheduled weekly for Monday
+  and landed on a Tuesday, so no cron had come around. A checker nobody has watched run is a
+  checker nobody has proved works — and running these found the manifest-coverage gap above,
+  which is not the defect any of them was written to catch.
+
+  No vendor drift: every cited documentation source resolves exactly as recorded, and the
+  committed endpoint inventories match the vendors' current indexes.
 ## [0.2.9] - 2026-09-11
 
 ### Changed
