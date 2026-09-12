@@ -1775,7 +1775,7 @@ defmodule DpExchange.Gemini.Private do
   def get_positions(credentials, opts) do
     with {:ok, body, headers} <- post("/v1/positions", %{}, credentials, opts) do
       at = venue_time_or_nil(headers)
-      {:ok, body |> position_rows() |> Enum.map(&to_position(&1, at))}
+      body |> position_rows() |> to_positions(at)
     end
   end
 
@@ -1783,13 +1783,64 @@ defmodule DpExchange.Gemini.Private do
   defp position_rows(rows) when is_list(rows), do: rows
   defp position_rows(_other), do: []
 
+  # Refuses a position row this package cannot read, rather than reporting one that says
+  # nothing about what is held.
+  #
+  # `Core.Types.Position` enforces `:symbol`, `:side` and `:quantity`, and its `new/1` refuses
+  # a `nil` in any of them. Nothing here called `new/1` — the struct is built literally, as
+  # everywhere in this family — so that check never ran, and all three could be `nil` at once:
+  # `position_symbol/1` passes a `nil` through, and `position_side/1` and `position_size/1`
+  # both answer `nil` for a quantity `decimal/1` could not read.
+  #
+  # A position is a claim about what an account holds. One naming no instrument, or stating
+  # no size, is not a weaker claim — it is not a claim at all, and it sits in a list of real
+  # positions looking like one.
+  #
+  # **`side` is deliberately NOT guarded, and that is a decision this package already made.**
+  # A quantity of exactly zero yields `side: nil` from `position_side/1` — see
+  # `derivatives_test.exs`'s "a zero quantity has no side, because guessing one invents a
+  # direction". That `nil` is honest: the position is flat, and `:long` would be a direction
+  # nobody stated. Guarding the quantity is what matters, because a quantity that could not
+  # be READ is a different thing from one that is zero.
   defp to_position(row, at) when is_map(row) do
-    quantity = decimal(row["quantity"])
+    with {:ok, symbol} <- required_position_symbol(position_symbol(row["symbol"])),
+         {:ok, quantity} <- required_decimal(row["quantity"], :quantity) do
+      {:ok, position_struct(row, at, symbol, position_side(quantity), position_size(quantity))}
+    end
+  end
 
+  # A row that is not a map at all. This used to build a `%Position{}` with `symbol`, `side`
+  # and `quantity` all `nil` and hand it back inside `{:ok, positions}` — the same fabricating
+  # fallback `dp_exchange_robinhood.Rest.to_order/1` carried, in a different type and a
+  # different package. A caller could not tell it from a real position the venue had declined
+  # to describe: every field was plausible-looking `nil` and the tuple said success.
+  defp to_position(_row, _at), do: {:error, :unexpected_response_shape}
+
+  # One unreadable row refuses the whole reply rather than leaving a gap in it. A position
+  # list with an entry silently missing reads as "you hold none of that instrument", which is
+  # a different and more dangerous claim than "this response could not be read".
+  defp to_positions(rows, at) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_position(row, at) do
+        {:ok, position} -> {:cont, {:ok, [position | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, positions} -> {:ok, Enum.reverse(positions)}
+      error -> error
+    end
+  end
+
+  defp required_position_symbol(nil), do: {:error, {:missing_required_field, :symbol}}
+  defp required_position_symbol(symbol), do: {:ok, symbol}
+
+  defp position_struct(row, at, symbol, side, quantity) do
     %Position{
-      symbol: position_symbol(row["symbol"]),
-      side: position_side(quantity),
-      quantity: position_size(quantity),
+      symbol: symbol,
+      side: side,
+      quantity: quantity,
       instrument_type: position_instrument(row["instrument_type"]),
       average_cost: decimal(row["average_cost"]),
       mark_price: decimal(row["mark_price"]),
@@ -1800,16 +1851,6 @@ defmodule DpExchange.Gemini.Private do
       # Not published on this endpoint. `nil` is "not stated", never "no liquidation risk".
       liquidation_price: nil,
       leverage: nil,
-      venue_time: at,
-      provider: :gemini
-    }
-  end
-
-  defp to_position(_row, at) do
-    %Position{
-      symbol: nil,
-      side: nil,
-      quantity: nil,
       venue_time: at,
       provider: :gemini
     }
@@ -1832,8 +1873,11 @@ defmodule DpExchange.Gemini.Private do
 
   # A quantity of exactly zero has no side, and guessing one would invent a direction the
   # venue did not state.
-  defp position_side(nil), do: nil
-
+  #
+  # This and `position_size/1` below used to carry a `nil` clause for a quantity `decimal/1`
+  # could not read. `to_position/2` now guards that with `required_decimal/2` and refuses the
+  # row, so a `nil` can no longer reach either — dialyzer said so, and both clauses are gone
+  # rather than left as dead branches that read like a case someone still has to think about.
   defp position_side(quantity) do
     case Decimal.compare(quantity, Decimal.new(0)) do
       :lt -> :short
@@ -1842,7 +1886,6 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp position_size(nil), do: nil
   defp position_size(quantity), do: Decimal.abs(quantity)
 
   @doc """

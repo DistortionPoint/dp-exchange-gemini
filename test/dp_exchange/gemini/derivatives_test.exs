@@ -223,7 +223,11 @@ defmodule DpExchange.Gemini.DerivativesTest do
     test "notional value keeps the venue's sign, unlike quantity" do
       # It is a value, not a magnitude with a direction beside it; flipping it would change
       # what the number means.
-      body = %{"openPositions" => [%{"quantity" => "-0.2", "notional_value" => "-11900"}]}
+      body = %{
+        "openPositions" => [
+          %{"symbol" => "BTCGUSDPERP", "quantity" => "-0.2", "notional_value" => "-11900"}
+        ]
+      }
 
       assert {:ok, [position]} =
                Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
@@ -234,7 +238,12 @@ defmodule DpExchange.Gemini.DerivativesTest do
     test "realised and unrealised P&L are never merged" do
       body = %{
         "openPositions" => [
-          %{"quantity" => "1", "realised_pnl" => "12.5", "unrealised_pnl" => "100"}
+          %{
+            "symbol" => "BTCGUSDPERP",
+            "quantity" => "1",
+            "realised_pnl" => "12.5",
+            "unrealised_pnl" => "100"
+          }
         ]
       }
 
@@ -246,7 +255,7 @@ defmodule DpExchange.Gemini.DerivativesTest do
     end
 
     test "liquidation price is nil here, and that does not mean safe" do
-      body = %{"openPositions" => [%{"quantity" => "1"}]}
+      body = %{"openPositions" => [%{"symbol" => "BTCGUSDPERP", "quantity" => "1"}]}
 
       assert {:ok, [position]} =
                Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
@@ -256,9 +265,23 @@ defmodule DpExchange.Gemini.DerivativesTest do
 
     test "the instrument kind is an atom, and an unknown one is nil" do
       # A caller routes on this. The nearest atom that fits would be a guess it cannot see.
-      perp = %{"openPositions" => [%{"quantity" => "1", "instrument_type" => "perp"}]}
-      spot = %{"openPositions" => [%{"quantity" => "1", "instrument_type" => "spot"}]}
-      other = %{"openPositions" => [%{"quantity" => "1", "instrument_type" => "dated"}]}
+      perp = %{
+        "openPositions" => [
+          %{"symbol" => "BTCGUSDPERP", "quantity" => "1", "instrument_type" => "perp"}
+        ]
+      }
+
+      spot = %{
+        "openPositions" => [
+          %{"symbol" => "BTCGUSDPERP", "quantity" => "1", "instrument_type" => "spot"}
+        ]
+      }
+
+      other = %{
+        "openPositions" => [
+          %{"symbol" => "BTCGUSDPERP", "quantity" => "1", "instrument_type" => "dated"}
+        ]
+      }
 
       assert {:ok, [%{instrument_type: :perp}]} =
                Private.get_positions(@credentials, plug: responding(perp), retry_attempts: 0)
@@ -543,6 +566,56 @@ defmodule DpExchange.Gemini.DerivativesTest do
 
       assert_receive {:request, _path, _query, payload}
       assert payload["amount"] == "0.00000001"
+    end
+  end
+
+  describe "get_positions/2 — a row that is not a position" do
+    test "a row the venue did not attribute to an instrument refuses the whole reply" do
+      # `Core.Types.Position` enforces `:symbol` and its `new/1` refuses a `nil` there, but
+      # this decoder builds the struct literally so that check never ran. A position naming no
+      # instrument cannot be sized, closed or reconciled — it is not a weaker claim about what
+      # is held, it is not a claim at all, and it sat in a list of real positions looking like
+      # one.
+      body = %{"openPositions" => [%{"quantity" => "1"}]}
+
+      assert {:error, {:missing_required_field, :symbol}} =
+               Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "an unreadable quantity refuses — it is not the same as a flat position" do
+      # A quantity of exactly zero is flat and keeps `side: nil` (see "a zero quantity has no
+      # side" above). A quantity that could not be READ is a different thing, and reporting it
+      # as a position with no size says nothing about what is held.
+      body = %{"openPositions" => [%{"symbol" => "BTCGUSDPERP", "quantity" => "not a number"}]}
+
+      assert {:error, {:invalid_decimal, :quantity, "not a number"}} =
+               Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "a row that is not a map is refused, not turned into an all-nil position" do
+      # This used to build a `%Position{}` with `symbol`, `side` and `quantity` all `nil` and
+      # hand it back inside `{:ok, positions}` — the same fabricating fallback
+      # `dp_exchange_robinhood.Rest.to_order/1` carried, in a different type and package. A
+      # caller could not tell it from a real position the venue had declined to describe.
+      body = %{"openPositions" => ["not a position"]}
+
+      assert {:error, :unexpected_response_shape} =
+               Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "one unreadable row refuses the whole reply rather than leaving a gap" do
+      # A position list with an entry silently missing reads as "you hold none of that
+      # instrument", which is a different and more dangerous claim than "this response could
+      # not be read".
+      body = %{
+        "openPositions" => [
+          %{"symbol" => "BTCGUSDPERP", "quantity" => "1"},
+          %{"quantity" => "2"}
+        ]
+      }
+
+      assert {:error, {:missing_required_field, :symbol}} =
+               Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
     end
   end
 end

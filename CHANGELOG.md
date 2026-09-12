@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A position row the venue did not attribute to an instrument was reported as a position.**
+  `Core.Types.Position` enforces `:symbol` and its `new/1` refuses a `nil` there, but this
+  decoder builds the struct literally — as every decoder in this family does — so that check
+  never ran and the symbol came through by key. A position naming no instrument cannot be
+  sized, closed or reconciled by anyone: it is not a weaker claim about what is held, it is
+  not a claim at all, and it sat in a list of real positions looking like one.
+
+  One unattributable row now refuses the whole reply rather than being dropped. A position
+  list with an entry silently missing reads as "you hold none of that instrument", which is a
+  different and more dangerous claim than "this response could not be read".
+
+- **A reconnect-timing test failed under load while the behaviour was correct.** It asserted
+  the attempt-1 path returns in under 500ms, which is stricter than the claim needs — the
+  claim is "no backoff was applied", and the smallest backoff is a full second, so any time
+  under one proves it. Measured against that boundary now. Same shape as the rate-limiter
+  bucket race and `Core.PollingFeed`'s poll-interval waits: a timing assertion that holds
+  when the machine is quiet and inverts when it is not.
+
 ## [0.2.25] - 2026-09-12
 
 ### Fixed

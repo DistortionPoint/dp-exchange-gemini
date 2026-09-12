@@ -322,7 +322,13 @@ defmodule DpExchange.Gemini.SocketTest do
       assert {:reconnect, _state} =
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, state())
 
-      assert System.monotonic_time(:millisecond) - started < 500
+      # Against the smallest possible BACKOFF (1s at attempt 2), not an arbitrary budget.
+      # This asserted `< 500`, which is stricter than the claim needs — the claim is "no
+      # backoff was applied", and any wait under a second proves that. Under a loaded
+      # full-suite run the 500ms version failed while the behaviour was correct, which is the
+      # same timing-assertion-holds-when-quiet shape as the rate-limiter bucket race and
+      # `Core.PollingFeed`'s poll-interval waits.
+      assert System.monotonic_time(:millisecond) - started < 1_000
     end
 
     test "handle_disconnect/2 actually waits once reconnects are failing" do
