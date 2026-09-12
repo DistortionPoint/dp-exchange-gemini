@@ -19,6 +19,8 @@ what was run against the live venue, and when. "Marked proven" with no evidence 
 acceptable changelog line.
 
 ## [Unreleased]
+
+## [0.2.23] - 2026-09-12
 ### Fixed
 
 - **A candle row could carry a `nil` price, and an unreadable bar time became 1 January
