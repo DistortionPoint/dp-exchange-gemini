@@ -19,7 +19,44 @@ what was run against the live venue, and when. "Marked proven" with no evidence 
 acceptable changelog line.
 
 ## [Unreleased]
+### Fixed
 
+- **A candle row could carry a `nil` price, and an unreadable bar time became 1 January
+  1970.** `row_to_candle/3` built `%Core.Types.Candle{}` literally and put the four prices
+  through bare `decimal/1`, which answers `nil` for an absent, empty, unparseable, NaN or
+  Infinity value. `Candle` enforces all four and its `new/1` refuses a `nil` in any of them,
+  but nothing here called `new/1` — and `Types.Validate`'s moduledoc uses this exact type as
+  its worked example of that gap. `dp_exchange_coinbase` and `dp_exchange_webull` both guard
+  all four with `required_decimal/2`; this module already had that helper and the candle
+  decoder was the one place not using it.
+
+  **`opened_at` was worse than unguarded — it was substituted.** `to_integer/1` answered `0`
+  for a string `Integer.parse/1` could not read, and `0` went straight into
+  `DateTime.from_unix!/2`: a bar opened at the Unix epoch, sorted to the front of the series,
+  every price in it real. It also raised on a `nil` (no clause) and on an integer outside
+  `DateTime`'s range, and accepted `Integer.parse/1`'s leading run, so `"1757000000000-ish"`
+  became a timestamp with the rest thrown away. All four are now one refusal.
+
+  A row that is not six elements used to raise `FunctionClauseError` out of the caller's own
+  process; it returns `{:error, :unexpected_response_shape}`. One unreadable bar refuses the
+  whole series rather than leaving a gap in it — a candle list with a bar silently missing
+  reads as "the venue published nothing for that minute", which a consumer treats as a real
+  gap in the market rather than as a decode failure.
+
+- **An order book whose level timestamps were all unreadable was dated 1970.** `to_integer/1`
+  answered `0`, `book_time/1` takes the maximum, and `0` is a timestamp — so a book where
+  nothing could be read got a valid-looking `DateTime` from 1970 rather than the
+  `{:error, :missing_venue_timestamp}` that function already returns when no level carries a
+  timestamp at all.
+
+  **A test named for this asserted the opposite.** "an unreadable level timestamp does not
+  become the epoch" asserted `book.venue_time == DateTime.from_unix!(0)`, with a comment
+  defending it: the 1970 date "every staleness check would then reject — loudly, which is the
+  point". It is not loud. `DateTime.from_unix!(0)` is a valid `DateTime`, and the argument
+  assumes a staleness check this package neither requires nor can see. The test now asserts
+  what its name always said, and a second one pins the other half: one unreadable stamp among
+  readable ones still dates the book, because only a book where nothing could be read cannot
+  be dated.
 ## [0.2.22] - 2026-09-12
 ### Changed
 

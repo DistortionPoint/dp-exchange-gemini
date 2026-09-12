@@ -272,11 +272,12 @@ defmodule DpExchange.Gemini.Rest do
     with {:ok, path, time_frame} <- candles_path(native, timeframe),
          :ok <- range_within_window(timeframe, range),
          {:ok, rows} <- get_body("#{path}/#{native}/#{time_frame}", opts) do
-      {:ok,
-       rows
-       |> Enum.map(&row_to_candle(&1, symbol, timeframe))
-       |> Enum.filter(&within?(&1, range))
-       |> Enum.sort_by(& &1.opened_at, DateTime)}
+      with {:ok, candles} <- rows_to_candles(rows, symbol, timeframe) do
+        {:ok,
+         candles
+         |> Enum.filter(&within?(&1, range))
+         |> Enum.sort_by(& &1.opened_at, DateTime)}
+      end
     end
   end
 
@@ -1098,8 +1099,15 @@ defmodule DpExchange.Gemini.Rest do
   defp book_time(%{"bids" => bids, "asks" => asks}) do
     (List.wrap(bids) ++ List.wrap(asks))
     |> Enum.map(&Map.get(&1, "timestamp"))
-    |> Enum.reject(&is_nil/1)
+    # Rejected AFTER `to_integer/1`, not before. It used to answer `0` for a string it could
+    # not read, and `0` is a timestamp: with every level unreadable the max is `0` and the
+    # book is stamped 1 January 1970 — a value that passes every type check and every
+    # freshness comparison in the wrong direction. It answers `nil` now, which this pipeline
+    # already knows how to say, and an all-unreadable set becomes
+    # `{:error, :missing_venue_timestamp}` — the honest answer, and one this function's own
+    # vocabulary already had.
     |> Enum.map(&to_integer/1)
+    |> Enum.reject(&is_nil/1)
     |> Enum.max(fn -> nil end)
     |> case do
       nil -> {:error, :missing_venue_timestamp}
@@ -1148,18 +1156,93 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
+  # Refuses a candle row this package cannot read, rather than building one out of whatever
+  # survived.
+  #
+  # `Core.Types.Candle` enforces `:open`, `:high`, `:low`, `:close` and `:opened_at`, and its
+  # `new/1` refuses a `nil` in any of them. Nothing here called `new/1` — this built the
+  # struct literally — so the check never ran, and the four prices went through bare
+  # `decimal/1`, which answers `nil` for an absent, empty, unparseable, NaN or Infinity
+  # value. `Types.Validate`'s moduledoc uses this exact type as its worked example of the
+  # gap: "`struct!(Candle, open: nil, ...)` builds without complaint, even though `Candle`'s
+  # own typespec declares `open: Decimal.t()`". `dp_exchange_coinbase` and
+  # `dp_exchange_webull` both guard all four with `required_decimal/2`; this module already
+  # had that helper and this decoder was the one place not using it.
+  #
+  # **`opened_at` was worse than unguarded — it was substituted.** `to_integer/1` answered
+  # `0` for a string `Integer.parse/1` could not read, so a malformed timestamp became
+  # `DateTime.from_unix!(0)`: a candle opened on 1 January 1970, sorted to the front of the
+  # series, every price in it real. That is the family's named failure exactly — a plausible
+  # value carrying the wrong meaning — and it is why `candle_time/1` below returns an error
+  # rather than a number. The same function also raised on a `nil` or a map (no clause) and
+  # on an integer outside `DateTime`'s range (`from_unix!`), so the honest answers and the
+  # crashes are now one refusal.
+  #
+  # `volume` stays unguarded on purpose: it is not an enforced key, and a venue that did not
+  # state a volume has not stated one.
   defp row_to_candle([time_ms, open, high, low, close, volume], symbol, timeframe) do
-    %Candle{
-      symbol: symbol,
-      timeframe: timeframe,
-      opened_at: DateTime.from_unix!(to_integer(time_ms), :millisecond),
-      open: decimal(open),
-      high: decimal(high),
-      low: decimal(low),
-      close: decimal(close),
-      volume: decimal(volume),
-      provider: :gemini
-    }
+    with {:ok, opened_at} <- candle_time(time_ms),
+         {:ok, open} <- required_decimal(open, :open),
+         {:ok, high} <- required_decimal(high, :high),
+         {:ok, low} <- required_decimal(low, :low),
+         {:ok, close} <- required_decimal(close, :close) do
+      {:ok,
+       %Candle{
+         symbol: symbol,
+         timeframe: timeframe,
+         opened_at: opened_at,
+         open: open,
+         high: high,
+         low: low,
+         close: close,
+         volume: decimal(volume),
+         provider: :gemini
+       }}
+    end
+  end
+
+  # A row that is not six elements. This used to have no such clause, so the venue sending a
+  # seventh field — or one fewer — raised `FunctionClauseError` out of a `GenServer`'s own
+  # fetch rather than returning an error the caller could act on.
+  defp row_to_candle(_row, _symbol, _timeframe), do: {:error, :unexpected_response_shape}
+
+  # One unreadable row refuses the whole series rather than leaving a gap in it. A candle
+  # list with a bar silently missing reads as "the venue published nothing for that minute",
+  # which a consumer will treat as a real gap in the market rather than as a decode failure.
+  defp rows_to_candles(rows, symbol, timeframe) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case row_to_candle(row, symbol, timeframe) do
+        {:ok, candle} -> {:cont, {:ok, [candle | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, candles} -> {:ok, Enum.reverse(candles)}
+      error -> error
+    end
+  end
+
+  defp candle_time(value) when is_integer(value), do: from_unix_ms(value)
+  defp candle_time(value) when is_float(value), do: from_unix_ms(trunc(value))
+
+  defp candle_time(value) when is_binary(value) do
+    # The WHOLE string, not `Integer.parse/1`'s leading run. `{integer, _rest}` accepted
+    # `"1757000000000-ish"` as a timestamp and threw the rest away — the same
+    # partial-parse hazard `decimal/1` above is written against.
+    case Integer.parse(value) do
+      {milliseconds, ""} -> from_unix_ms(milliseconds)
+      _unparsable -> {:error, {:unparseable_venue_timestamp, value}}
+    end
+  end
+
+  defp candle_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+
+  defp from_unix_ms(milliseconds) do
+    case DateTime.from_unix(milliseconds, :millisecond) do
+      {:ok, at} -> {:ok, at}
+      {:error, _reason} -> {:error, {:unparseable_venue_timestamp, milliseconds}}
+    end
   end
 
   defp within?(candle, range) do
@@ -1238,15 +1321,21 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
+  # `nil` for anything unreadable, never `0`. See `book_time/1`, its only caller, for what
+  # the `0` cost. `{integer, ""}` rather than `{integer, _rest}` for the same reason
+  # `decimal/1` above requires the whole string consumed: a leading run of digits out of
+  # `"1757000000000-ish"` is a number this package invented, not one the venue sent.
   defp to_integer(value) when is_integer(value), do: value
   defp to_integer(value) when is_float(value), do: trunc(value)
 
   defp to_integer(value) when is_binary(value) do
     case Integer.parse(value) do
-      {integer, _rest} -> integer
-      :error -> 0
+      {integer, ""} -> integer
+      _unparsable -> nil
     end
   end
+
+  defp to_integer(_other), do: nil
 
   # Sort key only — never used to bucket or window-check a real candle, so an
   # approximation here is not the family's forbidden kind. `1w` and `1M` have no

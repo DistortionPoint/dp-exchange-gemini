@@ -87,15 +87,44 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
     end
 
     test "an unreadable level timestamp does not become the epoch" do
-      # `to_integer` answering 0 for unparseable input would date the book to 1970, which
-      # every staleness check would then reject — loudly, which is the point.
+      # This test's NAME was always right and its assertion was the opposite: it asserted
+      # `book.venue_time == DateTime.from_unix!(0)`, pinning the very substitution the name
+      # says must not happen. The old comment defended it — "`to_integer` answering 0 for
+      # unparseable input would date the book to 1970, which every staleness check would
+      # then reject — loudly, which is the point."
+      #
+      # It is not loud. `DateTime.from_unix!(0)` is a perfectly valid `DateTime`, and the
+      # argument assumes a staleness check this package neither requires nor can see. A
+      # consumer computing an age gets fifty-six years and may well skip the book; one that
+      # logs or charts the timestamp shows 1970 and calls it data. The honest answer was
+      # already in this function's own vocabulary: `{:error, :missing_venue_timestamp}` is
+      # what `book_time/1` returns when no level carries a timestamp at all, which is
+      # precisely what "none of them could be read" means.
+      #
+      # "Return `:error`. Raise. Refuse. Do not guess a value that looks right."
       body = %{
         "bids" => [%{"price" => "1", "amount" => "1", "timestamp" => "not a time"}],
         "asks" => []
       }
 
+      assert {:error, :missing_venue_timestamp} =
+               Rest.get_order_book("BTC-USD", plug: json(body), retry_attempts: 0)
+    end
+
+    test "one unreadable level timestamp among readable ones still dates the book" do
+      # The other half, and why `to_integer/1` answers `nil` rather than refusing outright:
+      # `book_time/1` takes the MAX across levels, so one unreadable stamp among real ones is
+      # not a book that cannot be dated. Only a book where nothing could be read is.
+      body = %{
+        "bids" => [
+          %{"price" => "1", "amount" => "1", "timestamp" => "not a time"},
+          %{"price" => "2", "amount" => "1", "timestamp" => 1_757_000_000}
+        ],
+        "asks" => []
+      }
+
       assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: json(body), retry_attempts: 0)
-      assert book.venue_time == DateTime.from_unix!(0)
+      assert book.venue_time == DateTime.from_unix!(1_757_000_000)
     end
   end
 
@@ -264,6 +293,107 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
   describe "the facade's own short forms" do
     test "coverage/0 answers for an unstarted default feed" do
       assert DpExchange.Gemini.coverage() == %{}
+    end
+  end
+
+  describe "candle rows the venue could not have meant" do
+    # `/v2/candles/{symbol}/{width}` answers an array of
+    # `[time_ms, open, high, low, close, volume]` arrays. `Core.Types.Candle` enforces
+    # `:opened_at` and all four prices, and its `new/1` refuses a `nil` in any of them — but
+    # this decoder builds the struct literally, so that check never ran here.
+    # `Types.Validate`'s moduledoc uses this exact type as its worked example of the gap.
+    #
+    # `dp_exchange_coinbase` and `dp_exchange_webull` both guard all four with
+    # `required_decimal/2`. This module already had that helper; the candle decoder was the
+    # one place not using it.
+
+    test "an unparseable price refuses the series rather than carrying a nil price" do
+      body = [[1_757_000_000_000, "not a number", "2", "1", "1.5", "10"]]
+
+      assert {:error, {:invalid_decimal, :open, "not a number"}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: json(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a NaN price refuses too — the guard this package added made nil reachable" do
+      # `decimal/1` maps "NaN" and "Inf" to `nil` rather than to a poisonous `Decimal`, which
+      # is right and which made a nil OHLC reachable from a value that was present all along.
+      body = [[1_757_000_000_000, "1", "NaN", "1", "1.5", "10"]]
+
+      assert {:error, {:invalid_decimal, :high, "NaN"}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: json(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "an unreadable bar time refuses rather than opening the bar in 1970" do
+      # `to_integer/1` answered `0` for a string `Integer.parse/1` could not read, and `0`
+      # went straight into `DateTime.from_unix!/2`: a bar opened 1 January 1970, sorted to
+      # the front of the series, every price in it real. The family's named failure exactly.
+      body = [["not a time", "1", "2", "1", "1.5", "10"]]
+
+      assert {:error, {:unparseable_venue_timestamp, "not a time"}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: json(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a partially numeric bar time is not read as its leading digits" do
+      body = [["1757000000000-ish", "1", "2", "1", "1.5", "10"]]
+
+      assert {:error, {:unparseable_venue_timestamp, "1757000000000-ish"}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: json(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a row that is not six elements is an unreadable response, not a crash" do
+      # There was no clause for this, so the venue adding a seventh field raised
+      # `FunctionClauseError` out of the caller's own process rather than returning an error.
+      body = [[1_757_000_000_000, "1", "2", "1", "1.5", "10", "extra"]]
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: json(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "one unreadable bar refuses the whole series rather than leaving a gap" do
+      # A candle list with a bar silently missing reads as "the venue published nothing for
+      # that minute", which a consumer treats as a real gap in the market rather than as a
+      # decode failure.
+      body = [
+        [1_757_000_000_000, "1", "2", "1", "1.5", "10"],
+        [1_757_000_060_000, "1", "2", "1", "", "10"]
+      ]
+
+      assert {:error, {:invalid_decimal, :close, ""}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: json(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "an ordinary row still decodes" do
+      body = [[1_757_000_000_000, "1", "2", "0.5", "1.5", "10"]]
+
+      assert {:ok, [candle]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: json(body),
+                 retry_attempts: 0
+               )
+
+      assert candle.opened_at == DateTime.from_unix!(1_757_000_000_000, :millisecond)
+      assert Decimal.equal?(candle.open, Decimal.new("1"))
+      assert Decimal.equal?(candle.close, Decimal.new("1.5"))
+      assert Decimal.equal?(candle.volume, Decimal.new("10"))
+      assert candle.provider == :gemini
     end
   end
 end
