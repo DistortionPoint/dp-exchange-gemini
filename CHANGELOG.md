@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-09-12
+
 ### Fixed
 
 - **Two conformance assertions were inert here, and are not any more.** Core's assertions 14
