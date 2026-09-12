@@ -20,7 +20,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fill could be returned with no order id, no side, no quantity, no price and no time.**
+  `to_fill/2` built `%Core.Types.Fill{}` literally and guarded none of them. `Fill`'s `new/1`
+  refuses a `nil` in `:order_id`, `:symbol`, `:side`, `:quantity`, `:price` and `:timestamp`,
+  but nothing here called `new/1`, so one malformed row produced an execution record that
+  reconciles to nothing, inside `{:ok, fills}`.
+
+  **`to_string/1` was the sharpest part.** `to_string(nil)` is `""`, so a row with no
+  `order_id` produced `order_id: ""` — a value that passes every `nil` check a consumer might
+  write while identifying no order at all. An empty string is not a weaker id; it is a
+  different kind of wrong, because `nil` is at least detectable. `trade_id` keeps its `nil`,
+  since `Fill` does not enforce it and only one of the two ids may legitimately be absent.
+
+  One unreadable fill now refuses the whole page rather than leaving a gap in it: a trade
+  history with an execution silently missing is the one shape a consumer cannot detect,
+  because it reconciles to a smaller number and looks complete.
+
+  `fee`, `fee_currency` and `liquidity` stay unguarded — none is enforced, and a venue that
+
 ## [0.2.23] - 2026-09-12
+
 ### Fixed
 
 - **A candle row could carry a `nil` price, and an unreadable bar time became 1 January
@@ -59,7 +80,9 @@ acceptable changelog line.
   what its name always said, and a second one pins the other half: one unreadable stamp among
   readable ones still dates the book, because only a book where nothing could be read cannot
   be dated.
+
 ## [0.2.22] - 2026-09-12
+
 ### Changed
 
 - **`usage-rules.md` documents the error shapes this package started returning this week.**
@@ -576,7 +599,6 @@ acceptable changelog line.
   The issue measured five packages, from their `deps/`. `dp_exchange_schwab` has the same
   defect and is not one of their dependencies, so it could not appear in their table: six
   instances, all fixed here.
-
 
 ## [0.2.3] and earlier - 2026-09-10
 
@@ -1441,7 +1463,6 @@ the last block that will ever need a range.
   `revoke_access_token/1` **requires an OAuth token** and refuses an API key — an
   API-key-signed call there would revoke nothing and come back shaped like success.
 
-
 - **Clearing, all eight endpoints**: `create_clearing_order/2`,
   `create_broker_clearing_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`,
   `confirm_clearing_order/3`, `list_clearing_orders/1`, `list_clearing_brokers/1` and
@@ -1471,7 +1492,6 @@ the last block that will ever need a range.
 
   `list_clearing_trades/1`'s `since_nanos` is **nanoseconds** — the one Gemini timestamp that
   is not milliseconds.
-
 
 - **Perpetuals and margin, twelve endpoints.** `get_positions/1`, `get_funding/2`,
   `get_contract_stats/2` and `next_funding_timestamp/2`; `get_account_margin/1`,
@@ -1520,7 +1540,6 @@ the last block that will ever need a range.
   there; the package's claim of `[:spot]` was a statement about the package that had stopped
   being true.
 
-
 - **Custodial staking, all six endpoints**: `get_staking_rates/1` (public,
   `GET /v1/staking/rates`), `get_staking_balances/1`, `get_staking_rewards/1`,
   `get_staking_history/1`, `stake/3` and `unstake/3`.
@@ -1552,7 +1571,6 @@ the last block that will ever need a range.
   kept in `:venue_type` — a normalisation that loses the original cannot be audited when it
   turns out to be wrong.
 
-
 - **Notional balances and custody fees**, closing this venue's fund-management surface:
   `get_notional_balances/3` (`/v1/notionalbalances/{currency}`) and `list_custody_fees/2`
   (`/v1/custodyaccountfees`).
@@ -1570,7 +1588,6 @@ the last block that will ever need a range.
   set and there is no path taking a method identifier. Filtering the listing here would
   answer with a snapshot while looking like a read, which is the distinction that callback
   exists to draw.
-
 
 - **The rest of money movement: payment methods, internal transfers, the allowlist writes
   and the transaction ledger.** `list_payment_methods/2`, `add_payment_method/2`,
@@ -1592,7 +1609,6 @@ the last block that will ever need a range.
 
   `get_transactions/2` returns every kind the venue records — fees and adjustments alongside
   fills and deposits.
-
 
 - **Money movement: `get_deposit_address/3`, `list_approved_addresses/1`,
   `estimate_withdrawal_fee/4` and `withdraw/5`.** All four were `:unsupported`. This is the
@@ -1629,7 +1645,6 @@ the last block that will ever need a range.
   The fee estimate carries the destination, because fees differ by address on some networks
   and an estimate for one does not hold for another.
 
-
 - **`list_networks/2` and `list_fee_promos/1`.**
 
   **`list_networks/2` is the call that has to happen before `get_deposit_address/3`.** That
@@ -1652,7 +1667,6 @@ the last block that will ever need a range.
   a caller computing cost from the schedule alone is wrong for exactly these symbols. An
   empty list means no promotions are running, which is a real state.
 
-
 - **`get_historical_prices/4` routes perpetuals to `/v2/derivatives/candles`, which serves
   `1m` and nothing else.**
 
@@ -1665,7 +1679,6 @@ the last block that will ever need a range.
   falling back to the spot path would answer about a different instrument, and falling back
   to `1m` would relabel someone else's bars. Routing is on `SymbolFormat.perpetual?/1`,
   measured against the venue's own catalogue rather than guessed from the name.
-
 
 - **`get_fx_rate/3` — `/v2/fxrate/{pair}/{timestamp}`.**
 
@@ -1682,7 +1695,6 @@ the last block that will ever need a range.
 
   The venue's own `asOf` wins over the instant asked for: it may answer for a nearby moment,
   and its word is what happened. Requires the Auditor role, which the vendor states.
-
 
 - **The socket delivers the whole channel surface, not just `bookTicker`.** `subscribe/3`
   and `unsubscribe/3` take a channel and build the address through `WsChannels` — **the
@@ -1703,7 +1715,6 @@ the last block that will ever need a range.
   **The new clauses are ordered before `bookTicker`'s**, which is load-bearing: a depth diff
   carries `s`, `b` and `a` too, so the older clause matched it and tried to read an array of
   levels as a price.
-
 
 - **The WebSocket surface: all twenty-two channels, their addresses, and decoders for the
   market-data frames.** From the vendor's **AsyncAPI document**, read 2026-09-01 — not the
@@ -1738,7 +1749,6 @@ the last block that will ever need a range.
   appended is not a channel the venue has, and subscribing to it produces silence rather
   than a refusal.
 
-
 - **`get_trades/2` — the public tape**, `/v1/trades/{symbol}`. Not `get_trade_history/2`,
   which is the credential's own fills.
 
@@ -1755,7 +1765,6 @@ the last block that will ever need a range.
   `opts[:since]` goes as the venue's `timestamp` in milliseconds and `since_tid` is passed
   through alongside it: the venue states `since_tid` wins, and **that precedence is left to
   the venue** rather than resolved here.
-
 
 - **`quote_conversion/4`, `commit_conversion/2` and `convert/4` — the Instant pair and the
   wrap endpoint.**
@@ -1826,7 +1835,6 @@ the last block that will ever need a range.
   order would cost, so it is still not implemented as one; answering the cost question with
   margin statistics is exactly the nearby substitute this family refuses. But the endpoint
   is real, it is a real capability, and the note now says so instead of denying it.
-
 
 ### Changed
 - **`get_transfers/2` calls `/v2/transfers`** (D6). The v1 path is absent from Gemini's

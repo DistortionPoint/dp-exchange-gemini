@@ -389,6 +389,112 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert fill.side == :buy
       assert fill.liquidity == :taker
       assert fill.symbol == "BTC-USD"
+      assert fill.trade_id == "2"
+    end
+
+    test "a row missing an execution field refuses rather than reporting an empty fill" do
+      # `Fill`'s `new/1` refuses a `nil` in `:order_id`, `:side`, `:quantity`, `:price` and
+      # `:timestamp`, but this decoder builds the struct literally so that check never ran,
+      # and it guarded none of them. A fill saying an unstated quantity traded at an unstated
+      # price at an unknown time is worse than no fill: it reconciles to nothing and says
+      # nothing about why.
+      complete = %{
+        "order_id" => "1",
+        "tid" => "2",
+        "price" => "100",
+        "amount" => "0.5",
+        "type" => "Buy",
+        "timestampms" => 1_787_936_147_000
+      }
+
+      for {field, expected} <- [
+            {"order_id", {:missing_required_field, :order_id}},
+            {"type", {:unknown_side, nil}},
+            {"amount", {:missing_required_field, :quantity}},
+            {"price", {:missing_required_field, :price}},
+            {"timestampms", {:unparseable_venue_timestamp, nil}}
+          ] do
+        assert {:error, ^expected} =
+                 Private.get_trade_history(@credentials,
+                   symbol: "BTC-USD",
+                   plug: responding([Map.delete(complete, field)]),
+                   retry_attempts: 0
+                 ),
+               "a fill row missing #{field} must be refused"
+      end
+    end
+
+    test "an absent order_id is not reported as an empty string" do
+      # `to_string(nil)` is `""`, so a row with no `order_id` produced `order_id: ""` — a
+      # value that passes every `nil` check a consumer might write while identifying no order
+      # at all. An empty string is not a weaker id; it is a different kind of wrong, because
+      # `nil` is at least detectable. The venue sending an explicit empty string is refused
+      # for the same reason.
+      for id <- [nil, ""] do
+        body = [
+          %{
+            "order_id" => id,
+            "price" => "100",
+            "amount" => "0.5",
+            "type" => "Buy",
+            "timestampms" => 1_787_936_147_000
+          }
+        ]
+
+        assert {:error, {:missing_required_field, :order_id}} =
+                 Private.get_trade_history(@credentials,
+                   symbol: "BTC-USD",
+                   plug: responding(body),
+                   retry_attempts: 0
+                 ),
+               "order_id #{inspect(id)} must be refused"
+      end
+    end
+
+    test "an absent trade_id stays nil — it is not an enforced field" do
+      # The other half. `trade_id` is not enforced by `Fill`, so it must not be tightened
+      # into the guard above: a venue that did not state one has not stated one, and `""`
+      # would be the same substitution in a field that is allowed to be absent.
+      body = [
+        %{
+          "order_id" => "1",
+          "price" => "100",
+          "amount" => "0.5",
+          "type" => "Buy",
+          "timestampms" => 1_787_936_147_000
+        }
+      ]
+
+      assert {:ok, [fill]} =
+               Private.get_trade_history(@credentials,
+                 symbol: "BTC-USD",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert fill.trade_id == nil
+    end
+
+    test "one unreadable fill refuses the whole page rather than leaving a gap" do
+      # A trade history with an execution silently missing is the one shape a consumer
+      # cannot detect: it reconciles to a smaller number and looks complete.
+      body = [
+        %{
+          "order_id" => "1",
+          "price" => "100",
+          "amount" => "0.5",
+          "type" => "Buy",
+          "timestampms" => 1_787_936_147_000
+        },
+        %{"order_id" => "2", "price" => "100", "type" => "Buy", "timestampms" => 1}
+      ]
+
+      assert {:error, {:missing_required_field, :quantity}} =
+               Private.get_trade_history(@credentials,
+                 symbol: "BTC-USD",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
     end
   end
 

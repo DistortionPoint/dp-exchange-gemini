@@ -342,7 +342,7 @@ defmodule DpExchange.Gemini.Private do
           |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
 
         with {:ok, rows, _headers} <- post("/v1/mytrades", params, credentials, opts) do
-          {:ok, Enum.map(List.wrap(rows), &to_fill(&1, symbol))}
+          rows |> List.wrap() |> to_fills(symbol)
         end
     end
   end
@@ -688,20 +688,98 @@ defmodule DpExchange.Gemini.Private do
   defp subtract_hold(_amount, nil), do: nil
   defp subtract_hold(amount, available), do: Decimal.sub(amount, available)
 
+  # Refuses a fill this package cannot read, rather than returning one that reconciles to
+  # nothing.
+  #
+  # A `Types.Fill` is an execution record — the value a consumer reconciles money against —
+  # and `Fill`'s `new/1` refuses a `nil` in `:order_id`, `:symbol`, `:side`, `:quantity`,
+  # `:price` and `:timestamp`. Nothing here called `new/1` (the struct is built literally, as
+  # everywhere in this family), so that check never ran, and this decoder guarded none of
+  # them. One malformed row produced a fill saying an unstated quantity traded at an unstated
+  # price at an unknown time, inside `{:ok, fills}`.
+  #
+  # **`to_string/1` was the sharpest part.** `to_string(nil)` is `""`, so a row with no
+  # `order_id` produced `order_id: ""` — a value that passes every `nil` check a consumer
+  # might write while identifying no order at all. An empty string is not a weaker id; it is
+  # a different kind of wrong, because `nil` is at least detectable.
+  #
+  # `fee`, `fee_currency` and `liquidity` stay unguarded on purpose: none is enforced, and a
+  # venue that did not state a fee has not stated one.
   defp to_fill(row, symbol) do
-    %Fill{
-      order_id: to_string(row["order_id"]),
-      trade_id: to_string(row["tid"]),
-      symbol: symbol,
-      side: side(row["type"] && String.downcase(row["type"])),
-      quantity: decimal(row["amount"]),
-      price: decimal(row["price"]),
-      fee: decimal(row["fee_amount"]),
-      fee_currency: row["fee_currency"],
-      timestamp: epoch_ms(row["timestampms"]),
-      liquidity: liquidity(row["aggressor"]),
-      provider: :gemini
-    }
+    with {:ok, order_id} <- required_id(row["order_id"], :order_id),
+         {:ok, side} <- required_side(row["type"]),
+         {:ok, quantity} <- required_decimal(row["amount"], :quantity),
+         {:ok, price} <- required_decimal(row["price"], :price),
+         {:ok, timestamp} <- required_time(row["timestampms"]) do
+      {:ok,
+       %Fill{
+         order_id: order_id,
+         trade_id: fill_id(row["tid"]),
+         symbol: symbol,
+         side: side,
+         quantity: quantity,
+         price: price,
+         fee: decimal(row["fee_amount"]),
+         fee_currency: row["fee_currency"],
+         timestamp: timestamp,
+         liquidity: liquidity(row["aggressor"]),
+         provider: :gemini
+       }}
+    end
+  end
+
+  # One unreadable fill refuses the whole page rather than leaving a gap in it. A trade
+  # history with an execution silently missing is the one shape a consumer cannot detect: it
+  # reconciles to a smaller number and looks complete.
+  defp to_fills(rows, symbol) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_fill(row, symbol) do
+        {:ok, fill} -> {:cont, {:ok, [fill | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, fills} -> {:ok, Enum.reverse(fills)}
+      error -> error
+    end
+  end
+
+  # `trade_id` is NOT enforced by `Fill`, so an absent one stays `nil` rather than becoming
+  # `""`. `to_string/1` was applied to both ids alike; only one of them may be absent.
+  defp fill_id(nil), do: nil
+  defp fill_id(value), do: to_string(value)
+
+  defp required_id(nil, field), do: {:error, {:missing_required_field, field}}
+  defp required_id("", field), do: {:error, {:missing_required_field, field}}
+  defp required_id(value, _field), do: {:ok, to_string(value)}
+
+  defp required_side(type) when is_binary(type) do
+    case side(String.downcase(type)) do
+      nil -> {:error, {:unknown_side, type}}
+      side -> {:ok, side}
+    end
+  end
+
+  defp required_side(other), do: {:error, {:unknown_side, other}}
+
+  defp required_time(value) do
+    case epoch_ms(value) do
+      nil -> {:error, {:unparseable_venue_timestamp, value}}
+      at -> {:ok, at}
+    end
+  end
+
+  # The same shape as `Rest`'s own copy. A `nil` out of `decimal/1` means "absent, empty,
+  # unparseable, or a NaN/Infinity this package refuses"; this is how a field says it may not
+  # carry that forward.
+  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
+
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
+    end
   end
 
   defp liquidity(true), do: :taker
