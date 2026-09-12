@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-09-12
+
 ### Fixed
 
 - **A socket that was GONE was reported as one that had been slow.** `send_rpc/3`'s `catch`
