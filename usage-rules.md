@@ -730,8 +730,46 @@ inclusion here rests on Gemini's own OpenAPI paths and response shapes rather th
 call — read `capabilities/0`'s own `measured_against` field for which is which, not this
 paragraph, if that provenance ever changes.
 
+## Error shapes that mean "do not act on this answer"
+
+Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.
+A consumer matching only `{:ok, _}` needs no change; one that enumerates error reasons
+should know them.
+
+`{:error, {:undecodable_response, :gemini}}` — the venue answered `2xx` with a body this
+package could not decode. The realistic cause is not malformed JSON from the venue; it is a
+`2xx` that never reached the venue, such as a captive portal or a CDN maintenance page
+answering `200 text/html`. **Worth retrying**: nothing about the request was wrong. This
+package used to substitute an empty object for such a body, which then decoded into a
+well-formed value with every field `nil` and was returned as success.
+
+`{:error, :unexpected_response_shape}` from `get_balances/2` — a balance row the venue did
+not attribute to an asset refuses the whole reply. An amount you cannot name an asset for
+cannot be sized, booked or reconciled against, and dropping the row silently would read as
+"you hold none of that asset", a different and more dangerous claim than "this response could
+not be read". **Not retryable on its own.**
+
+A `Balance`'s own `balance` field may still be `nil`, and that is a different statement: the
+venue named the asset and did not state a quantity for it. Read that as unknown, never as
+zero.
+
 ## Every negative here is audited
 
 `docs/reference/gemini/negative-claims.md` lists each one with the source and date consulted.
 This venue is also where the family learned that **positives go stale too** — a socket URL
 the vendor still published had stopped working, and only a live check said so.
+
+## A dead socket is not a slow one
+
+`subscribe/2` and `unsubscribe/2` answer `{:error, :send_timeout}` when the socket did not
+acknowledge a frame in time, and **`{:error, {:send_exit, reason}}` when the socket is gone**.
+The two used to be flattened into the first, and they call for opposite responses.
+
+`:send_timeout` is worth retrying: the frame may well have been delivered — the call only
+stopped waiting for the acknowledgement — and subscriptions are idempotent on this venue, so
+a duplicate costs nothing.
+
+`{:send_exit, :noproc}` is not. No number of retries makes a process that no longer exists
+accept the batch; the thing that needs doing is getting a new socket. If you drive the feed
+through `DpExchange.Gemini.Feed` this is already handled for you — the distinction matters if
+you hold a `Socket` pid yourself.

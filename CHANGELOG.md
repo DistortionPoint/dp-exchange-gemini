@@ -19,7 +19,18 @@ what was run against the live venue, and when. "Marked proven" with no evidence 
 acceptable changelog line.
 
 ## [Unreleased]
+### Changed
 
+- **`usage-rules.md` documents the error shapes this package started returning this week.**
+  Several calls that used to answer `{:ok, _}` with a value a consumer could not act on now
+  refuse instead, and none of those refusals had reached the document a consuming agent
+  actually reads. CLAUDE.md is explicit that `usage-rules.md` "is not optional and it is not
+  the README", and shipping the behaviour without it left a consumer to discover the new
+  shapes from a crash.
+
+  A consumer matching only `{:ok, _}` needs no change. One that enumerates error reasons now
+  has them, each with whether retrying is worth anything — which is the part that decides
+  what a caller does next, and the part a bare list of atoms would leave out.
 ## [0.2.21] - 2026-09-12
 
 ### Fixed
