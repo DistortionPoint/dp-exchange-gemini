@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.24] - 2026-09-12
+
 ### Fixed
 
 - **A fill could be returned with no order id, no side, no quantity, no price and no time.**
