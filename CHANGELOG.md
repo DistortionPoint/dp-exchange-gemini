@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.26] - 2026-09-12
+
 ### Fixed
 
 - **A position row the venue did not attribute to an instrument was reported as a position.**
