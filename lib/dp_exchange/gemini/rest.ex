@@ -483,13 +483,24 @@ defmodule DpExchange.Gemini.Rest do
   defp timestamp_ms(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
   defp timestamp_ms(other), do: other
 
+  # `to_string_or_nil/1` on the id, never `to_string/1`.
+  #
+  # `to_string(nil)` is `""`, so a row with no `tid` produced `id: ""` — a value that passes
+  # every `nil` check a consumer might write while identifying no print at all. An empty
+  # string is not a weaker id; it is a different kind of wrong, because `nil` is at least
+  # detectable. `Private.to_fill/2` carried the identical substitution and was fixed first;
+  # this is the same mistake in the sibling decoder, which is why it is worth saying twice.
+  #
+  # `WsDecode.to_trade/2` — the socket arm of the same type — already used the nil-preserving
+  # form. It was the one that did not guard `price` and `quantity`, which this function did.
+  # Each file held the fix the other needed.
   defp to_trade(row, symbol) do
     with {:ok, timestamp} <- trade_time(row),
          {:ok, price} <- required_decimal(Map.get(row, "price"), :price),
          {:ok, quantity} <- required_decimal(Map.get(row, "amount"), :quantity) do
       {:ok,
        %Trade{
-         id: row |> Map.get("tid") |> to_string(),
+         id: row |> Map.get("tid") |> to_string_or_nil(),
          symbol: symbol,
          # The taker's side. See the note on get_trades/2.
          side: trade_side(Map.get(row, "type")),
@@ -513,6 +524,11 @@ defmodule DpExchange.Gemini.Rest do
   # An undated print cannot be placed on a tape, and the local clock would place it wrongly
   # while looking right.
   defp trade_time(_row), do: {:error, :missing_venue_timestamp}
+
+  # `nil` stays `nil`. `to_string/1` would make it `""`, which reads as an id a consumer can
+  # compare and log while identifying nothing — see `to_trade/2`.
+  defp to_string_or_nil(nil), do: nil
+  defp to_string_or_nil(value), do: to_string(value)
 
   defp trade_side("buy"), do: :buy
   defp trade_side("sell"), do: :sell

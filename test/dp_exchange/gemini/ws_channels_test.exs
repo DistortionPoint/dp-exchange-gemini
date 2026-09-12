@@ -177,6 +177,33 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       refute trade.broken
       assert trade.provider == :gemini
     end
+
+    test "a frame with no price or no size is refused, not carried with a nil in it" do
+      # `Core.Types.Trade` enforces both and its `new/1` refuses a `nil` in either, but this
+      # decoder builds the struct literally so that check never ran, and both went through
+      # bare `decimal/1` — which answers `nil` for an absent, empty, unparseable, NaN or
+      # Infinity value. A trade reporting an unstated size at an unstated price still sits in
+      # the tape looking like a print that happened.
+      #
+      # `Rest.to_trade/2`, the REST arm of the same type, already guarded both. This module
+      # had the OTHER half of the pair right — `to_string_or_nil/1` on the id rather than
+      # `to_string/1` — and REST had that half wrong. Each file held the fix the other needed.
+      for field <- ["p", "q"] do
+        assert {:error, _reason} = WsDecode.to_trade(Map.delete(@trade, field), "BTC-USD"),
+               "a trade frame missing #{field} must be refused"
+      end
+
+      assert {:error, {:invalid_decimal, :price, "NaN"}} =
+               WsDecode.to_trade(%{@trade | "p" => "NaN"}, "BTC-USD")
+    end
+
+    test "a frame with no trade id keeps nil — never an empty string" do
+      # The half this module already had right, asserted so it stays that way.
+      # `to_string(nil)` is `""`, which passes every `nil` check a consumer might write while
+      # identifying no print at all.
+      assert {:ok, trade} = WsDecode.to_trade(Map.delete(@trade, "t"), "BTC-USD")
+      assert trade.id == nil
+    end
   end
 
   describe "timestamps are nanoseconds" do

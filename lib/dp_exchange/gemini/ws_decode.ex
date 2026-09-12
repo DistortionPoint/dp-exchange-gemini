@@ -43,17 +43,32 @@ defmodule DpExchange.Gemini.WsDecode do
 
   `aggressor` is **inverted from `m`**: see the moduledoc. `m: true` (buyer is maker) means
   the seller lifted, so the aggressor is `:sell`.
+
+  ## `price` and `quantity` are guarded, and were not
+
+  `Core.Types.Trade` enforces both, and its `new/1` refuses a `nil` in either. This builds the
+  struct literally, as everywhere in this family, so that check never ran here and both went
+  through bare `decimal/1` — which answers `nil` for an absent, empty, unparseable, NaN or
+  Infinity value. A trade reporting an unstated size at an unstated price still sits in the
+  tape looking like a print that happened.
+
+  `Rest.to_trade/2`, the REST arm of the same type, already guarded both. This module had the
+  other half of the pair right — `to_string_or_nil/1` on the id rather than `to_string/1`,
+  which is what keeps an absent id detectable instead of turning it into `""` — and REST had
+  that half wrong. Each file held the fix the other needed.
   """
   @spec to_trade(map(), String.t()) :: {:ok, Trade.t()} | {:error, term()}
   def to_trade(%{"p" => price, "q" => quantity} = frame, symbol) do
-    with {:ok, timestamp} <- nanosecond_time(frame["E"]) do
+    with {:ok, timestamp} <- nanosecond_time(frame["E"]),
+         {:ok, price} <- required_decimal(price, :price),
+         {:ok, quantity} <- required_decimal(quantity, :quantity) do
       {:ok,
        %Trade{
          id: frame |> Map.get("t") |> to_string_or_nil(),
          symbol: symbol,
          side: aggressor(frame["m"]),
-         price: decimal(price),
-         quantity: decimal(quantity),
+         price: price,
+         quantity: quantity,
          timestamp: timestamp,
          # The socket publishes no bust flag; a venue that says nothing has not said a
          # trade was busted.
@@ -219,6 +234,19 @@ defmodule DpExchange.Gemini.WsDecode do
 
   defp to_string_or_nil(nil), do: nil
   defp to_string_or_nil(value), do: to_string(value)
+
+  # The same shape as `Rest`'s own copy, including the split between an absent field and a
+  # present but unreadable one. A `nil` out of `decimal/1` means "absent, empty, unparseable,
+  # or a NaN/Infinity this package refuses"; this is how a field says it may not carry that
+  # forward.
+  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
+
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
+    end
+  end
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value

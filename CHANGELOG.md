@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The two arms of `Trade` each had the half the other was missing.**
+
+  `Rest.to_trade/2` guarded `price` and `quantity` and built the id with `to_string/1` —
+  and `to_string(nil)` is `""`, so a row with no `tid` produced `id: ""`, a value that passes
+  every `nil` check a consumer might write while identifying no print at all. `Private.to_fill/2`
+  carried the identical substitution and was fixed first; this is the same mistake in the
+  sibling decoder, which is why it is worth recording twice.
+
+  `WsDecode.to_trade/2` had the id right — `to_string_or_nil/1`, which keeps an absent id
+  detectable — and guarded neither `price` nor `quantity`. Both are enforced by
+  `Core.Types.Trade` and both went through bare `decimal/1`, which answers `nil` for an
+  absent, empty, unparseable, NaN or Infinity value. A trade reporting an unstated size at an
+  unstated price still sits in the tape looking like a print that happened.
+
+  Each file now has both halves, and each behaviour is asserted in the module that already
+  had it right so it cannot be lost the next time one is copied from the other.
+
 ## [0.2.24] - 2026-09-12
 
 ### Fixed

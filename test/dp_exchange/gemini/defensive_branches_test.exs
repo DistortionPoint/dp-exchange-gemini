@@ -396,4 +396,39 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
       assert candle.provider == :gemini
     end
   end
+
+  describe "a trade the venue did not identify" do
+    test "an absent tid stays nil rather than becoming an empty string" do
+      # `to_string(nil)` is `""`, so a row with no `tid` produced `id: ""` — a value that
+      # passes every `nil` check a consumer might write while identifying no print at all. An
+      # empty string is not a weaker id; it is a different kind of wrong, because `nil` is at
+      # least detectable.
+      #
+      # `Private.to_fill/2` carried the identical substitution and was fixed first; this is
+      # the same mistake in the sibling decoder. `WsDecode.to_trade/2` — the socket arm of
+      # this same type — already used the nil-preserving form.
+      body = [%{"price" => "1", "amount" => "1", "timestampms" => 1_757_000_000_000}]
+
+      assert {:ok, [trade]} =
+               Rest.get_trades("BTC-USD", plug: json(body), retry_attempts: 0)
+
+      assert trade.id == nil
+    end
+
+    test "a stated tid is still carried, as a string" do
+      body = [
+        %{
+          "tid" => 5_335_307_668,
+          "price" => "1",
+          "amount" => "1",
+          "timestampms" => 1_757_000_000_000
+        }
+      ]
+
+      assert {:ok, [trade]} =
+               Rest.get_trades("BTC-USD", plug: json(body), retry_attempts: 0)
+
+      assert trade.id == "5335307668"
+    end
+  end
 end
