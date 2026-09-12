@@ -20,6 +20,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A socket that was GONE was reported as one that had been slow.** `send_rpc/3`'s `catch`
+  mapped every exit out of `WebSockex.send_frame/2` to `{:error, :send_timeout}`, and those
+  are two different facts calling for opposite responses. `:send_timeout` is this package's
+  documented "retry the batch" signal (see `Feed`'s `@call_timeout` comment), and it is
+  right for a timeout: `:gen.call` giving up waiting does not mean the frame was never
+  delivered, and subscribes are idempotent here, so a retry is harmless. Against a `:noproc`
+  it is a loop with no exit condition — no number of retries makes a process that does not
+  exist accept the batch — while the thing actually needed, a new socket, went unsaid.
+
+  Now `{:error, {:send_exit, reason}}` for anything that is not a timeout, and both branches
+  log. `dp_exchange_coinbase.FrameSender` splits these two for the same reason and says so;
+  `dp_exchange_webull.Socket.disconnect/2` keeps `{kind, reason}` whole. This copy was the
+  only one of the three that flattened them, and the only one that logged nothing — a failed
+  send leaving no trace is the silent half-dead feed this family ranks worst.
+
+- **`mix.lock` held `dp_exchange_core` at a version predating assertion 24, so the new
+  conformance assertion never ran here.** The pin (`~> 0.3.3`) allows the newer Core, but
+  `mix.lock` is committed and CI runs `mix deps.get`, which honours it — so "the pin allows
+  it" and "CI resolves it" are different statements, and only the second one matters. Locked
+  forward to `0.3.7` and verified by breaking this package's fake on purpose: the suite now
+  fails where it previously stayed green.
+
 ## [0.2.17] - 2026-09-11
 
 ### Fixed

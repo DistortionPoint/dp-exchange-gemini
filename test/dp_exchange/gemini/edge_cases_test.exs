@@ -218,6 +218,23 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert {:error, :send_timeout} = Socket.subscribe(silent, ["BTC-USD"])
     end
 
+    test "a socket that is GONE is not reported as one that was slow" do
+      # Both are exits out of `WebSockex.send_frame/2` and this clause used to flatten them
+      # into `:send_timeout`. They call for opposite responses.
+      #
+      # `:send_timeout` is this package's documented "retry the batch" signal — see `Feed`'s
+      # `@call_timeout` comment — and it is right for a timeout, because `:gen.call` giving
+      # up waiting does not mean the frame was never delivered and subscribes are idempotent
+      # here. Against a dead socket it is a loop with no exit condition: no number of
+      # retries will make a process that does not exist accept the batch.
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+
+      assert {:error, {:send_exit, reason}} = Socket.subscribe(dead, ["BTC-USD"])
+      assert match?({:noproc, _call}, reason), "expected a :noproc exit, got #{inspect(reason)}"
+    end
+
     test "subscribing to nothing sends nothing" do
       assert Socket.subscribe(:no_such_socket, []) == :ok
       assert Socket.unsubscribe(:no_such_socket, []) == :ok

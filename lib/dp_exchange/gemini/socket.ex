@@ -174,9 +174,12 @@ defmodule DpExchange.Gemini.Socket do
   authenticates its connection, so a private channel can only ever fail at the venue, and
   telling a caller before the round trip is the whole reason that function exists.
 
-  Returns `{:error, :send_timeout}` rather than exiting when the socket will not accept the
-  frame — a caller can retry a batch, but it cannot recover from a linked exit it did not
-  expect.
+  Returns an error rather than exiting when the socket will not accept the frame — a caller
+  can retry a batch, but it cannot recover from a linked exit it did not expect. **Which
+  error says what to do about it**: `{:error, :send_timeout}` is a socket that did not
+  acknowledge in time and is worth retrying, since the frame may well have landed and
+  subscribes are idempotent here; `{:error, {:send_exit, reason}}` is a socket that is gone,
+  which no number of retries reaches. See `send_rpc/3` for why flattening the two was wrong.
   """
   @spec subscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
   def subscribe(socket, symbols, channel \\ :book_ticker) do
@@ -258,7 +261,40 @@ defmodule DpExchange.Gemini.Socket do
     frame = Jason.encode!(%{"method" => method, "params" => params, "id" => 1})
     WebSockex.send_frame(socket, {:text, frame})
   catch
-    :exit, _reason -> {:error, :send_timeout}
+    # BOUNDARY: `WebSockex.send_frame/2` is `:gen.call` with a 5s default, and on timeout it
+    # `exit`s rather than returning. Unconverted, that exit kills whatever sent the frame —
+    # here, the `Feed` managing this connection. Turning it into a value is the point.
+    #
+    # The two exits are now told apart, because `Feed` acts on the difference and this
+    # clause used to erase it. `:send_timeout` is this package's documented "retry the
+    # batch" signal (see `Feed`'s `@call_timeout` comment), and it is the right answer for a
+    # timeout: `:gen.call` giving up waiting does not mean the frame was never delivered,
+    # and subscribes are idempotent on this venue, so a retry is harmless.
+    #
+    # It is the wrong answer for `:noproc`. A socket that is gone will never accept this
+    # batch however many times it is re-sent, so "slow, try again" sends the caller round a
+    # loop whose exit condition can no longer occur — a nearby substitute where the value
+    # stays plausible and only the meaning is wrong, which is the failure this family keeps
+    # paying for. `{:send_exit, :noproc}` says the thing that actually needs doing: get a
+    # new socket.
+    #
+    # `dp_exchange_coinbase.FrameSender` splits these two for the same reason and says so;
+    # `dp_exchange_webull.Socket.disconnect/2` keeps `{kind, reason}` whole. This copy was
+    # the only one of the three that flattened them, and the only one that logged nothing —
+    # a failed send that leaves no trace is the silent half-dead feed this family ranks
+    # worst.
+    :exit, {:timeout, _call} ->
+      Logger.warning(
+        "[Gemini Socket] #{method}: socket did not accept the frame within WebSockex's 5s " <>
+          "send window — reporting a failed send rather than letting the exit take the " <>
+          "connection down"
+      )
+
+      {:error, :send_timeout}
+
+    :exit, reason ->
+      Logger.warning("[Gemini Socket] #{method}: send exited: #{inspect(reason)}")
+      {:error, {:send_exit, reason}}
   end
 
   # --- callbacks ----------------------------------------------------------
