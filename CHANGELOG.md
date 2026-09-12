@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-09-12
+
 ### Fixed
 
 - **`mix.lock` moved to `dp_exchange_core` 0.3.8, so assertion 24's refusal check runs
