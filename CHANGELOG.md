@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.25] - 2026-09-12
+
 ### Fixed
 
 - **The two arms of `Trade` each had the half the other was missing.**
