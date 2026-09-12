@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.21] - 2026-09-12
+
 ### Fixed
 
 - **`mix.lock` moved to `dp_exchange_core` 0.3.10.** It carries two conformance-suite
