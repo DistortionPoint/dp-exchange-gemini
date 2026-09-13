@@ -20,6 +20,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **A flat position row is dropped rather than reported with no side.** `get_positions/2`
+  built a `%Position{side: nil}` for a zero quantity, on the reasoning that "a quantity of
+  exactly zero has no side, and guessing one would invent a direction the venue did not
+  state". That reasoning is right and is not what changed — `:long` for a flat row would
+  still be a direction nobody stated.
+
+  What changed is that the question is moot once the row is not built, and the old answer was
+  a value with no meaning in the contract: `Core.Types.Position` enforces `:side` and types it
+  `:long | :short` with no `nil` in it, so `side: nil` was reachable only because this decoder
+  builds the struct literally and never calls `new/1`.
+
+  `Position.from_signed_quantity/1` states the resolution — *"a zero-quantity position should
+  generally not be built at all: a closed position is not an open one"* — and the venue agrees
+  with it: the list is called `openPositions`, and a zero row in it is not open.
+
+  Dropping rather than widening the contract is the **opposite** call from the one
+  `Core.Types.Trade` got the same day, and the difference is where the `nil` comes from. A
+  `nil` trade id is a fact the venue states about a print that really happened; a `nil`
+  position side is an artifact of a row that should not exist. Legalising it would also let a
+  genuine decode bug arrive looking like "flat".
+
+  **A quantity that could not be READ is still a refusal**, and that distinction is the one
+  this must not blur: one is a decode failure, the other a fact about the account. A test now
+  holds both halves.
+
 ## [0.2.29] - 2026-09-13
 
 ### Fixed

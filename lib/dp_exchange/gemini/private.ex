@@ -1796,16 +1796,40 @@ defmodule DpExchange.Gemini.Private do
   # no size, is not a weaker claim — it is not a claim at all, and it sits in a list of real
   # positions looking like one.
   #
-  # **`side` is deliberately NOT guarded, and that is a decision this package already made.**
-  # A quantity of exactly zero yields `side: nil` from `position_side/1` — see
-  # `derivatives_test.exs`'s "a zero quantity has no side, because guessing one invents a
-  # direction". That `nil` is honest: the position is flat, and `:long` would be a direction
-  # nobody stated. Guarding the quantity is what matters, because a quantity that could not
-  # be READ is a different thing from one that is zero.
+  # **A flat row is not a position, and is dropped.**
+  #
+  # This used to build one with `side: nil`, on the reasoning that "a quantity of exactly
+  # zero has no side, and guessing one would invent a direction the venue did not state".
+  # That reasoning is right and is not what changed — `:long` for a flat row would still be
+  # a direction nobody stated. What changed is that the question is moot once the row is not
+  # built, and the old answer was a value with no meaning in the contract:
+  # `Core.Types.Position` enforces `:side` and types it `:long | :short` with no `nil` in it,
+  # so `side: nil` was reachable only because this decoder builds the struct literally and
+  # never calls `new/1`.
+  #
+  # `Position.from_signed_quantity/1` states the resolution — "a zero-quantity position
+  # should generally not be built at all: a closed position is not an open one" — and the
+  # venue agrees with it: this list is called `openPositions`, and a zero row in it is not
+  # open.
+  #
+  # Dropping rather than widening the contract is the opposite call from the one `Trade` got
+  # the same day, and the difference is where the `nil` comes from. A `nil` trade id is a
+  # fact the venue states about a print that really happened; a `nil` position side is an
+  # artifact of a row that should not exist. Legalising it would also let a genuine decode
+  # bug arrive looking like "flat".
+  #
+  # A quantity that could not be READ is still a refusal, and that distinction is the one
+  # this must not blur: one is a decode failure, the other a fact about the account.
   defp to_position(row, at) when is_map(row) do
     with {:ok, symbol} <- required_position_symbol(position_symbol(row["symbol"])),
          {:ok, quantity} <- required_decimal(row["quantity"], :quantity) do
-      {:ok, position_struct(row, at, symbol, position_side(quantity), position_size(quantity))}
+      case position_side(quantity) do
+        nil ->
+          :flat
+
+        side ->
+          {:ok, position_struct(row, at, symbol, side, position_size(quantity))}
+      end
     end
   end
 
@@ -1824,6 +1848,7 @@ defmodule DpExchange.Gemini.Private do
     |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
       case to_position(row, at) do
         {:ok, position} -> {:cont, {:ok, [position | acc]}}
+        :flat -> {:cont, {:ok, acc}}
         error -> {:halt, error}
       end
     end)

@@ -211,13 +211,46 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert position.side == :long
     end
 
-    test "a zero quantity has no side, because guessing one invents a direction" do
-      body = %{"openPositions" => [%{"symbol" => "BTCGUSDPERP", "quantity" => "0"}]}
+    test "a flat row is not a position, so it is dropped rather than given no side" do
+      # This asserted `side == nil` until 2026-09-13, on the reasoning that "a zero quantity
+      # has no side, because guessing one invents a direction". That reasoning is right and
+      # is not what changed: guessing `:long` for a flat row would still invent a direction.
+      #
+      # What changed is that the question is now moot. `Core.Types.Position` enforces
+      # `:side` and types it `:long | :short` with no `nil` in it, so the old answer was a
+      # value with no meaning in the contract — reachable only because this decoder builds
+      # the struct literally and never calls `new/1`.
+      #
+      # `Position.from_signed_quantity/1` states the resolution: "a zero-quantity position
+      # should generally not be built at all: a closed position is not an open one". The
+      # venue agrees — this list is called `openPositions`, and a zero row in it is not open.
+      #
+      # Dropping beats widening the contract here, and that is the opposite call from the one
+      # `Trade` got the same day: a `nil` trade id is a fact the venue states about a print
+      # that really happened, while a `nil` position side is an artifact of a row that should
+      # not exist. Legalising it would also let a genuine decode bug arrive as "flat".
+      body = %{
+        "openPositions" => [
+          %{"symbol" => "BTCGUSDPERP", "quantity" => "0"},
+          %{"symbol" => "ETHGUSDPERP", "quantity" => "-0.2"}
+        ]
+      }
 
       assert {:ok, [position]} =
                Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
 
-      assert position.side == nil
+      assert position.symbol == "ETHGUSDPERP", "the real position survives"
+      assert position.side == :short
+      refute is_nil(position.side)
+    end
+
+    test "an unreadable quantity still refuses the whole reply, unlike a flat one" do
+      # The distinction the drop must not blur. A quantity that could not be READ is not a
+      # quantity of zero: one is a decode failure and the other is a fact about the account.
+      body = %{"openPositions" => [%{"symbol" => "BTCGUSDPERP", "quantity" => "not-a-number"}]}
+
+      assert {:error, {:invalid_decimal, :quantity, "not-a-number"}} =
+               Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
     end
 
     test "notional value keeps the venue's sign, unlike quantity" do
