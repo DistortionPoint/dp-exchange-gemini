@@ -409,8 +409,8 @@ defmodule DpExchange.Gemini.Rest do
       {:ok,
        %OrderBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
-         bids: levels(body["bids"]),
-         asks: levels(body["asks"]),
+         bids: levels(body["bids"], :desc),
+         asks: levels(body["asks"], :asc),
          venue_time: timestamp,
          observed_at: DateTime.utc_now(),
          provider: :gemini
@@ -1142,10 +1142,39 @@ defmodule DpExchange.Gemini.Rest do
 
   defp book_time(_other), do: {:error, :missing_venue_timestamp}
 
-  defp levels(nil), do: []
+  # **`book_time/1` stays strict, and that is NOT the same call `get_price/2` got.**
+  #
+  # The `Date`-header sweep that relaxed quotes and books on three other venues reached this
+  # function and stopped. The difference is where the time comes from: an HTTP `Date` header
+  # is metadata a venue may legitimately omit, so refusing a real price over it discarded the
+  # payload for the sake of a wrapper. This venue's book time comes from the LEVELS —
+  # `/v1/book` documents a `timestamp` on each one — so a book in which not one level's
+  # timestamp can be read is a response this package is misreading, not a venue declining to
+  # state a time.
+  #
+  # `defensive_branches_test.exs`'s "an unreadable level timestamp does not become the epoch"
+  # carries the incident: the assertion once pinned `DateTime.from_unix!(0)`, dating the book
+  # to 1970 while looking entirely valid. Refusing is what replaced it, and `venue_time: nil`
+  # here would be a third answer to a question that has already been settled once.
+  defp levels(nil, _direction), do: []
 
-  defp levels(rows) do
-    Enum.map(rows, fn row -> {decimal(row["price"]), decimal(row["amount"])} end)
+  # Sorted, and levels with an unreadable price dropped — the REST arm of the fix
+  # `WsDecode.to_order_book/3` got the same day. `Core.Types.OrderBook` makes the ordering
+  # part of the contract, and `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it,
+  # so `hd(bids)` must be able to answer "the best bid" with a real number.
+  #
+  # `{direction, Decimal}` rather than term order, because `Decimal` structs do not compare
+  # correctly as plain terms. A nil AMOUNT is kept: a level stating a price but no size is a
+  # real shape rather than an unreadable one.
+  defp levels(rows, direction) do
+    rows
+    |> Enum.flat_map(fn row ->
+      case decimal(row["price"]) do
+        nil -> []
+        price -> [{price, decimal(row["amount"])}]
+      end
+    end)
+    |> Enum.sort_by(fn {price, _amount} -> price end, {direction, Decimal})
   end
 
   defp time_frame(canonical) do

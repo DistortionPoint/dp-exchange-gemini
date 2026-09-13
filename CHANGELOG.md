@@ -20,6 +20,38 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_order_book/2` returned the venue's row order, and carried `{nil, _}` levels.** The
+  REST arm of the fix `WsDecode.to_order_book/3` got in 0.2.29 — fixing the streamed book and
+  leaving this one is the "fix applied where it was found rather than where it applies" this
+  family keeps paying for: same package, same type, a different module.
+
+  `Core.Types.OrderBook` makes the ordering part of the contract — *"a caller reading
+  `hd(bids)` as the best bid is reading it correctly"* — and `@type level ::
+  {Decimal.t(), Decimal.t()}` has no `nil` in it. A level whose price cannot be read is now
+  dropped; one with a readable price and no size keeps a `nil` size, which is a real shape.
+
+- **`usage-rules.md` said `Quote.venue_time` is never `nil` here and called a `nil` branch
+  "dead code".** That stopped being true in 0.2.30, when `get_price/2` stopped discarding a
+  real traded price over a missing `Date` header — and the documentation did not follow. A
+  consumer taking that advice had a latent crash. It now says the opposite, and says that
+  nothing is ever substituted into the field.
+
+  `get_order_book/2` is documented as the genuine exception rather than "the same": its
+  `venue_time` comes from the per-level timestamps the venue puts on every level, so a book in
+  which not one can be read is a response this package is misreading rather than a venue
+  declining to state a time. **That refusal is deliberately kept** — the sweep that relaxed
+  the header-derived times on three venues reached this function and stopped, and
+  `defensive_branches_test.exs`'s "an unreadable level timestamp does not become the epoch"
+  carries the incident behind it.
+
+### Changed
+
+- `usage-rules.md` now states the book ordering guarantee, that a streamed delta is
+  deliberately unsorted, and that a flat position row is dropped rather than returned with no
+  side — the consumer-visible half of 0.2.31, which shipped without it.
+
 ## [0.2.31] - 2026-09-13
 
 ### Changed

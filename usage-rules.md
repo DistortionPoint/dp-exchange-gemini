@@ -1,15 +1,45 @@
 
-**Since 0.2.0 this has a consequence worth knowing**: this venue's `Quote.venue_time` is
-**never `nil`**. The field is nullable across the family precisely because some venues
-publish no time for some frames — but here a response without a `Date` header fails the call
-outright, so a `Quote` that reaches you always carries the venue's own instant. A `nil`
-branch for this venue's quotes is dead code.
+**`Quote.venue_time` CAN be `nil` here, and until 0.2.30 this section said it could not.**
+It read: "a response without a `Date` header fails the call outright … a `nil` branch for
+this venue's quotes is dead code." That stopped being true in 0.2.30, when `get_price/2`
+stopped discarding a real traded price over a missing or unreadable `Date` header —
+`Core.Types.Quote` does not enforce `venue_time`, and `observed_at` states freshness. **A
+`nil` branch for this venue's quotes is not dead code; write one.** Nothing is ever
+substituted into that field: it is the venue's own instant or it is `nil`, never this
+package's clock.
 
-`get_order_book/2` is the same. The **stream** is where `nil` appears: a partial-depth
-snapshot (`@depth5`/`@depth10`/`@depth20`) carries `venue_time: nil`, because the vendor's
-own AsyncAPI requires only `[lastUpdateId, bids, asks]` for `OrderBookSnapshot` where
-`BookTicker` requires an `E`. Deltas and `bookTicker` frames do carry a real nanosecond event
-time.
+`get_order_book/2` is **not** the same, and the difference is where the time comes from. Its
+`venue_time` is derived from the per-level `timestamp` fields the venue puts on every book
+level, so a book in which not one level's timestamp can be read is a response this package is
+misreading rather than a venue declining to state a time — that still fails with
+`{:error, :missing_venue_timestamp}`, and it is the one place in this package where an
+unreadable time refuses a whole payload.
+
+On the **stream**, a partial-depth snapshot (`@depth5`/`@depth10`/`@depth20`) carries
+`venue_time: nil`, because the vendor's own AsyncAPI requires only
+`[lastUpdateId, bids, asks]` for `OrderBookSnapshot`. A `bookTicker` frame may carry `nil`
+too, since 0.2.27 — the frame captured in this repository's reference has no `E` at all, and
+the book and last trade in it are delivered rather than dropped. Deltas do carry a real
+nanosecond event time and are refused without one, because `OrderBookDelta` enforces
+`:timestamp`.
+
+## An order book is sorted, so `hd(bids)` is the best bid
+
+Both arms guarantee it as of 0.2.32 — `get_order_book/2` and the streamed snapshot alike —
+and it is `Core.Types.OrderBook`'s contract rather than this package's convenience: **bids
+descending, asks ascending**. You do not need to sort what you receive, and you should not
+assume the venue's own row order means anything.
+
+Two consequences:
+
+* **A level whose price this package cannot read is dropped**, not passed on as a `nil`
+  price. `level/0` is `{Decimal.t(), Decimal.t()}`, and `hd(bids)` must be able to answer
+  with a real number. A level with a readable price but no size keeps a `nil` size — that is
+  a real shape, not an unreadable one.
+* **A streamed DELTA is the exception and is deliberately unsorted.** `OrderBookDelta` is
+  passed through in the venue's own order, because its entries are changes to apply in
+  sequence and re-ordering them would invent an order the venue never sent. The struct name
+  tells you which one you are holding.
 # Using `dp_exchange_gemini`
 
 > **EXPERIMENTAL.** Not run in production. Pin three-part. Maturity is per endpoint —
@@ -619,6 +649,17 @@ this package will not pass it through**: `:quantity` is the size and `:side` say
 A sign convention is a fact about one venue's JSON, not about the market, and a caller
 handed a raw negative has a position that is exactly backwards while every number in it
 stays plausible.
+
+**A flat row is not returned at all, as of 0.2.31.** A position of exactly zero used to come
+back with `side: nil`; it is now dropped. `Core.Types.Position` types `:side` as
+`:long | :short` with no `nil` in it, so the old value had no meaning in the contract, and
+`Position.from_signed_quantity/1` says why dropping is the answer: "a zero-quantity position
+should generally not be built at all: a closed position is not an open one". The venue agrees
+— the field is called `openPositions`.
+
+So **do not read an absent symbol as "no longer traded"**; read it as "nothing open". A
+quantity this package could not READ is a different case and still fails the whole call,
+because that is a decode failure rather than a fact about the account.
 
 `notional_value` **keeps** its sign — that one is a value, not a magnitude with a direction
 beside it.

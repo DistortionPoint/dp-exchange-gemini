@@ -435,6 +435,55 @@ defmodule DpExchange.Gemini.RestTest do
       assert book.provider == :gemini
     end
 
+    test "bids come back highest first and asks lowest first, whatever the venue sent" do
+      # The REST arm of the fix `WsDecode.to_order_book/3` got the same day. Fixing the
+      # streamed book and leaving this one is the "fix applied where it was found rather
+      # than where it applies" this family keeps paying for — same package, same type, a
+      # different module.
+      #
+      # `Core.Types.OrderBook`: "a caller reading `hd(bids)` as the best bid is reading it
+      # correctly, and a venue package that returns venue-order without re-sorting has
+      # broken the contract even though every value in it is true."
+      body = %{
+        "bids" => [
+          %{"price" => "77792.50", "amount" => "1", "timestamp" => "1787936377"},
+          %{"price" => "77792.91", "amount" => "2", "timestamp" => "1787936377"},
+          %{"price" => "77792.10", "amount" => "3", "timestamp" => "1787936377"}
+        ],
+        "asks" => [
+          %{"price" => "77793.40", "amount" => "1", "timestamp" => "1787936377"},
+          %{"price" => "77792.92", "amount" => "2", "timestamp" => "1787936377"}
+        ]
+      }
+
+      assert {:ok, book} =
+               Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+
+      assert Enum.map(book.bids, fn {price, _size} -> Decimal.to_string(price) end) ==
+               ["77792.91", "77792.50", "77792.10"]
+
+      assert Enum.map(book.asks, fn {price, _size} -> Decimal.to_string(price) end) ==
+               ["77792.92", "77793.40"]
+    end
+
+    test "a level whose price cannot be read is dropped, not carried as {nil, nil}" do
+      # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, and `hd(bids)` landing
+      # on one hands a caller a best bid of nil.
+      body = %{
+        "bids" => [
+          %{"price" => "77792.91", "amount" => "1", "timestamp" => "1787936377"},
+          %{"price" => "NaN", "amount" => "2", "timestamp" => "1787936377"}
+        ],
+        "asks" => []
+      }
+
+      assert {:ok, book} =
+               Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+
+      assert [{price, _size}] = book.bids
+      assert Decimal.equal?(price, Decimal.new("77792.91"))
+    end
+
     test "a book with no level timestamps fails rather than guessing" do
       body = %{"bids" => [%{"price" => "1", "amount" => "1"}], "asks" => []}
 
