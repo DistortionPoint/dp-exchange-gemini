@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.31] - 2026-09-13
+
 ### Changed
 
 - **A flat position row is dropped rather than reported with no side.** `get_positions/2`
