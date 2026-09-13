@@ -20,6 +20,37 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed order-book snapshot came back in the venue's row order, so `hd(bids)` was not
+  the best bid.** `Core.Types.OrderBook` makes this part of the contract in as many words:
+  *"The ordering is part of the contract, not a convenience: a caller reading `hd(bids)` as
+  the best bid is reading it correctly, and a venue package that returns venue-order without
+  re-sorting has broken the contract even though every value in it is true."*
+
+  `WsDecode.to_order_book/3` passed the venue's rows straight through. A consumer pricing
+  against the top of the book got whatever row the venue happened to send first — a wrong
+  best bid made entirely of real numbers, which is the failure this family exists to refuse.
+  `dp_exchange_coinbase` was the only package in the family already sorting; the sort here
+  matches its `sorted/2`, including `{:desc, Decimal}` rather than term order, because
+  `Decimal` structs do not compare correctly as plain terms.
+
+  **The delta path is deliberately NOT sorted**, and now has a test saying so.
+  `Core.Types.OrderBookDelta` requires the opposite of its neighbour — its entries "arrive in
+  the venue's own order", and sorting them "would either drop the venue's ordering or invent
+  one that was never sent". The two decoders shared one level parser, so a change that sorted
+  both would have satisfied every other test in the suite.
+
+- **A book level whose price could not be read was carried as `{nil, _}`.**
+  `@type level :: {Decimal.t(), Decimal.t()}` has no `nil` in it, and `hd(bids)` landing on
+  one hands a consumer a best bid of `nil`. `dp_exchange_schwab` and `dp_exchange_webull`
+  both filter these out of their own book decoders with `not is_nil(price)`; this copy was
+  the one that did not. Such a level is now dropped.
+
+  A `nil` **quantity** is still kept: a level stating a price but no size is a real shape
+  rather than an unreadable one, and on the delta path an absent or zero quantity is
+  load-bearing — it is how the venue says a level ceased to exist.
+
 ## [0.2.28] - 2026-09-13
 
 ### Fixed

@@ -196,6 +196,76 @@ defmodule DpExchange.Gemini.WsChannelsTest do
     end
   end
 
+  describe "an order book's ordering is the contract, not the venue's row order" do
+    @observed ~U[2026-08-28 12:00:00Z]
+
+    test "bids come back highest first and asks lowest first, whatever order the venue sent" do
+      # `Core.Types.OrderBook`: "The ordering is part of the contract, not a convenience: a
+      # caller reading `hd(bids)` as the best bid is reading it correctly, and a venue
+      # package that returns venue-order without re-sorting has broken the contract even
+      # though every value in it is true."
+      #
+      # `dp_exchange_coinbase` is the only package in the family that was sorting. This one
+      # passed the venue's rows straight through, so `hd(bids)` was whatever the venue happened
+      # to put first — a wrong best bid made of entirely real numbers.
+      frame = %{
+        "bids" => [["100.00", "1"], ["101.50", "2"], ["99.25", "3"]],
+        "asks" => [["103.00", "1"], ["102.25", "2"], ["104.75", "3"]]
+      }
+
+      assert {:ok, book} = WsDecode.to_order_book(frame, "BTC-USD", @observed)
+
+      assert Enum.map(book.bids, fn {price, _quantity} -> Decimal.to_string(price) end) ==
+               ["101.50", "100.00", "99.25"]
+
+      assert Enum.map(book.asks, fn {price, _quantity} -> Decimal.to_string(price) end) ==
+               ["102.25", "103.00", "104.75"]
+    end
+
+    test "a level whose price cannot be read is dropped, not carried as {nil, nil}" do
+      # `@type level :: {Decimal.t(), Decimal.t()}` — a nil price is outside it, and
+      # `hd(bids)` landing on one hands a consumer a best bid of `nil`. `dp_exchange_schwab`
+      # and `dp_exchange_webull` both filter these out of their own book decoders with
+      # `not is_nil(price)`; this copy did not.
+      frame = %{"bids" => [["100.00", "1"], ["NaN", "2"], ["not-a-price", "3"]], "asks" => []}
+
+      assert {:ok, book} = WsDecode.to_order_book(frame, "BTC-USD", @observed)
+
+      assert [{price, _quantity}] = book.bids
+      assert Decimal.equal?(price, Decimal.new("100.00"))
+    end
+
+    test "a DELTA keeps the venue's own order, which the snapshot must not" do
+      # The two types want opposite things and `Core.Types.OrderBookDelta` says so: its
+      # entries "arrive in the venue's own order", and sorting them "would either drop the
+      # venue's ordering or invent one that was never sent". `OrderBook`, one type over, is
+      # "a full snapshot with eager, sorted `bids`/`asks` lists".
+      #
+      # Pinned because the snapshot fix shares its level parser with this path, and a change
+      # that sorted both would satisfy every other test in this file.
+      frame = %{
+        "E" => 1_787_936_147_000_000_000,
+        "u" => 42,
+        "b" => [["100.00", "1"], ["101.50", "2"], ["99.25", "0"]],
+        "a" => []
+      }
+
+      assert {:ok, delta} = WsDecode.to_order_book_delta(frame, "BTC-USD")
+
+      prices =
+        for {:bid, price, _qty} <- delta.levels, do: Decimal.to_string(price)
+
+      assert prices == ["100.00", "101.50", "99.25"],
+             "the venue's row order, not a sorted one"
+    end
+
+    test "an absent side is an empty book side, not a crash" do
+      assert {:ok, book} = WsDecode.to_order_book(%{}, "BTC-USD", @observed)
+      assert book.bids == []
+      assert book.asks == []
+    end
+  end
+
   describe "`m` is the maker flag, and it is the opposite of the REST tape's side" do
     @trade %{
       "E" => 1_787_936_147_000_000_000,

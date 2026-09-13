@@ -163,8 +163,8 @@ defmodule DpExchange.Gemini.WsDecode do
     {:ok,
      %OrderBook{
        symbol: symbol,
-       bids: levels(frame["bids"]),
-       asks: levels(frame["asks"]),
+       bids: levels(frame["bids"], :desc),
+       asks: levels(frame["asks"], :asc),
        # **`nil`, and that is the fix.** The venue publishes no time for this frame — its own
        # AsyncAPI requires `[lastUpdateId, bids, asks]` for `OrderBookSnapshot`, where
        # `BookTicker` requires an `E` event time — so there is nothing venue-stamped to put
@@ -251,11 +251,70 @@ defmodule DpExchange.Gemini.WsDecode do
     end
   end
 
-  defp levels(rows) when is_list(rows) do
-    for [price, quantity] <- rows, do: {decimal(price), decimal(quantity)}
-  end
+  # Sorted here, not passed through in the venue's row order. `Core.Types.OrderBook` makes
+  # the ordering part of the contract in as many words — "a caller reading `hd(bids)` as the
+  # best bid is reading it correctly, and a venue package that returns venue-order without
+  # re-sorting has broken the contract even though every value in it is true" — and this
+  # decoder returned whatever the venue happened to put first. A wrong best bid made
+  # entirely of real numbers is the failure mode this family exists to refuse.
+  #
+  # `dp_exchange_coinbase` was the only package in the family already doing this; the sort
+  # matches its `sorted/2`, including `{:desc, Decimal}` rather than term order, because
+  # `Decimal` structs do not compare correctly as terms.
+  #
+  # A level whose PRICE cannot be read is dropped rather than carried as `{nil, _}`:
+  # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, `hd(bids)` landing on one
+  # hands a consumer a best bid of `nil`, and a nil price cannot be sorted against a real
+  # one anyway. `dp_exchange_schwab` and `dp_exchange_webull` both filter theirs the same
+  # way; this copy was the one that did not.
+  #
+  # A nil QUANTITY is kept: `OrderBook` carries what the venue said about size, and a level
+  # that states a price but no size is a real shape rather than an unreadable one.
+  # A SNAPSHOT side: read, then sorted. `Core.Types.OrderBook` is "a full snapshot with
+  # eager, sorted `bids`/`asks` lists", and makes the ordering part of the contract in as
+  # many words — "a caller reading `hd(bids)` as the best bid is reading it correctly, and a
+  # venue package that returns venue-order without re-sorting has broken the contract even
+  # though every value in it is true". This returned whatever the venue put first, so
+  # `hd(bids)` was a wrong best bid made entirely of real numbers.
+  #
+  # `{direction, Decimal}` rather than term order, matching `dp_exchange_coinbase`'s
+  # `sorted/2` — the only package in the family that was already doing this — because
+  # `Decimal` structs do not compare correctly as plain terms.
+  defp levels(rows, direction) when is_list(rows),
+    do:
+      rows |> parsed_levels() |> Enum.sort_by(fn {price, _qty} -> price end, {direction, Decimal})
 
+  defp levels(_absent, _direction), do: []
+
+  # A DELTA side: read, and left in the venue's order. `Core.Types.OrderBookDelta` requires
+  # exactly that — its entries "arrive in the venue's own order", and sorting them "would
+  # either drop the venue's ordering or invent one that was never sent". The two types want
+  # opposite things here and the contract says so, which is why these are separate.
+  defp levels(rows) when is_list(rows), do: parsed_levels(rows)
   defp levels(_absent), do: []
+
+  # A level whose PRICE cannot be read is dropped rather than carried as `{nil, _}`:
+  # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, `hd(bids)` landing on one
+  # hands a consumer a best bid of `nil`, and a nil price cannot be sorted against a real one
+  # anyway. `dp_exchange_schwab` and `dp_exchange_webull` both filter theirs the same way;
+  # this copy was the one that did not.
+  #
+  # A nil QUANTITY is kept. `OrderBook` carries what the venue said about size, and a level
+  # stating a price but no size is a real shape rather than an unreadable one — and on the
+  # delta path a zero or absent quantity is load-bearing, since it is how the venue says a
+  # level ceased to exist.
+  defp parsed_levels(rows) do
+    Enum.flat_map(rows, fn
+      [price, quantity] ->
+        case decimal(price) do
+          nil -> []
+          parsed -> [{parsed, decimal(quantity)}]
+        end
+
+      _unreadable_row ->
+        []
+    end)
+  end
 
   # Nanoseconds. Reading one as milliseconds puts the event ~50,000 years out; as seconds,
   # worse, because the result still looks like a date.
