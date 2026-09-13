@@ -79,8 +79,12 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert quote_struct.volume == nil
     end
 
-    test "a Date header with an unknown month name fails closed" do
-      assert {:error, :missing_venue_timestamp} =
+    test "a Date header with an unknown month name is nil, not a guess" do
+      # "Fails closed" was the wrong half to assert. Nothing is guessed from a header this
+      # package cannot read — and `Core.Types.Quote` does not enforce `venue_time`, so
+      # refusing discarded the guarded traded price beside it. `get_top_of_book/2` reads the
+      # same payload through `header_time_or_nil/1` and always tolerated this.
+      assert {:ok, %{venue_time: nil}} =
                Rest.get_price("BTC-USD",
                  plug:
                    responding(%{"bid" => "1", "ask" => "2", "last" => "1"},
@@ -90,8 +94,8 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                )
     end
 
-    test "a Date header with a non-numeric field fails closed" do
-      assert {:error, :missing_venue_timestamp} =
+    test "a Date header with a non-numeric field is nil, not a guess" do
+      assert {:ok, %{venue_time: nil}} =
                Rest.get_price("BTC-USD",
                  plug:
                    responding(%{"bid" => "1", "ask" => "2", "last" => "1"},

@@ -105,23 +105,36 @@ defmodule DpExchange.Gemini.RestTest do
                Rest.get_price("BTC-USD", plug: responding(body), retry_attempts: 0)
     end
 
-    test "a response with NO Date header fails rather than substituting now" do
-      # The failure this family is built to refuse. Gemini publishes no quote timestamp in
-      # the payload at all, so the header is the only venue-supplied time available — and
-      # without it the quote's freshness cannot be stated.
-      assert {:error, :missing_venue_timestamp} =
+    test "a response with NO Date header is nil, and never our clock" do
+      # "Rather than substituting now" is the guarantee, and it holds. The refusal was not
+      # part of it, and the comment here had one step too many: the header is indeed the
+      # only venue-supplied time, but a quote's freshness does NOT become unstateable
+      # without it — `observed_at` states it, and `Core.Types.TopOfBook`'s moduledoc calls
+      # that "a different, honest fact" rather than a stand-in. `Core.Types.Quote` enforces
+      # `[:symbol, :price, :observed_at, :provider]`.
+      #
+      # `get_top_of_book/2` reads the SAME `/v1/pubticker` payload through
+      # `header_time_or_nil/1` and has always tolerated the absence, so the two calls
+      # disagreed about the same response.
+      assert {:ok, quoted} =
                Rest.get_price("BTC-USD",
                  plug: responding(@ticker, date: nil),
                  retry_attempts: 0
                )
+
+      assert quoted.venue_time == nil
+      assert quoted.observed_at
+      refute quoted.venue_time == quoted.observed_at
     end
 
-    test "an unparseable Date header also fails" do
-      assert {:error, :missing_venue_timestamp} =
+    test "an unparseable Date header is also nil, not a guess" do
+      assert {:ok, quoted} =
                Rest.get_price("BTC-USD",
                  plug: responding(@ticker, date: "not a date"),
                  retry_attempts: 0
                )
+
+      assert quoted.venue_time == nil
     end
 
     test "the volume timestamp is NOT used as the quote time" do

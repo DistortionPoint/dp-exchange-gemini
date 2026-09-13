@@ -190,14 +190,23 @@ defmodule DpExchange.Gemini.Rest do
 
     with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts),
          {:ok, last} <- quoted_price(body),
-         {:ok, price} <- required_decimal(last, :price),
-         {:ok, timestamp} <- venue_time(headers) do
+         {:ok, price} <- required_decimal(last, :price) do
       {:ok,
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: price,
          volume: base_volume(body, native),
-         venue_time: timestamp,
+         # Read, not required, through the same `header_time_or_nil/1` that
+         # `get_top_of_book/2` has always used on this identical payload.
+         # `Core.Types.Quote` enforces `[:symbol, :price, :observed_at, :provider]`, so an
+         # absent or unreadable `Date` header was discarding a real guarded traded price
+         # over an optional field — and the two calls reading the SAME `/v1/pubticker`
+         # response disagreed about whether it was usable.
+         #
+         # The thing that must not happen is unchanged: an unstated venue time is `nil`
+         # here, never this package's clock, and `volume.timestamp` — which stamps the
+         # 24-hour window, not the quote — is still never reached for.
+         venue_time: header_time_or_nil(headers),
          observed_at: DateTime.utc_now(),
          provider: :gemini
        }}

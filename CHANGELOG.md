@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_price/2` refused a quote when the `Date` header was absent or unreadable.** Same
+  defect as the `bookTicker` fix above, on the other transport and in the same module I had
+  cited as the correct precedent for it. `get_top_of_book/2` reads the **identical**
+  `/v1/pubticker` response through `header_time_or_nil/1` and has always tolerated the
+  absence, so two calls against one payload disagreed about whether it was usable.
+
+  `Core.Types.Quote` enforces `[:symbol, :price, :observed_at, :provider]`. An HTTP header
+  the venue did not send is not a reason to discard a guarded traded price.
+
+  The guarantee is unchanged: an unstated venue time is `nil`, never this package's clock,
+  and `volume.timestamp` — which stamps the 24-hour window rather than the quote — is still
+  never reached for. The tests now assert that directly rather than inferring it from an
+  `{:error, _}`.
+
+  `Private.get_balances/2` still fails closed, and that is the contract deciding:
+  `Core.Types.Balance` lists `:timestamp` in `@enforce_keys` **and** in `@required_non_nil`,
+  so a holding this package cannot place in time is genuinely not one it can report.
+
 ## [0.2.27] - 2026-09-13
 
 ### Fixed
