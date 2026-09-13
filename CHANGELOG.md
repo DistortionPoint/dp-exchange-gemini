@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.27] - 2026-09-13
+
 ### Fixed
 
 - **A `bookTicker` frame without an event time delivered nothing at all — not the book, and
