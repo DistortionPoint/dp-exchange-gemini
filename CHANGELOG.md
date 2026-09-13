@@ -20,6 +20,43 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `bookTicker` frame without an event time delivered nothing at all — not the book, and
+  not the last trade either.** `WsDecode.to_top_of_book/3` opened with
+  `with {:ok, venue_time} <- nanosecond_time(frame["E"])`, so an absent or unreadable `E`
+  returned `{:error, :missing_venue_timestamp}`. `Socket` swallowed that silently, and
+  because `deliver_last_trade/4` sat inside the success branch, the `c` last-trade `Quote`
+  went with it. One absent optional field silenced both kinds the channel carries.
+
+  This was wrong against the contract whatever the venue sends. `Core.Types.TopOfBook`
+  enforces `[:symbol, :observed_at, :provider]` and nothing more; its moduledoc says
+  `venue_time` "is `nil` where the venue publishes none", and that `observed_at` — always
+  present — is "a different, honest fact, and giving it its own field is what keeps it from
+  being mistaken for one". Freshness was always stateable; it simply was not stated in the
+  venue's own field, which is the one thing nobody was proposing to do.
+
+  The test pinning the old behaviour defended it as "refusing to substitute means dropping
+  the frame". Refusing to substitute is right, and this was not that — writing our clock into
+  `venue_time` would be the substitution, and emitting `nil` there is its opposite. Two things
+  show the rule was a local anomaly rather than a principle: this package's **own REST arm**
+  reads the time through `Rest.header_time_or_nil/1` and emits `nil` when the header is
+  absent, so the same venue and the same type already answered the opposite way on the other
+  transport; and `TopOfBook`'s moduledoc names another venue in this family whose BBO
+  publishes no time at all, which the rule would have made unrepresentable.
+
+  How much this cost depends on what the venue actually sends, and this repository's own
+  reference is the reason to think it cost everything: the frame captured 2026-08-28 in
+  `docs/reference/gemini/demo-environment.md` is `{"s","b","a","c"}` with no `E`, and
+  `websocket-api-replacement.md` describes the channel as publishing "best bid, best ask and
+  last trade price directly". Every fixture in the test suite supplied an `E`, so nothing
+  here could catch it.
+
+  `Trade` and `OrderBookDelta` still require `E`, and that is not an inconsistency: both list
+  `:timestamp` in `@enforce_keys` and type it non-nullable, so a print or a diff this package
+  cannot place in time is genuinely not one it can report. `TopOfBook` does not enforce it.
+  The answers differ because the contracts differ.
+
 ## [0.2.26] - 2026-09-12
 
 ### Fixed

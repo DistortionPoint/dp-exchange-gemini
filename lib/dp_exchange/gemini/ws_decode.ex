@@ -90,23 +90,61 @@ defmodule DpExchange.Gemini.WsDecode do
   A `TopOfBook` from a `{symbol}@bookTicker` frame.
 
   `b`/`B` are the bid and its size, `a`/`A` the ask and its size. `E` is the venue's own
-  nanosecond timestamp, so unlike some venues in this family `venue_time` is real here.
+  nanosecond timestamp where the frame carries one.
+
+  ## A missing `E` does not discard the book
+
+  This used to open `with {:ok, venue_time} <- nanosecond_time(frame["E"])`, so a frame
+  without a readable `E` returned `{:error, :missing_venue_timestamp}` and no book at all.
+  `Socket` then swallowed that error silently AND skipped the `c` last-trade `Quote` with
+  it, because the delivery sat inside the success branch — so one absent optional field
+  produced total silence on both kinds this channel carries.
+
+  That was wrong against the contract regardless of what the venue sends.
+  `Core.Types.TopOfBook` enforces `[:symbol, :observed_at, :provider]` and nothing else; its
+  moduledoc says `venue_time` "is `nil` where the venue publishes none" and names another
+  venue in this family whose BBO publishes none at all. `observed_at` is what states
+  freshness, and it is always present. Refusing the whole book over an optional field threw
+  away a real bid and a real ask.
+
+  It is also the answer this package's own REST arm already gives: `Rest.get_top_of_book/2`
+  reads the time through `header_time_or_nil/1` and emits `nil` when the header is absent or
+  unreadable, rather than refusing. Same venue, same type, two answers — and the transport
+  was deciding which.
+
+  **`Trade` and `OrderBookDelta` keep requiring `E`, and that is not an inconsistency**:
+  both enforce `:timestamp` in `@enforce_keys` and type it non-nullable, so a print or a
+  diff this package cannot place in time is genuinely not one it can report. `TopOfBook`
+  does not enforce it. The types differ, so the answers differ.
+
+  The stakes, from this repository's own reference: the frame captured 2026-08-28 in
+  `docs/reference/gemini/demo-environment.md` is `{"s","b","a","c"}` with no `E`, and
+  `websocket-api-replacement.md` describes the channel as publishing "best bid, best ask and
+  last trade price directly". If that is the production shape, this channel was emitting
+  nothing at all.
   """
-  @spec to_top_of_book(map(), String.t(), DateTime.t()) ::
-          {:ok, TopOfBook.t()} | {:error, term()}
+  @spec to_top_of_book(map(), String.t(), DateTime.t()) :: {:ok, TopOfBook.t()}
   def to_top_of_book(frame, symbol, observed_at) do
-    with {:ok, venue_time} <- nanosecond_time(frame["E"]) do
-      {:ok,
-       %TopOfBook{
-         symbol: symbol,
-         bid: decimal(frame["b"]),
-         ask: decimal(frame["a"]),
-         bid_size: decimal(frame["B"]),
-         ask_size: decimal(frame["A"]),
-         venue_time: venue_time,
-         observed_at: observed_at,
-         provider: :gemini
-       }}
+    {:ok,
+     %TopOfBook{
+       symbol: symbol,
+       bid: decimal(frame["b"]),
+       ask: decimal(frame["a"]),
+       bid_size: decimal(frame["B"]),
+       ask_size: decimal(frame["A"]),
+       venue_time: venue_time_or_nil(frame["E"]),
+       observed_at: observed_at,
+       provider: :gemini
+     }}
+  end
+
+  # Absent and present-but-unreadable answer the same way here, deliberately: both mean this
+  # package cannot state the venue's time, and `nil` says that. The same split
+  # `Rest.header_time_or_nil/1` makes on the REST arm of this type.
+  defp venue_time_or_nil(raw) do
+    case nanosecond_time(raw) do
+      {:ok, at} -> at
+      {:error, _unstated} -> nil
     end
   end
 

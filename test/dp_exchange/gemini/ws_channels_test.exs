@@ -138,6 +138,64 @@ defmodule DpExchange.Gemini.WsChannelsTest do
     end
   end
 
+  describe "a bookTicker frame without a venue timestamp is still a book" do
+    @observed ~U[2026-08-28 12:00:00Z]
+
+    # The frame this venue actually sends, copied from this repository's own reference:
+    # docs/reference/gemini/demo-environment.md, captured 2026-08-28 against
+    # wss://ws.sandbox.gemini.com, which that document records as "field-for-field
+    # identical to production". Four fields, and `E` is not one of them —
+    # websocket-api-replacement.md describes the channel the same way, as publishing "best
+    # bid, best ask and last trade price directly".
+    @captured %{
+      "s" => "btcusd",
+      "b" => "68169.88000",
+      "a" => "64886.32000",
+      "c" => "68169.88000"
+    }
+
+    test "the bid and ask survive a frame the venue did not timestamp" do
+      # `Core.Types.TopOfBook` enforces only `[:symbol, :observed_at, :provider]`. Its
+      # moduledoc is explicit that `venue_time` "is `nil` where the venue publishes none",
+      # and names another venue in this family that publishes none at all. Refusing the
+      # whole book over an optional field throws away a real bid and a real ask.
+      assert {:ok, top} = WsDecode.to_top_of_book(@captured, "BTC-USD", @observed)
+
+      assert Decimal.equal?(top.bid, Decimal.new("68169.88000"))
+      assert Decimal.equal?(top.ask, Decimal.new("64886.32000"))
+      assert top.venue_time == nil, "the venue stated no time, and nil says exactly that"
+      assert top.observed_at == @observed, "freshness is still stated, by the honest field"
+    end
+
+    test "a venue timestamp is still used when the frame carries one" do
+      dated = Map.put(@captured, "E", 1_787_936_147_000_000_000)
+
+      assert {:ok, top} = WsDecode.to_top_of_book(dated, "BTC-USD", @observed)
+      assert top.venue_time == DateTime.from_unix!(1_787_936_147_000_000_000, :nanosecond)
+    end
+
+    test "an unreadable venue timestamp is nil rather than the whole book being dropped" do
+      # The same split `Rest.header_time_or_nil/1` already makes on this venue's REST arm:
+      # a time this package cannot read is a time it does not state, and says so.
+      assert {:ok, top} =
+               WsDecode.to_top_of_book(Map.put(@captured, "E", "soon"), "BTC-USD", @observed)
+
+      assert top.venue_time == nil
+      assert Decimal.equal?(top.bid, Decimal.new("68169.88000"))
+    end
+
+    test "sizes are read when the frame carries them, and nil when it does not" do
+      assert {:ok, bare} = WsDecode.to_top_of_book(@captured, "BTC-USD", @observed)
+      assert bare.bid_size == nil
+      assert bare.ask_size == nil
+
+      sized = @captured |> Map.put("B", "1.5") |> Map.put("A", "2.5")
+      assert {:ok, top} = WsDecode.to_top_of_book(sized, "BTC-USD", @observed)
+      assert Decimal.equal?(top.bid_size, Decimal.new("1.5"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("2.5"))
+    end
+  end
+
   describe "`m` is the maker flag, and it is the opposite of the REST tape's side" do
     @trade %{
       "E" => 1_787_936_147_000_000_000,

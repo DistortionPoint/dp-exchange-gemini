@@ -428,16 +428,19 @@ defmodule DpExchange.Gemini.Socket do
   defp handle_message(%{"s" => native, "b" => _bid, "a" => _ask} = message, state) do
     symbol = SymbolFormat.to_canonical_symbol(native)
 
-    case WsDecode.to_top_of_book(message, symbol, DateTime.utc_now()) do
-      {:ok, top} ->
-        send(state.subscriber, {:dp_exchange, :gemini, top})
-        deliver_last_trade(message["c"], symbol, top.venue_time, state)
+    # No error branch, because there is no longer an error to branch on: a bookTicker frame
+    # is a book whether or not the venue dated it — see `WsDecode.to_top_of_book/3`.
+    #
+    # The clause this replaces read "a quote whose freshness cannot be stated must not reach
+    # a consumer ... silence beats stamping it with our own clock", which is true of
+    # `venue_time` and was applied to the wrong thing. Nobody was stamping our clock into the
+    # venue's field; `observed_at` is a different field that says what it is. What the clause
+    # actually did was drop a real bid and ask, and — because `deliver_last_trade/4` sat
+    # inside the success branch — the `c` last trade along with them.
+    {:ok, top} = WsDecode.to_top_of_book(message, symbol, DateTime.utc_now())
 
-      # A quote whose freshness cannot be stated must not reach a consumer — see
-      # `WsDecode.nanosecond_time/1`. Silence beats stamping it with our own clock.
-      {:error, _reason} ->
-        :ok
-    end
+    send(state.subscriber, {:dp_exchange, :gemini, top})
+    deliver_last_trade(message["c"], symbol, top.venue_time, state)
 
     {:ok, state}
   end

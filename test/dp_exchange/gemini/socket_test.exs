@@ -3,7 +3,7 @@ defmodule DpExchange.Gemini.SocketTest do
 
   alias DpExchange.Core.Notice
   alias DpExchange.Core.Types.{Quote, TopOfBook}
-  alias DpExchange.Gemini.Socket
+  alias DpExchange.Gemini.{Socket, WsDecode}
 
   @moduletag :capture_log
 
@@ -110,12 +110,56 @@ defmodule DpExchange.Gemini.SocketTest do
       refute_receive {:dp_exchange, :gemini, %Quote{}}, 50
     end
 
-    test "a frame with NO event time delivers nothing at all" do
-      # On a stream, refusing to substitute means dropping the frame. A quote whose
-      # freshness cannot be stated must not reach a consumer.
+    test "a frame with NO event time still delivers the book and the last trade" do
+      # This asserted the opposite until 2026-09-13 — "delivers nothing at all" — defended
+      # as "refusing to substitute means dropping the frame. A quote whose freshness cannot
+      # be stated must not reach a consumer."
+      #
+      # Refusing to substitute IS right. This was not that. A substitution would be writing
+      # our own clock into `venue_time`; emitting `nil` there is the opposite of a
+      # substitution, and `Core.Types.TopOfBook` is explicit about both halves: `venue_time`
+      # "is `nil` where the venue publishes none", and `observed_at` — always present — is
+      # "a different, honest fact, and giving it its own field is what keeps it from being
+      # mistaken for one". Freshness WAS stateable. It just was not stated in the venue's
+      # field, which is the one thing nobody was proposing to do.
+      #
+      # Two things show the rule was a local anomaly rather than a principle. This package's
+      # own REST arm reads the time through `Rest.header_time_or_nil/1` and emits `nil` when
+      # the header is absent — same venue, same type, opposite answer, decided by transport.
+      # And `Core.Types.TopOfBook`'s moduledoc names another venue in this family whose BBO
+      # publishes no time at all, which this rule would have made unrepresentable.
+      #
+      # It mattered more than a nil field: `Socket` swallowed the error silently and
+      # `deliver_last_trade/4` sat inside the success branch, so one absent optional field
+      # dropped BOTH kinds this channel carries. This repository's own captured frame
+      # (docs/reference/gemini/demo-environment.md, 2026-08-28) is `{"s","b","a","c"}` with
+      # no `E`.
+      #
+      # Note also what the old assertion actually checked: only that no `Quote` arrived. Its
+      # name claimed "nothing at all" and it never looked for the `TopOfBook`.
       assert {:ok, _state} = deliver(Map.delete(@book_ticker, "E"))
 
-      refute_receive {:dp_exchange, :gemini, %Quote{}}, 50
+      assert_receive {:dp_exchange, :gemini, %TopOfBook{} = top}
+      assert Decimal.equal?(top.bid, Decimal.new("77845.79000"))
+      assert top.venue_time == nil, "the venue stated no time, and nil says exactly that"
+      assert top.observed_at, "freshness is still stated, by the field that says what it is"
+
+      assert_receive {:dp_exchange, :gemini, %Quote{} = quoted}
+      assert Decimal.equal?(quoted.price, Decimal.new("77834.11000"))
+      assert quoted.venue_time == nil
+    end
+
+    test "a Trade still requires the event time, because its contract does" do
+      # Not an inconsistency with the test above — a different type with a different rule.
+      # `Core.Types.Trade` lists `:timestamp` in `@enforce_keys` and types it non-nullable,
+      # so a print this package cannot place in time is genuinely not one it can report.
+      # `TopOfBook` does not enforce `venue_time`. The answers differ because the contracts
+      # differ, which is the only reason they are allowed to.
+      assert {:error, :missing_venue_timestamp} =
+               WsDecode.to_trade(
+                 %{"p" => "1", "q" => "1", "m" => false},
+                 "BTC-USD"
+               )
     end
 
     test "a symbol with an overlapping quote still splits correctly off the wire" do
