@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.28] - 2026-09-13
+
 ### Fixed
 
 - **`get_price/2` refused a quote when the `Date` header was absent or unreadable.** Same
