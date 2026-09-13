@@ -20,6 +20,27 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_top_of_book/2` and `get_trades/2` were never called through the facade.**
+  `gemini_delegation_test.exs` exists to prove "that calling the facade actually reaches the
+  code the declaration describes", and these two market-data reads were not among the ones it
+  reached — every assertion about them went straight to `Rest`.
+
+  Both thread `with_limiter/1` exactly as the covered reads do, so a delegate wired to the
+  wrong `Rest` function compiles, type-checks, and then answers with a different type
+  entirely. Both wrong-delegate swaps were performed on purpose and both now fail.
+
+  No delegation was wrong. Found by reading which lines of `DpExchange.Gemini` the suite
+  never executes, with the `def ... \\ []` head artifact filtered out.
+
+  `quantization/1` remains uncovered and is the same case as `dp_exchange_coinbase`'s: the
+  contract callback takes no options, so it passes `with_limiter([])` and cannot be handed a
+  plug. Testing it means a live call, which tier 1 forbids, or a new facade arity, which
+  `usage-rules/adapter.md` reserves for a deliberate Core change.
+
+  Coverage 91.55% to 91.68%.
+
 ## [0.2.34] - 2026-09-13
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

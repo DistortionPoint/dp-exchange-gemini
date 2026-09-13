@@ -106,6 +106,46 @@ defmodule DpExchange.GeminiDelegationTest do
     end
   end
 
+  describe "the two market-data reads this file did not reach" do
+    test "get_top_of_book/2", %{opts: opts} do
+      # This and `get_trades/2` below were the two market-data reads this describe block did
+      # not reach — found by reading which lines of `DpExchange.Gemini` the suite never
+      # executes. Both thread `with_limiter/1` exactly as the covered reads do, so a delegate
+      # wired to the wrong `Rest` function would have passed the whole suite.
+      assert {:ok, top} =
+               Gemini.get_top_of_book("BTC-USD",
+                 plug: responding(@ticker),
+                 limiter: opts[:limiter],
+                 retry_attempts: 0
+               )
+
+      assert top.symbol == "BTC-USD"
+      assert Decimal.lt?(top.bid, top.ask), "a book, not a traded price"
+    end
+
+    test "get_trades/2", %{opts: opts} do
+      body = [
+        %{
+          "timestamp" => 1_787_936_377,
+          "timestampms" => 1_787_936_377_000,
+          "tid" => 123_456,
+          "price" => "77792.91",
+          "amount" => "0.0031",
+          "type" => "buy"
+        }
+      ]
+
+      assert {:ok, [trade]} =
+               Gemini.get_trades("BTC-USD",
+                 plug: responding(body),
+                 limiter: opts[:limiter],
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(trade.price, Decimal.new("77792.91"))
+    end
+  end
+
   describe "quantization/1 is optional in the contract and implemented here" do
     test "it is NOT declared unsupported" do
       # Coinbase declares it unsupported; this venue publishes the numbers, so declaring
