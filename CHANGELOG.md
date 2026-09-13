@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.29] - 2026-09-13
+
 ### Fixed
 
 - **A streamed order-book snapshot came back in the venue's row order, so `hd(bids)` was not
