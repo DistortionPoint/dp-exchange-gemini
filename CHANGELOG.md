@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.32] - 2026-09-13
+
 ### Fixed
 
 - **`get_order_book/2` returned the venue's row order, and carried `{nil, _}` levels.** The
