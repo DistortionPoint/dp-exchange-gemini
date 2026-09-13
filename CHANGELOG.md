@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.35] - 2026-09-13
+
 ### Changed
 
 - **`get_top_of_book/2` and `get_trades/2` were never called through the facade.**
