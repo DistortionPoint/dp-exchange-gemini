@@ -2631,10 +2631,23 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # A WHOLE-string parse only, and the `_rest` this used to discard is why.
+  #
+  # `Integer.parse/1` answers `{integer, rest}` for anything that merely STARTS with digits,
+  # so ignoring `rest` read a venue timestamp out of text that is not one: `"2026-09-14"`
+  # became 2026 and then `~U[1970-01-01 00:00:02.026Z]`, and `"1787936147.5"` — a seconds
+  # timestamp carrying a fraction — became `~U[1970-01-21 16:38:56.147Z]`. Both are real
+  # `DateTime`s, which is the whole problem: a caller cannot tell one from the venue's own
+  # instant, and 1970 is not obviously wrong to code that only checks for `nil`.
+  #
+  # It also walked straight past the guard built to stop exactly this. `required_time/1`
+  # refuses with `{:unparseable_venue_timestamp, value}` when this answers `nil` — and it
+  # never answered `nil` for those inputs, so a `Fill` (an execution record, timestamped for
+  # reconciliation) would have carried a 1970 instant instead of the read being refused.
   defp epoch_ms(value) when is_binary(value) do
     case Integer.parse(value) do
-      {integer, _rest} -> epoch_ms(integer)
-      :error -> nil
+      {integer, ""} -> epoch_ms(integer)
+      _partial_or_error -> nil
     end
   end
 

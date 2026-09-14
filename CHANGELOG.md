@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fill timestamp that merely started with digits was read as those digits.**
+  `Private`'s `epoch_ms/1` took `{integer, _rest}` from `Integer.parse/1`, so `"2026-09-14"`
+  became `~U[1970-01-01 00:00:02.026Z]` and `"1787936147.5"` became `~U[1970-01-21
+  16:38:56.147Z]`. Both are real `DateTime`s, which is the whole problem — a caller cannot
+  tell one from the venue's own instant, and 1970 is not obviously wrong to code that only
+  checks for `nil`.
+
+  It defeated the guard written to stop exactly this. `required_time/1` refuses with
+  `{:unparseable_venue_timestamp, value}` when `epoch_ms/1` answers `nil`, and for those
+  inputs it never did — so a `Fill`, an execution record a consumer reconciles against,
+  carried a 1970 stamp instead of the read being refused.
+
+  `Rest` had already been fixed for the identical defect on bar times, with a test saying "a
+  bar opened 1 January 1970, sorted to the front of the series, every price in it real — the
+  family's named failure exactly". `Private` was never swept. It is now, and the matching
+  tests are in place.
+
 ## [0.2.35] - 2026-09-13
 
 ### Changed

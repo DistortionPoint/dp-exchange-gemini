@@ -424,6 +424,48 @@ defmodule DpExchange.Gemini.PrivateTest do
       end
     end
 
+    test "a partially numeric fill time is refused, not read as its leading digits" do
+      # `Rest` already refuses this on bar times — see `defensive_branches_test.exs`, "a bar
+      # opened 1 January 1970, sorted to the front of the series, every price in it real".
+      # `Private`'s own `epoch_ms/1` had the identical defect and was never swept: it took
+      # `{integer, _rest}` from `Integer.parse/1`, so anything merely STARTING with digits
+      # became a real `DateTime` far from the venue's instant.
+      #
+      # It defeated the guard written to stop exactly this. `required_time/1` refuses when
+      # `epoch_ms/1` answers `nil`, and for these inputs it never did — so a `Fill`, which is
+      # an execution record a consumer reconciles against, would have carried a 1970 stamp
+      # instead of the read being refused.
+      complete = %{
+        "order_id" => "1",
+        "tid" => "2",
+        "price" => "100",
+        "amount" => "0.5",
+        "type" => "Buy",
+        "timestampms" => 1_787_936_147_000
+      }
+
+      for bad <- ["2026-09-14", "1787936147.5", "1787936147000-ish", "12abc"] do
+        assert {:error, {:unparseable_venue_timestamp, ^bad}} =
+                 Private.get_trade_history(@credentials,
+                   symbol: "BTC-USD",
+                   plug: responding([Map.put(complete, "timestampms", bad)]),
+                   retry_attempts: 0
+                 ),
+               "a fill timestamped #{inspect(bad)} must be refused, not dated 1970"
+      end
+
+      # And the whole-string case still reads, so this is a narrowing and not a refusal of
+      # the venue's ordinary string form.
+      assert {:ok, [fill]} =
+               Private.get_trade_history(@credentials,
+                 symbol: "BTC-USD",
+                 plug: responding([Map.put(complete, "timestampms", "1787936147000")]),
+                 retry_attempts: 0
+               )
+
+      assert fill.timestamp == ~U[2026-08-28 16:55:47.000Z]
+    end
+
     test "an absent order_id is not reported as an empty string" do
       # `to_string(nil)` is `""`, so a row with no `order_id` produced `order_id: ""` — a
       # value that passes every `nil` check a consumer might write while identifying no order
