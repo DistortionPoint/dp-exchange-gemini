@@ -525,14 +525,32 @@ defmodule DpExchange.Gemini.Rest do
   # Milliseconds where the venue sends them, seconds otherwise — the venue publishes both
   # fields and `timestampms` is the precise one.
   defp trade_time(%{"timestampms" => ms}) when is_integer(ms),
-    do: {:ok, DateTime.from_unix!(ms, :millisecond)}
+    do: from_unix_or_undated(ms, :millisecond)
 
   defp trade_time(%{"timestamp" => seconds}) when is_integer(seconds),
-    do: {:ok, DateTime.from_unix!(seconds)}
+    do: from_unix_or_undated(seconds, :second)
 
   # An undated print cannot be placed on a tape, and the local clock would place it wrongly
   # while looking right.
   defp trade_time(_row), do: {:error, :missing_venue_timestamp}
+
+  # `DateTime.from_unix/2`, not `from_unix!/2`, and non-positive is refused.
+  #
+  # Two ways a number that reached here is still not a print time, and the bang version
+  # handled neither. **Out of range RAISES**: the seconds clause above takes whatever the
+  # venue put in `timestamp`, so milliseconds landing there — this venue publishes both
+  # fields, so the two are one typo apart — is `invalid Unix time`, thrown out of the read
+  # rather than returned by it. **Zero and negative do NOT raise**: they become 1970 and
+  # earlier, which this package has already ruled out in as many words — see
+  # `defensive_branches_test.exs`, "an unreadable level timestamp does not become the epoch".
+  defp from_unix_or_undated(value, unit) when value > 0 do
+    case DateTime.from_unix(value, unit) do
+      {:ok, at} -> {:ok, at}
+      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
+    end
+  end
+
+  defp from_unix_or_undated(_non_positive, _unit), do: {:error, :missing_venue_timestamp}
 
   # `nil` stays `nil`. `to_string/1` would make it `""`, which reads as an id a consumer can
   # compare and log while identifying nothing — see `to_trade/2`.

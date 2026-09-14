@@ -1158,12 +1158,23 @@ defmodule DpExchange.Gemini.Private do
 
   defp epoch_ms_to_datetime(value) when is_binary(value) do
     case Integer.parse(value) do
-      {ms, ""} -> DateTime.from_unix!(ms, :millisecond)
+      {ms, ""} -> epoch_ms_to_datetime(ms)
       _not_an_epoch -> nil
     end
   end
 
-  defp epoch_ms_to_datetime(ms) when is_integer(ms), do: DateTime.from_unix!(ms, :millisecond)
+  # `DateTime.from_unix/2`, not `from_unix!/2`, and non-positive is refused — the same two
+  # holes `Rest.trade_time/1` had. Out of range RAISES out of the read (a venue moving to
+  # microseconds is `invalid Unix time`), and zero or negative quietly becomes 1970 or
+  # earlier. `nil` here means "the venue did not state one", which is what every caller of
+  # this already handles.
+  defp epoch_ms_to_datetime(ms) when is_integer(ms) and ms > 0 do
+    case DateTime.from_unix(ms, :millisecond) do
+      {:ok, at} -> at
+      {:error, _out_of_range} -> nil
+    end
+  end
+
   defp epoch_ms_to_datetime(_other), do: nil
 
   @doc """

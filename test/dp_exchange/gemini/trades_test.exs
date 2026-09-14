@@ -139,6 +139,37 @@ defmodule DpExchange.Gemini.TradesTest do
                Rest.get_trades("BTC-USD", plug: responding([row]), retry_attempts: 0)
     end
 
+    test "a print time outside the epoch range is refused, not raised out of the read" do
+      # The two fields are one typo apart at the venue: `timestamp` is SECONDS and
+      # `timestampms` is milliseconds, and `DateTime.from_unix!/1` RAISES on an out-of-range
+      # value. So milliseconds landing in the seconds field threw `invalid Unix time` out of
+      # `get_trades/2` rather than returning the error the function already declares.
+      row = trade() |> Map.delete("timestampms") |> Map.put("timestamp", 1_547_146_811_357)
+
+      assert {:error, :missing_venue_timestamp} =
+               Rest.get_trades("BTC-USD", plug: responding([row]), retry_attempts: 0)
+
+      # And the same for the millisecond field carrying microseconds.
+      row2 = trade() |> Map.put("timestampms", 1_547_146_811_357_000)
+
+      assert {:error, :missing_venue_timestamp} =
+               Rest.get_trades("BTC-USD", plug: responding([row2]), retry_attempts: 0)
+    end
+
+    test "a zero or negative print time is refused rather than dating the print to 1970" do
+      # These do NOT raise — they are valid `DateTime`s — which is exactly why this package
+      # already ruled them out in as many words: see `defensive_branches_test.exs`, "an
+      # unreadable level timestamp does not become the epoch". `0` is a common venue
+      # sentinel for "unknown", and a print dated 1970 goes to the front of a tape.
+      for bad <- [0, -1] do
+        row = trade() |> Map.put("timestampms", bad)
+
+        assert {:error, :missing_venue_timestamp} =
+                 Rest.get_trades("BTC-USD", plug: responding([row]), retry_attempts: 0),
+               "a print timestamped #{bad} must be refused"
+      end
+    end
+
     test "an empty tape is an empty list, not an error" do
       assert {:ok, []} = Rest.get_trades("BTC-USD", plug: responding([]), retry_attempts: 0)
     end
