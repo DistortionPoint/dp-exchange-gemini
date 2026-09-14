@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.36] - 2026-09-14
+
 ### Fixed
 
 - **A fill timestamp that merely started with digits was read as those digits.**
