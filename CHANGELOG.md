@@ -20,6 +20,27 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A timed-out order, conversion or staking write was retried, and could happen twice.**
+  Those calls went through the shared `post/4`, which forwards `:retry_attempts` into
+  `Core.HttpClient` — and that retries anything that is not a 4xx, including a timeout and a
+  connection reset. Those are exactly the failures where the venue may have **received and
+  acted on** the request, so a retried `/v1/order/new` places a second order, a retried
+  `/v1/wrap/...` converts twice, and a retried `/v1/staking/stake` stakes twice.
+
+  Retrying is only safe where the venue can tell the second attempt from the first. Gemini
+  accepts `client_order_id` on `/v1/order/new`, but this repository has no evidence it is an
+  idempotency key, and the wrap and staking endpoints take no such field at all. Those calls
+  are now sent exactly once, through a `post_once/4` that drops `:retry_attempts` so a
+  caller forwarding its own opts cannot re-enable it.
+
+  **`withdraw/6` deliberately still retries.** It always sends a `clientTransferId`,
+  generated when the caller gives none — the existing test "an idempotency key is ALWAYS
+  sent, even when the caller gives none" pins exactly that — so the venue answers a repeat
+  with the original transfer. That is the distinction: not "is it a write" but "can the
+  venue tell the second attempt from the first". Reads are unchanged and still retry.
+
 ## [0.2.39] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

@@ -181,7 +181,7 @@ defmodule DpExchange.Gemini.Private do
         |> maybe_put("client_order_id", Map.get(request, :client_order_id))
         |> maybe_put("account", Keyword.get(opts, :account))
 
-      with {:ok, body, _headers} <- post("/v1/order/new", params, credentials, opts) do
+      with {:ok, body, _headers} <- post_once("/v1/order/new", params, credentials, opts) do
         to_order(body)
       end
     end
@@ -192,7 +192,7 @@ defmodule DpExchange.Gemini.Private do
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def cancel_order(credentials, order_id, opts) do
     with {:ok, body, _headers} <-
-           post("/v1/order/cancel", %{"order_id" => order_id}, credentials, opts) do
+           post_once("/v1/order/cancel", %{"order_id" => order_id}, credentials, opts) do
       to_order(body)
     end
   end
@@ -363,6 +363,34 @@ defmodule DpExchange.Gemini.Private do
   end
 
   # --- request ------------------------------------------------------------
+
+  # **A POST that moves money or creates an order, sent exactly once.**
+  #
+  # `Core.HttpClient` retries any error that is not a 4xx, which includes a timeout and a
+  # connection reset — exactly the failures where the venue may have received and ACTED ON
+  # the request. A `/v1/order/new` that times out after Gemini accepted it, retried, places
+  # a second order. `/v2/withdraw/...` retried sends the money twice. `/v1/wrap/...` retried
+  # converts twice. The caller sees one call and one answer either way.
+  #
+  # Retrying is only safe where the venue deduplicates. Gemini's `client_order_id` is
+  # accepted on `/v1/order/new` but this repository has no evidence it is an idempotency
+  # key — unlike `dp_exchange_coinbase` and `dp_exchange_robinhood`, whose venues document
+  # theirs as one and whose writes may therefore retry — and the withdraw, wrap and staking
+  # endpoints take no such field at all. So these are sent once and the transport failure is
+  # handed to the caller, who knows what it asked for and can decide.
+  #
+  # `:retry_attempts` is dropped rather than defaulted, so a caller cannot re-enable it by
+  # forwarding its own opts.
+  #
+  # **`withdraw/6` deliberately does NOT use this.** It always sends a `clientTransferId`,
+  # generated when the caller gives none, which is an idempotency key for that endpoint —
+  # see `money_movement_test.exs`, "an idempotency key is ALWAYS sent, even when the caller
+  # gives none". A retry there re-sends the same key and the venue answers with the original
+  # transfer, so retrying is both safe and useful. That is the distinction this helper turns
+  # on: not "is it a write" but "can the venue tell the second attempt from the first".
+  defp post_once(path, params, credentials, opts) do
+    post(path, params, credentials, Keyword.put(opts, :retry_attempts, 1))
+  end
 
   defp post(path, params, credentials, opts) do
     scheme = auth_scheme(credentials, opts)
@@ -999,7 +1027,7 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, symbol, side} <- instant_pair(from, to, opts) do
       params = %{"amount" => to_string(amount), "side" => side}
 
-      with {:ok, body, headers} <- post("/v1/wrap/#{symbol}", params, credentials, opts) do
+      with {:ok, body, headers} <- post_once("/v1/wrap/#{symbol}", params, credentials, opts) do
         to_conversion(body, from, to, :settled, headers)
       end
     end
@@ -1784,7 +1812,7 @@ defmodule DpExchange.Gemini.Private do
         "providerId" => provider_id
       }
 
-      with {:ok, body, _headers} <- post(path, params, credentials, opts) do
+      with {:ok, body, _headers} <- post_once(path, params, credentials, opts) do
         to_staking_transaction(body)
       end
     end

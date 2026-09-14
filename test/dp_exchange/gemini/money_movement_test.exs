@@ -591,4 +591,80 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert payload["timestamp"] == 1_787_936_401_000
     end
   end
+
+  describe "a write the venue cannot deduplicate is sent exactly once" do
+    test "an order that fails transiently is not placed again" do
+      # `Core.HttpClient` retries any error that is not a 4xx — a timeout, a reset, a 503 —
+      # which are exactly the failures where the venue may have received and ACTED ON the
+      # request. Retried, a `/v1/order/new` Gemini accepted before the failure places a
+      # SECOND order, and the caller sees one call and one answer either way.
+      #
+      # This is not a ban on retrying. It is a ban on repeating an ACTION the venue cannot
+      # tell apart from the first one: `withdraw/6` always sends a `clientTransferId` and
+      # therefore still retries, which the test above pins.
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, ~s({"result":"error","reason":"ServiceUnavailable"}))
+      end
+
+      Private.place_order(
+        @credentials,
+        %{
+          symbol: "BTC-USD",
+          side: :buy,
+          order_type: :limit,
+          quantity: Decimal.new("1"),
+          price: Decimal.new("100")
+        },
+        plug: plug,
+        retry_delay: 1
+      )
+
+      assert_receive :attempt
+      refute_receive :attempt, 200
+    end
+
+    test "a staking write is sent once too" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, ~s({"result":"error"}))
+      end
+
+      Private.stake("ETH", Decimal.new("1"), @credentials,
+        provider_id: "p-1",
+        plug: plug,
+        retry_delay: 1
+      )
+
+      assert_receive :attempt
+      refute_receive :attempt, 200
+    end
+
+    test "a read still retries, because re-asking a question repeats nothing" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, ~s({"result":"error"}))
+      end
+
+      Private.get_balances(@credentials, plug: plug, retry_attempts: 2, retry_delay: 1)
+
+      assert_receive :attempt
+      assert_receive :attempt, 1_000
+    end
+  end
 end
