@@ -913,25 +913,49 @@ defmodule DpExchange.Gemini.Private do
   # The venue's own window, anchored to the venue's own clock. `maxAgeMs` measured from the
   # local clock would expire at the wrong moment on any client whose time has drifted, and
   # a conversion committed a second late fills at a rate the caller was never shown.
+  # `:id`, `:status`, `:from_asset` and `:to_asset` are all in `Conversion`'s
+  # `@enforce_keys`, so its `new/1` refuses a `nil` in any of them — and nothing here calls
+  # `new/1`, the struct being built literally as everywhere in this family, so that check
+  # never ran.
+  #
+  # `:status` is safe: every caller passes a literal atom. The other three were not.
+  # `to_string_or_nil/1` answers `nil` for an absent quote id, and the two asset fields fall
+  # back to the body only when the CALLER did not name them — which `commit_conversion/3`
+  # does, passing `nil, nil` — so a body without `totalSpendCurrency` produced a conversion
+  # naming neither side of itself. A conversion that does not say what was sold, what was
+  # bought, or which quote it belongs to cannot be reconciled against anything.
   defp to_conversion(%{} = body, from, to, status, headers) do
-    {:ok,
-     %Conversion{
-       id: body |> Map.get("quoteId") |> to_string_or_nil(),
-       status: status,
-       from_asset: from || Map.get(body, "totalSpendCurrency"),
-       to_asset: to || Map.get(body, "quantityCurrency"),
-       from_amount: decimal(Map.get(body, "totalSpend")),
-       to_amount: decimal(Map.get(body, "quantity")),
-       rate: decimal(Map.get(body, "price")),
-       fee: decimal(Map.get(body, "fee")),
-       expires_at: expires_at(Map.get(body, "maxAgeMs"), headers),
-       venue_time: venue_date(headers),
-       provider: :gemini
-     }}
+    # `quoteId` OR `orderId`. The quote-and-commit endpoints name it `quoteId`; the one-step
+    # wrap endpoint (`convert/4`) names it `orderId` and sends no `quoteId` at all — so
+    # reading only the first meant EVERY wrap conversion came back with `id: nil`, on a
+    # field `Conversion` marks required. The test covering that path asserted on `status`
+    # and `expires_at` and never on the id, so it passed throughout.
+    with {:ok, id} <- required_id(Map.get(body, "quoteId") || Map.get(body, "orderId"), :id),
+         {:ok, from_asset} <-
+           required_id(from || Map.get(body, "totalSpendCurrency"), :from_asset),
+         {:ok, to_asset} <- required_id(to || Map.get(body, "quantityCurrency"), :to_asset) do
+      {:ok, build_conversion(body, id, from_asset, to_asset, status, headers)}
+    end
   end
 
   defp to_conversion(_body, _from, _to, _status, _headers),
     do: {:error, :unexpected_response_shape}
+
+  defp build_conversion(body, id, from_asset, to_asset, status, headers) do
+    %Conversion{
+      id: id,
+      status: status,
+      from_asset: from_asset,
+      to_asset: to_asset,
+      from_amount: decimal(Map.get(body, "totalSpend")),
+      to_amount: decimal(Map.get(body, "quantity")),
+      rate: decimal(Map.get(body, "price")),
+      fee: decimal(Map.get(body, "fee")),
+      expires_at: expires_at(Map.get(body, "maxAgeMs"), headers),
+      venue_time: venue_date(headers),
+      provider: :gemini
+    }
+  end
 
   defp expires_at(nil, _headers), do: nil
 
@@ -943,9 +967,6 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp expires_at(_other, _headers), do: nil
-
-  defp to_string_or_nil(nil), do: nil
-  defp to_string_or_nil(value), do: to_string(value)
 
   # `venue_time/1` returns a result tuple because its callers need to fail on a missing
   # date. Here a missing date costs the expiry window and nothing else, so it degrades to
@@ -1304,7 +1325,7 @@ defmodule DpExchange.Gemini.Private do
 
       with {:ok, body, _headers} <-
              post("/v2/withdraw/#{network}/#{ticker}", params, credentials, opts) do
-        {:ok, to_withdrawal(body, asset, network, address, amount, memo)}
+        to_withdrawal(body, asset, network, address, amount, memo)
       end
     end
   end
@@ -1331,9 +1352,18 @@ defmodule DpExchange.Gemini.Private do
     |> to_string()
   end
 
+  # `:id` is in `Withdrawal`'s `@enforce_keys`. A withdrawal with no id is a transfer the
+  # caller cannot look up, reference in a support request, or reconcile against — and the
+  # money has already left. `nil` there looks like a value.
   defp to_withdrawal(body, asset, network, address, amount, memo) do
+    with {:ok, id} <- required_id(body["withdrawalId"] || body["clientTransferId"], :id) do
+      {:ok, build_withdrawal(body, id, asset, network, address, amount, memo)}
+    end
+  end
+
+  defp build_withdrawal(body, id, asset, network, address, amount, memo) do
     %Withdrawal{
-      id: to_string_or_nil(body["withdrawalId"] || body["clientTransferId"]),
+      id: id,
       # The venue accepting a withdrawal is not the chain confirming it. `:pending` unless
       # the venue says otherwise, because `:completed` on an unconfirmed transfer would
       # tell a caller the money has arrived.
@@ -1577,14 +1607,53 @@ defmodule DpExchange.Gemini.Private do
   def get_staking_balances(credentials, opts) do
     with {:ok, rows, headers} <- post("/v1/balances/staking", %{}, credentials, opts) do
       at = venue_time_or_nil(headers)
-      {:ok, rows |> List.wrap() |> Enum.map(&to_staking_balance(&1, at))}
+      rows |> List.wrap() |> to_staking_balances(at)
     end
   end
 
+  # One unreadable row refuses the page rather than leaving a gap in it — `to_fills/2`'s rule.
+  # One unreadable row refuses the whole page rather than leaving a gap in it — the rule
+  # `to_fills/2` states: a list with an entry silently missing reconciles to a smaller
+  # number and looks complete.
+  defp reduce_rows(rows, builder) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case builder.(row) do
+        {:ok, built} -> {:cont, {:ok, [built | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, built} -> {:ok, Enum.reverse(built)}
+      error -> error
+    end
+  end
+
+  defp to_staking_balances(rows, at) do
+    reduce_rows(rows, &to_staking_balance(&1, at))
+  end
+
+  # `:asset` and `:staked` are both in `StakingBalance`'s `@enforce_keys`, so its `new/1`
+  # refuses a `nil` in either — and nothing here calls `new/1`, the struct being built
+  # literally as everywhere in this family, so that check never ran.
+  #
+  # `asset` had the same `String.upcase(row["currency"] || "")` that
+  # `to_staking_transaction/1` was fixed for: `""` is not a weaker answer but a different
+  # kind of wrong, because it passes every `nil` check a consumer might write while naming
+  # no asset at all. The fix went into one of the three functions that shared the line.
   defp to_staking_balance(row, at) when is_map(row) do
+    with {:ok, asset} <- required_id(row["currency"], :asset),
+         {:ok, staked} <- required_decimal(row["balance"], :staked) do
+      {:ok, build_staking_balance(row, at, asset, staked)}
+    end
+  end
+
+  defp to_staking_balance(_row, _at), do: {:error, :unexpected_response_shape}
+
+  defp build_staking_balance(row, at, asset, staked) do
     %StakingBalance{
-      asset: String.upcase(row["currency"] || ""),
-      staked: decimal(row["balance"]),
+      asset: String.upcase(asset),
+      staked: staked,
       available_to_trade: decimal(row["available"]),
       available_for_withdrawal: decimal(row["availableForWithdrawal"]),
       # Empty means the venue did not break the position down — never that there is one
@@ -1593,10 +1662,6 @@ defmodule DpExchange.Gemini.Private do
       venue_time: at,
       provider: :gemini
     }
-  end
-
-  defp to_staking_balance(_row, at) do
-    %StakingBalance{asset: "", staked: nil, venue_time: at, provider: :gemini}
   end
 
   @doc """
@@ -1621,14 +1686,25 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("providerId", Keyword.get(opts, :provider_id))
 
     with {:ok, rows, _headers} <- post("/v1/staking/rewards", params, credentials, opts) do
-      {:ok, rows |> List.wrap() |> Enum.map(&to_staking_reward/1)}
+      rows |> List.wrap() |> reduce_rows(&to_staking_reward/1)
     end
   end
 
+  # `:asset` and `:amount` are both in `StakingReward`'s `@enforce_keys`. Same `""` asset
+  # substitution as `to_staking_balance/2` and `to_staking_transaction/1`; same answer.
   defp to_staking_reward(row) when is_map(row) do
+    with {:ok, asset} <- required_id(row["currency"], :asset),
+         {:ok, amount} <- required_decimal(row["amount"], :amount) do
+      {:ok, build_staking_reward(row, asset, amount)}
+    end
+  end
+
+  defp to_staking_reward(_row), do: {:error, :unexpected_response_shape}
+
+  defp build_staking_reward(row, asset, amount) do
     %StakingReward{
-      asset: String.upcase(row["currency"] || ""),
-      amount: decimal(row["amount"]),
+      asset: String.upcase(asset),
+      amount: amount,
       provider_id: row["providerId"],
       apy_pct: decimal(row["apyPct"]),
       accrual_count: row["accrualCount"],
@@ -1636,10 +1712,6 @@ defmodule DpExchange.Gemini.Private do
       period_end: staking_time(row["until"]),
       provider: :gemini
     }
-  end
-
-  defp to_staking_reward(_row) do
-    %StakingReward{asset: "", amount: nil, provider: :gemini}
   end
 
   @doc """

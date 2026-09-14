@@ -24,6 +24,34 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`convert/4` returned a `Conversion` with `id: nil` on every single call.** It read the
+  identifier from `quoteId`, which is what the quote-and-commit endpoints send. The one-step
+  wrap endpoint that `convert/4` actually posts to names it `orderId` and sends no `quoteId`
+  at all — so the field came back `nil` every time, on a field `Conversion` marks required.
+  The test covering that path asserted on `status` and `expires_at` and never on the id, so
+  it passed throughout. Both spellings are read now.
+
+- **More required fields the contract says cannot be `nil`.** Nothing here calls a type's
+  `new/1` — every struct is built literally — so `@enforce_keys` never runs on venue data and
+  each guard is hand-written.
+
+  * `withdraw/6` built a `Withdrawal` with an unguarded id. A withdrawal with no id is a
+    transfer the caller cannot look up, reference, or reconcile — and the money has left.
+  * `to_conversion/5` left `from_asset` and `to_asset` unguarded. They fall back to the body
+    only when the caller did not name them, which `convert/4` does — so a body without
+    `totalSpendCurrency` produced a conversion naming neither side of itself.
+  * `get_staking_balances/2` and `get_staking_rewards/2` both carried
+    `String.upcase(row["currency"] || "")` — the same `""` substitution fixed in
+    `to_staking_transaction/1` last release. **That line appeared in three functions and only
+    one was fixed.** `""` is not a weaker answer: it passes every `nil` check a consumer
+    might write while naming no asset at all. Their `staked` and `amount` were unguarded too.
+
+  And two more fallback clauses hand-built the placeholder those guards exist to prevent —
+  `%StakingBalance{asset: "", staked: nil}` and `%StakingReward{asset: "", amount: nil}` —
+  for any row that was not a map. Both answer `{:error, :unexpected_response_shape}` now.
+
+### Fixed
+
 - **Three money-surface types could come back with the fields their own contract says cannot
   be `nil`.** Nothing in this package calls a type's `new/1` — every struct is built
   literally, as everywhere in this family — so the `@enforce_keys` check never runs on venue

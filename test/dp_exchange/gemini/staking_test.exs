@@ -192,6 +192,41 @@ defmodule DpExchange.Gemini.StakingTest do
       assert balance.available_for_withdrawal == nil
     end
 
+    test "a balance row naming no asset or no staked amount is refused" do
+      # `:asset` and `:staked` are both in `StakingBalance`'s `@enforce_keys`, so its `new/1`
+      # refuses a `nil` in either — and nothing calls `new/1`, the struct being built
+      # literally as everywhere in this family, so that check never ran.
+      #
+      # `asset` had the sharper version: `String.upcase(row["currency"] || "")` answered `""`
+      # for an absent currency, which passes every `nil` check a consumer might write while
+      # naming no asset at all. The identical line appeared in three functions here; only
+      # `to_staking_transaction/1` was fixed the first time, and this is one of the two that
+      # were left.
+      for {field, expected} <- [
+            {"currency", {:missing_required_field, :asset}},
+            {"balance", {:missing_required_field, :staked}}
+          ] do
+        rows = [Map.delete(%{"currency" => "ETH", "balance" => "10"}, field)]
+
+        assert {:error, ^expected} =
+                 Private.get_staking_balances(@credentials,
+                   plug: responding(rows),
+                   retry_attempts: 0
+                 ),
+               "a balance row missing #{field} must be refused"
+      end
+    end
+
+    test "a balance response that is not a row at all is an unreadable response" do
+      # This used to hand-build `%StakingBalance{asset: "", staked: nil}` for any non-map
+      # row — the exact placeholder the guards exist to prevent.
+      assert {:error, :unexpected_response_shape} =
+               Private.get_staking_balances(@credentials,
+                 plug: responding(["not a row"]),
+                 retry_attempts: 0
+               )
+    end
+
     test "a zero-balance row is kept" do
       # The host adapter dropped these, which makes "no position reported" and "no position"
       # the same answer. They are not.
@@ -242,6 +277,25 @@ defmodule DpExchange.Gemini.StakingTest do
       assert reward.accrual_count == 7
       assert reward.period_start == DateTime.from_unix!(1_787_500_000_000, :millisecond)
       assert reward.period_end == DateTime.from_unix!(1_787_936_401_000, :millisecond)
+    end
+
+    test "a reward row naming no asset or no amount is refused" do
+      # The third function that carried `String.upcase(row["currency"] || "")`. Same
+      # reasoning as `get_staking_balances/2` and `get_staking_history/2`: `""` names no
+      # asset while passing every `nil` check a consumer might write.
+      for {field, expected} <- [
+            {"currency", {:missing_required_field, :asset}},
+            {"amount", {:missing_required_field, :amount}}
+          ] do
+        rows = [Map.delete(%{"currency" => "ETH", "amount" => "0.1"}, field)]
+
+        assert {:error, ^expected} =
+                 Private.get_staking_rewards(@credentials,
+                   plug: responding(rows),
+                   retry_attempts: 0
+                 ),
+               "a reward row missing #{field} must be refused"
+      end
     end
 
     test "a window the venue does not report is nil, not the window that was asked for" do

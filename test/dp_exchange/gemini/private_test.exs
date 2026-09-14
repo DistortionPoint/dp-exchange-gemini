@@ -1107,6 +1107,14 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       assert_receive {:path, "/v1/wrap/gusdusd"}
       assert conversion.status == :settled
+
+      # The wrap endpoint names the identifier `orderId`; the quote-and-commit endpoints
+      # name it `quoteId`. Reading only the latter left EVERY wrap conversion with
+      # `id: nil`, on a field `Conversion` marks required — and this test, which is the
+      # one that covers the path, asserted on status and expiry and never on the id.
+      assert conversion.id == "77"
+      assert conversion.from_asset == "GUSD"
+      assert conversion.to_asset == "USD"
       # No quote was held, so there is no window and `expired?/2` reports unknown rather
       # than a boolean a caller could act on.
       assert conversion.expires_at == nil
