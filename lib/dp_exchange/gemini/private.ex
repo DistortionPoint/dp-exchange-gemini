@@ -1082,12 +1082,18 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("legacy", Keyword.get(opts, :legacy))
 
     with {:ok, body, _headers} <-
-           post("/v1/deposit/#{network}/newAddress", params, credentials, opts) do
+           post("/v1/deposit/#{network}/newAddress", params, credentials, opts),
+         # `:address` is in `DepositAddress`'s `@enforce_keys`, so its `new/1` refuses a
+         # `nil` there — and nothing here calls `new/1`, the struct being built literally as
+         # everywhere in this family, so that check never ran. An address is the entire
+         # content of this call: a `DepositAddress` carrying `nil` is not a weaker answer,
+         # it is one a caller can present to a person as somewhere to send funds.
+         {:ok, address} <- required_id(body["address"], :address) do
       {:ok,
        %DepositAddress{
          asset: asset,
          network: network,
-         address: body["address"],
+         address: address,
          memo: body["memo"],
          # Not `false`. This endpoint does not say, and `false` would be a claim that no
          # memo is needed — which on Solana or XRP loses the deposit.
@@ -1121,10 +1127,9 @@ defmodule DpExchange.Gemini.Private do
       network ->
         with {:ok, body, _headers} <-
                post("/v1/approvedAddresses/account/#{network}", %{}, credentials, opts) do
-          {:ok,
-           body
-           |> approved_rows()
-           |> Enum.map(&to_approved_address(&1, network))}
+          body
+          |> approved_rows()
+          |> to_approved_addresses(network)
         end
     end
   end
@@ -1133,9 +1138,37 @@ defmodule DpExchange.Gemini.Private do
   defp approved_rows(rows) when is_list(rows), do: rows
   defp approved_rows(_other), do: []
 
+  # One unreadable entry refuses the whole page rather than leaving a gap in it, the rule
+  # `to_fills/2` above already states: a list with an entry silently missing reconciles to a
+  # smaller number and looks complete.
+  defp to_approved_addresses(rows, network) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_approved_address(row, network) do
+        {:ok, address} -> {:cont, {:ok, [address | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, addresses} -> {:ok, Enum.reverse(addresses)}
+      error -> error
+    end
+  end
+
+  # `:address` is in `ApprovedAddress`'s `@enforce_keys`, so its `new/1` refuses a `nil`
+  # there — and nothing here calls `new/1`, the struct being built literally as everywhere in
+  # this family, so that check never ran. An allowlist entry with no address is the one shape
+  # this type must not take: a caller checking whether a withdrawal destination is approved
+  # would be comparing against nothing.
   defp to_approved_address(row, network) do
+    with {:ok, address} <- required_id(row["address"], :address) do
+      {:ok, to_approved_address(row, network, address)}
+    end
+  end
+
+  defp to_approved_address(row, network, address) do
     %ApprovedAddress{
-      address: row["address"],
+      address: address,
       network: row["network"] || network,
       status: approval_status(row["status"]),
       asset: nil,
@@ -1633,7 +1666,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("providerId", Keyword.get(opts, :provider_id))
 
     with {:ok, rows, _headers} <- post("/v1/staking/history", params, credentials, opts) do
-      {:ok, rows |> List.wrap() |> Enum.map(&to_staking_transaction/1)}
+      rows |> List.wrap() |> to_staking_transactions()
     end
   end
 
@@ -1680,7 +1713,7 @@ defmodule DpExchange.Gemini.Private do
       }
 
       with {:ok, body, _headers} <- post(path, params, credentials, opts) do
-        {:ok, to_staking_transaction(body)}
+        to_staking_transaction(body)
       end
     end
   end
@@ -1692,27 +1725,61 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # `StakingTransaction` names `:id`, `:type`, `:asset`, `:amount` and `:provider` in its
+  # `@enforce_keys`, so its `new/1` refuses a `nil` in any of them. Nothing here calls
+  # `new/1` — the struct is built literally, as everywhere in this family — so that check
+  # never ran and none of them was guarded.
+  #
+  # `asset` had the sharper version. `String.upcase(row["currency"] || "")` answered `""` for
+  # an absent currency: not a weaker answer but a different kind of wrong, because `""`
+  # passes every `nil` check a consumer might write while naming no asset at all. It is the
+  # same substitution this module already records for `to_string(nil)` on `order_id`, and the
+  # same answer applies.
+  #
+  # `:type` needs no guard — `staking_type/1` answers `:other` for a word this package does
+  # not know, which is a real value and deliberately so.
+  # One unreadable row refuses the whole page rather than leaving a gap in it — the rule
+  # `to_fills/2` above already states: a list with an entry silently missing reconciles to a
+  # smaller number and looks complete.
+  defp to_staking_transactions(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_staking_transaction(row) do
+        {:ok, transaction} -> {:cont, {:ok, [transaction | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, transactions} -> {:ok, Enum.reverse(transactions)}
+      error -> error
+    end
+  end
+
   defp to_staking_transaction(row) when is_map(row) do
+    with {:ok, id} <- required_id(row["transactionId"] || row["id"], :id),
+         {:ok, asset} <- required_id(row["currency"], :asset),
+         {:ok, amount} <- required_decimal(row["amount"], :amount) do
+      {:ok, build_staking_transaction(row, id, asset, amount)}
+    end
+  end
+
+  # This used to hand-build the exact struct the guards above exist to prevent — `id: nil`,
+  # `asset: ""`, `amount: nil` — for any row that was not a map. A staking transaction naming
+  # no id, no asset and no amount is not a degraded record, it is a placeholder wearing the
+  # shape of one.
+  defp to_staking_transaction(_row), do: {:error, :unexpected_response_shape}
+
+  defp build_staking_transaction(row, id, asset, amount) do
     %StakingTransaction{
-      id: row["transactionId"] || row["id"],
+      id: id,
       type: staking_type(row["transactionType"]),
       venue_type: row["transactionType"],
-      asset: String.upcase(row["currency"] || ""),
-      amount: decimal(row["amount"]),
+      asset: String.upcase(asset),
+      amount: amount,
       amount_paid_so_far: decimal(row["amountPaidSoFar"]),
       amount_remaining: decimal(row["amountRemaining"]),
       provider_id: row["providerId"],
       venue_time: staking_time(row["timestamp"] || row["timestampms"]),
-      provider: :gemini
-    }
-  end
-
-  defp to_staking_transaction(_row) do
-    %StakingTransaction{
-      id: nil,
-      type: :other,
-      asset: "",
-      amount: nil,
       provider: :gemini
     }
   end

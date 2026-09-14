@@ -414,6 +414,26 @@ defmodule DpExchange.GeminiDelegationTest do
       assert address.network == "bitcoin"
     end
 
+    test "a deposit address the venue did not state is refused, never nil", %{opts: sup} do
+      # `:address` is in `DepositAddress`'s `@enforce_keys`, so its `new/1` refuses a `nil`
+      # there — and nothing calls `new/1`, the struct being built literally as everywhere in
+      # this family, so that check never ran. An address is the entire content of this call:
+      # a `DepositAddress` carrying `nil` is not a weaker answer, it is one a caller can
+      # present to a person as somewhere to send funds.
+      assert {:error, {:missing_required_field, :address}} =
+               Gemini.get_deposit_address("BTC", "bitcoin", money_opts(sup, %{"memo" => "x"}))
+    end
+
+    test "an approved address with no address refuses the page", %{opts: sup} do
+      # An allowlist entry with no address is the one shape this type must not take: a caller
+      # checking whether a withdrawal destination is approved would be comparing against
+      # nothing.
+      body = %{"approvedAddresses" => [%{"status" => "active"}]}
+
+      assert {:error, {:missing_required_field, :address}} =
+               Gemini.list_approved_addresses(money_opts(sup, body, network: "ethereum"))
+    end
+
     test "list_approved_addresses/1", %{opts: sup} do
       body = %{"approvedAddresses" => [%{"address" => "0x1", "status" => "active"}]}
 
@@ -549,13 +569,26 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "get_staking_history/1", %{opts: sup} do
-      rows = [%{"transactionType" => "Redeem", "currency" => "ETH", "amount" => "1"}]
+      rows = [
+        %{
+          "transactionId" => "stk-d1",
+          "transactionType" => "Redeem",
+          "currency" => "ETH",
+          "amount" => "1"
+        }
+      ]
+
       assert {:ok, [tx]} = Gemini.get_staking_history(money_opts(sup, rows))
       assert tx.type == :unstake
     end
 
     test "stake/3 and unstake/3 both reach the venue", %{opts: sup} do
-      body = %{"transactionType" => "Deposit", "currency" => "ETH", "amount" => "1"}
+      body = %{
+        "transactionId" => "stk-d2",
+        "transactionType" => "Deposit",
+        "currency" => "ETH",
+        "amount" => "1"
+      }
 
       assert {:ok, _tx} =
                Gemini.stake(

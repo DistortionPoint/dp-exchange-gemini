@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Three money-surface types could come back with the fields their own contract says cannot
+  be `nil`.** Nothing in this package calls a type's `new/1` — every struct is built
+  literally, as everywhere in this family — so the `@enforce_keys` check never runs on venue
+  data and each guard has to be written out by hand. These were not.
+
+  * `get_deposit_address/4` built a `DepositAddress` with `address: body["address"]`. An
+    address is the entire content of that call, and a `nil` there is not a weaker answer: it
+    is one a caller can present to a person as somewhere to send funds.
+  * `list_approved_addresses/2` built an `ApprovedAddress` with `address: row["address"]`. An
+    allowlist entry with no address is the one shape that type must not take — a caller
+    checking whether a withdrawal destination is approved would be comparing against nothing.
+  * `get_staking_history/2`, `stake/4` and `unstake/4` built a `StakingTransaction` with
+    `id`, `asset` and `amount` all unguarded. `asset` had the sharper version:
+    `String.upcase(row["currency"] || "")` answered `""` for an absent currency, which passes
+    every `nil` check a consumer might write while naming no asset at all — the same
+    substitution this module already records for `to_string(nil)` on `order_id`.
+
+  And a fallback clause hand-built exactly the struct those guards exist to prevent —
+  `id: nil, type: :other, asset: "", amount: nil` — for any row that was not a map. That is
+  not a degraded record, it is a placeholder wearing the shape of one; it answers
+  `{:error, :unexpected_response_shape}` now.
+
+  An unreadable row refuses the whole page rather than being dropped from it, the rule
+  `to_fills/2` in this same module already states: a list with an entry silently missing
+  reconciles to a smaller number and looks complete.
+
 ## [0.2.37] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

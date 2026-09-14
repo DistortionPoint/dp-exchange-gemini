@@ -307,7 +307,14 @@ defmodule DpExchange.Gemini.StakingTest do
     end
 
     test "the venue's own word is kept beside the normalised one" do
-      rows = [%{"transactionType" => "Deposit", "currency" => "ETH", "amount" => "1"}]
+      rows = [
+        %{
+          "transactionId" => "stk-2",
+          "transactionType" => "Deposit",
+          "currency" => "ETH",
+          "amount" => "1"
+        }
+      ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
@@ -319,8 +326,59 @@ defmodule DpExchange.Gemini.StakingTest do
       assert tx.venue_type == "Deposit"
     end
 
+    test "a staking row missing an identifying field is refused, not filled with placeholders" do
+      # `StakingTransaction` names `:id`, `:type`, `:asset`, `:amount` and `:provider` in its
+      # `@enforce_keys`, so its `new/1` refuses a `nil` in any of them. Nothing here calls
+      # `new/1` — the struct is built literally, as everywhere in this family — so that check
+      # never ran and none of these was guarded.
+      #
+      # `asset` had the sharper version: `String.upcase(row["currency"] || "")` answered `""`
+      # for an absent currency, which is not a weaker answer but a different kind of wrong,
+      # because `""` passes every `nil` check a consumer might write while naming no asset at
+      # all. The same substitution this module already records for `to_string(nil)` on
+      # `order_id`.
+      complete = %{
+        "transactionId" => "stk-9",
+        "transactionType" => "Deposit",
+        "currency" => "ETH",
+        "amount" => "1"
+      }
+
+      for {field, expected} <- [
+            {"transactionId", {:missing_required_field, :id}},
+            {"currency", {:missing_required_field, :asset}},
+            {"amount", {:missing_required_field, :amount}}
+          ] do
+        assert {:error, ^expected} =
+                 Private.get_staking_history(@credentials,
+                   plug: responding([Map.delete(complete, field)]),
+                   retry_attempts: 0
+                 ),
+               "a staking row missing #{field} must be refused"
+      end
+    end
+
+    test "a staking response that is not a row at all is an unreadable response" do
+      # This used to hand-build the exact struct the guards exist to prevent — `id: nil`,
+      # `asset: ""`, `amount: nil` — for any row that was not a map. A staking transaction
+      # naming no id, no asset and no amount is not a degraded record, it is a placeholder
+      # wearing the shape of one.
+      assert {:error, :unexpected_response_shape} =
+               Private.get_staking_history(@credentials,
+                 plug: responding(["not a row"]),
+                 retry_attempts: 0
+               )
+    end
+
     test "an unrecognised type is :other, not the nearest atom that fits" do
-      rows = [%{"transactionType" => "Slashing", "currency" => "ETH", "amount" => "1"}]
+      rows = [
+        %{
+          "transactionId" => "stk-3",
+          "transactionType" => "Slashing",
+          "currency" => "ETH",
+          "amount" => "1"
+        }
+      ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
@@ -333,7 +391,14 @@ defmodule DpExchange.Gemini.StakingTest do
     end
 
     test "an Interest row is a reward" do
-      rows = [%{"transactionType" => "Interest", "currency" => "ETH", "amount" => "0.01"}]
+      rows = [
+        %{
+          "transactionId" => "stk-4",
+          "transactionType" => "Interest",
+          "currency" => "ETH",
+          "amount" => "0.01"
+        }
+      ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
@@ -349,6 +414,7 @@ defmodule DpExchange.Gemini.StakingTest do
       # past the epoch ceiling and raises.
       seconds = [
         %{
+          "transactionId" => "stk-5",
           "transactionType" => "Deposit",
           "currency" => "ETH",
           "amount" => "1",
@@ -384,7 +450,16 @@ defmodule DpExchange.Gemini.StakingTest do
       assert {:ok, _tx} =
                Private.stake("eth", Decimal.new("1.5"), @credentials,
                  provider_id: "provider-a",
-                 plug: capturing(%{"transactionType" => "Deposit"}, me),
+                 plug:
+                   capturing(
+                     %{
+                       "transactionId" => "stk-6",
+                       "transactionType" => "Deposit",
+                       "currency" => "ETH",
+                       "amount" => "1.5"
+                     },
+                     me
+                   ),
                  retry_attempts: 0
                )
 
@@ -400,7 +475,16 @@ defmodule DpExchange.Gemini.StakingTest do
       assert {:ok, _tx} =
                Private.stake("ETH", Decimal.new("0.00000001"), @credentials,
                  provider_id: "provider-a",
-                 plug: capturing(%{}, me),
+                 plug:
+                   capturing(
+                     %{
+                       "transactionId" => "stk-7",
+                       "transactionType" => "Deposit",
+                       "currency" => "ETH",
+                       "amount" => "0.00000001"
+                     },
+                     me
+                   ),
                  retry_attempts: 0
                )
 
