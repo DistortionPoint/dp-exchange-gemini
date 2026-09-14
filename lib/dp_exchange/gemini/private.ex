@@ -171,8 +171,8 @@ defmodule DpExchange.Gemini.Private do
       params =
         %{
           "symbol" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
-          "amount" => to_string(Map.fetch!(request, :quantity)),
-          "price" => to_string(price),
+          "amount" => decimal_string(Map.fetch!(request, :quantity)),
+          "price" => decimal_string(price),
           "side" => to_string(Map.fetch!(request, :side)),
           "type" => type,
           "options" => options
@@ -853,7 +853,7 @@ defmodule DpExchange.Gemini.Private do
       params = %{
         "symbol" => symbol,
         "side" => side,
-        "totalSpend" => to_string(amount)
+        "totalSpend" => decimal_string(amount)
       }
 
       with {:ok, body, headers} <- post("/v1/instant/quote", params, credentials, opts) do
@@ -1025,7 +1025,7 @@ defmodule DpExchange.Gemini.Private do
     credentials = Keyword.get(opts, :credentials, %{})
 
     with {:ok, symbol, side} <- instant_pair(from, to, opts) do
-      params = %{"amount" => to_string(amount), "side" => side}
+      params = %{"amount" => decimal_string(amount), "side" => side}
 
       with {:ok, body, headers} <- post_once("/v1/wrap/#{symbol}", params, credentials, opts) do
         to_conversion(body, from, to, :settled, headers)
@@ -1272,7 +1272,7 @@ defmodule DpExchange.Gemini.Private do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def estimate_withdrawal_fee(asset, network, amount, credentials, opts) do
     with {:ok, address} <- required_address(opts) do
-      params = %{"address" => address, "amount" => to_string(amount)}
+      params = %{"address" => address, "amount" => decimal_string(amount)}
       ticker = String.downcase(asset)
 
       with {:ok, body, _headers} <-
@@ -2230,6 +2230,10 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp maybe_param(pairs, _name, nil), do: pairs
+
+  defp maybe_param(pairs, name, %Decimal{} = value),
+    do: [{name, decimal_string(value)} | pairs]
+
   defp maybe_param(pairs, name, value), do: [{name, to_string(value)} | pairs]
 
   defp report_date(%Date{} = date), do: Date.to_iso8601(date)
@@ -2357,6 +2361,16 @@ defmodule DpExchange.Gemini.Private do
   end
 
   # Full notation, never scientific: `1E-8` is not a number this venue reads.
+  #
+  # **`Decimal.to_string/1` defaults to SCIENTIFIC**, and `to_string/1` on a `%Decimal{}`
+  # reaches that same default through `String.Chars`. An exponent is not exotic:
+  # `Decimal.normalize/1` — the ordinary way to strip trailing zeros — turns `150.00` into
+  # `1.5E+2`, and anything below a millionth carries one by construction.
+  #
+  # This helper existed, with that first line on it, while `place_order/3` sent its `amount`
+  # and `price` through bare `to_string/1` a few hundred lines above. The generic
+  # `maybe_put/3` and `maybe_param/3` now refuse a `%Decimal{}` before it can reach
+  # `String.Chars` at all, so a new money field cannot repeat it by being added to a map.
   defp decimal_string(nil), do: nil
   defp decimal_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
   defp decimal_string(value), do: to_string(value)
@@ -2865,6 +2879,10 @@ defmodule DpExchange.Gemini.Private do
   defp stringify(params), do: Map.new(params, fn {k, v} -> {to_string(k), v} end)
 
   defp maybe_put(map, _key, nil), do: map
+
+  defp maybe_put(map, key, %Decimal{} = value),
+    do: Map.put(map, key, decimal_string(value))
+
   defp maybe_put(map, key, value), do: Map.put(map, key, to_string(value))
 
   defp take_params(opts, keys) do

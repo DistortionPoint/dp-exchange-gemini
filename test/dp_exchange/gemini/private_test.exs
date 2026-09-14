@@ -120,6 +120,38 @@ defmodule DpExchange.Gemini.PrivateTest do
   end
 
   describe "place_order/3 — what actually goes on the wire" do
+    test "a normalized or very small number is sent in full notation, never scientific" do
+      # `Decimal.to_string/1` defaults to SCIENTIFIC, and `to_string/1` on a `%Decimal{}`
+      # reaches that same default through `String.Chars`. So an amount or price carrying an
+      # exponent went onto the wire as `"1.5E+2"` or `"1E-8"` — not a number this venue
+      # reads, and a different order if it read one at all.
+      #
+      # An exponent is not exotic: `Decimal.normalize/1`, the ordinary way to strip trailing
+      # zeros, turns `150.00` into `1.5E+2`, and anything below a millionth carries one by
+      # construction.
+      #
+      # `decimal_string/1` in this module already carried the line "Full notation, never
+      # scientific: `1E-8` is not a number this venue reads" — while `place_order/3` sent
+      # both its money fields through bare `to_string/1` a few hundred lines above it.
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.00000001"),
+        price: Decimal.normalize(Decimal.new("150.00"))
+      }
+
+      Private.place_order(@credentials, request,
+        plug: capturing(@order, self()),
+        retry_attempts: 0
+      )
+
+      assert_receive {:payload, payload}
+      assert payload["amount"] == "0.00000001"
+      assert payload["price"] == "150"
+      refute String.contains?(payload["amount"], "E")
+      refute String.contains?(payload["price"], "E")
+    end
+
     test "a limit order sends the venue's own type string and no options" do
       Private.place_order(@credentials, @request,
         plug: capturing(@order, self()),

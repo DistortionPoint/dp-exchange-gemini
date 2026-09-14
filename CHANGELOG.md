@@ -24,6 +24,27 @@ acceptable changelog line.
 
 ### Fixed
 
+- **An order price or size could go onto the wire in scientific notation.**
+  `Decimal.to_string/1` defaults to `:scientific`, and `to_string/1` on a `%Decimal{}`
+  reaches that same default through `String.Chars` — so a value carrying an exponent was
+  serialised as `"1.5E+2"` or `"1E-8"`. That is not a number this venue reads, and a
+  different order if it read one at all.
+
+  **An exponent is not exotic.** `Decimal.normalize/1` — the ordinary way to strip trailing
+  zeros — turns `150.00` into `1.5E+2`, and anything below a millionth carries one by
+  construction: `Decimal.new("0.00000001")` is `1E-8`. A caller normalising a price before
+  placing an order is doing something entirely reasonable.
+
+  Every money field now goes through a helper that asks for `:normal` explicitly, and the
+  generic map-building helpers refuse a `%Decimal{}` before it can reach `String.Chars` at
+  all — so a money field added to a payload later cannot reintroduce it.
+
+  This was found in four of the five venue packages at once. Each of them already said
+  `:normal` *somewhere* — in a conversion helper, a withdrawal amount, an option parameter —
+  and none of them had said it on the order path, which is the one that spends money.
+
+### Fixed
+
 - **A timed-out order, conversion or staking write was retried, and could happen twice.**
   Those calls went through the shared `post/4`, which forwards `:retry_attempts` into
   `Core.HttpClient` — and that retries anything that is not a 4xx, including a timeout and a
