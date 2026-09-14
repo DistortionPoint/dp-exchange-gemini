@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.40] - 2026-09-14
+
 ### Fixed
 
 - **A timed-out order, conversion or staking write was retried, and could happen twice.**
