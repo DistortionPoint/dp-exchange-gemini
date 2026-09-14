@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.38] - 2026-09-14
+
 ### Fixed
 
 - **Three money-surface types could come back with the fields their own contract says cannot
