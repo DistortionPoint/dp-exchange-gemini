@@ -655,7 +655,24 @@ defmodule DpExchange.Gemini.Fake do
       end
     end
 
-    Process.put(__MODULE__, MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+    # **Added to, never replacing.** This was the identical line `update_symbols/2`
+    # carries below — the two callbacks were byte-for-byte the same function — so a
+    # second `subscribe/2` dropped whatever the first had subscribed. The real
+    # facade unions (`wanted: MapSet.union(state.wanted, MapSet.new(symbols))` in
+    # `Feed`), so a consumer's tier-1 tests against this fake certified the opposite
+    # of what the venue does: subscribe twice, keep one symbol here, keep both there.
+    #
+    # The contract settles which is right without needing a new sentence in it.
+    # `c:DpExchange.Core.Venue.update_symbols/2` exists to "change a live
+    # subscription's symbol set", and `c:unsubscribe/2` to stop delivery for named
+    # symbols. Neither has any purpose if `subscribe/2` already replaces — you would
+    # just subscribe the new list. Two callbacks the contract distinguishes,
+    # implemented as one function, is the tell.
+    Process.put(
+      __MODULE__,
+      MapSet.union(subscribed(), MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+    )
+
     :ok
   end
 

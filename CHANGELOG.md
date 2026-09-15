@@ -20,6 +20,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Fake.subscribe/2` replaced the live subscription instead of adding to it.** It was the
+  identical line `update_symbols/2` carries — the two callbacks were byte-for-byte the same
+  function — so a second `subscribe/2` silently dropped whatever the first had subscribed.
+
+  The real facade unions (`wanted: MapSet.union(state.wanted, MapSet.new(symbols))` in
+  `Feed`), and so does every other venue package in this family. A consumer's tier-1 tests
+  against this fake therefore certified the opposite of what the venue does: subscribe twice,
+  keep one symbol here and both there. That is precisely the "differently capable" divergence
+  a fake exists not to have.
+
+  `c:DpExchange.Core.Venue.subscribe/2`'s own doc does not state which it is, and it does not
+  need to — the contract settles it by shape. `c:update_symbols/2` exists to "change a live
+  subscription's symbol set" and `c:unsubscribe/2` to stop delivery for named symbols; neither
+  has any purpose if `subscribe/2` already replaces, since a caller would just subscribe the
+  new list. Two callbacks the contract distinguishes, implemented as one function, is the tell.
+
+  Found by asking all five fakes the same three questions in order — subscribe, subscribe
+  again, unsubscribe, replace — and four of the five answered differently from the fifth.
+  Core's conformance suite gains assertion 26 so the next venue cannot reintroduce it.
+
 ## [0.2.43] - 2026-09-15
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
