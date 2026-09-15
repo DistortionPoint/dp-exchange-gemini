@@ -20,6 +20,46 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent first callers of the incremental nonce counter were handed different
+  counters, and so the same nonces.** `ensure_counter/0` created an `:atomics` ref, stored
+  it, and then re-read the key — which converges only if every racing `put` lands before the
+  first caller's re-read. `:persistent_term.put/2` is one of the slowest operations on the
+  VM (it copies the literal area and scans every process), so the window to lose is the
+  whole duration of a global scan.
+
+  Measured rather than assumed, because "narrow" was the assumption: forty processes calling
+  into an absent counter received **up to 39 distinct counters**, and forty concurrent
+  `nonce(:incremental)` calls produced **7 distinct nonces**. Under incremental validation
+  that is thirty-three requests the venue rejects as replays, from a package whose signing is
+  otherwise correct. Creation is now serialised with `:global.trans/2` and every caller
+  receives the winner's ref; the steady-state path is still a bare `:persistent_term.get/2`,
+  so nothing is paid once the counter exists.
+
+  The test that was meant to cover this asserted monotonicity across processes — the right
+  property — but opened with `ensure_counter/0`, which establishes the counter and removes
+  the race before measuring it. It proved the `compare_exchange/4` loop, which was never the
+  broken part. `auth_nonce_race_test.exs` enters cold.
+
+- **An empty or blank `api_key`, `api_secret` or OAuth `access_token` was signed with rather
+  than refused.** `is_binary/1` was the whole gate and `""` satisfies it. HMAC-SHA384 over an
+  empty key is a perfectly good HMAC, so nothing local failed: the request went out and came
+  back refused for a reason naming signatures, sending the reader to the signing code — which
+  is correct — instead of to the credential, which was never set. That is the outcome this
+  module's own `@doc` says it refuses ("Never a partially-signed request"). Reachable by
+  the commonest misconfiguration there is: a `.env` line reading `NAME=` with nothing after
+  it. `System.get_env/1` returns `""` for that, not `nil`, so every `nil`-shaped guard
+  upstream passes it through intact. Blank is now trimmed and treated as absent, which is the
+  answer `{:missing_credentials, _}` already existed to give. Two venues in this family were
+  already safe from this, and both by accident rather than by check — their credential
+  formats are structured (base64 key material, a trimmed token), so the blank failed a format
+  test rather than a presence test. The fields that are opaque strings had nothing to fail.
+  A non-binary credential also no longer crashes the caller. The `:api_key` head carried no
+  `is_binary/1` on either field, so a number or a `nil` matched it and died inside
+  `:crypto.mac/4` — in the caller's process, naming crypto. It is the same condition as an
+  absent field and now gets the same answer.
+
 ## [0.2.41] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

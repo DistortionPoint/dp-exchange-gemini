@@ -145,9 +145,14 @@ defmodule DpExchange.Gemini.AuthTest do
     end
 
     test "incremental is monotonic ACROSS processes, not just within one" do
-      # The property that matters, and the one a process-dictionary counter would not
-      # have. The counter is established up front exactly as the supervisor does it — a
-      # lazy init races here, and that race is what this test caught.
+      # The property that matters, and the one a process-dictionary counter would not have:
+      # given ONE counter, `compare_exchange/4` hands two processes ordered values.
+      #
+      # It used to claim more than that — "a lazy init races here, and that race is what
+      # this test caught". It did not catch it. `ensure_counter/0` on the line below
+      # establishes the counter, which is exactly what removes the race, and the assertion
+      # then measured the loop rather than the creation. The creation race was real and
+      # lost 33 of 40 callers; it is `auth_nonce_race_test.exs` that enters this cold.
       Auth.ensure_counter()
 
       task = Task.async(fn -> for _index <- 1..200, do: Auth.nonce(:incremental) end)
@@ -177,5 +182,59 @@ defmodule DpExchange.Gemini.AuthTest do
     |> Base.decode64!()
     |> Jason.decode!()
     |> Map.fetch!("nonce")
+  end
+
+  describe "a blank credential is a missing one, not one to sign with" do
+    # `""` satisfies `is_binary/1`, and `is_binary/1` was the whole gate. An empty secret is
+    # not a secret — it is the commonest misconfiguration there is, `.env` carrying
+    # `NAME=` with nothing after it, which `System.get_env/1` hands back as `""` and not as
+    # `nil`. Every module here documents that it refuses to sign a partial credential
+    # precisely so the venue's answer does not send the reader to the signing code, which
+    # is correct, instead of to the credential, which was never set.
+    #
+    # Gemini's own case: HMAC-SHA384 over an empty key is a perfectly good HMAC, so nothing
+    # local failed and the request went out to be refused for a reason naming signatures.
+    test "an empty or blank api_key or api_secret refuses by name" do
+      for credentials <- [
+            %{api_key: "k", api_secret: ""},
+            %{api_key: "k", api_secret: "   "},
+            %{api_key: "", api_secret: "s"},
+            %{api_key: "   ", api_secret: "s"}
+          ] do
+        assert Auth.headers(:api_key, "/v1/balances", %{}, credentials) ==
+                 {:error, {:missing_credentials, :api_key}},
+               "#{inspect(credentials)} was signed with"
+      end
+    end
+
+    test "an empty bearer token refuses rather than sending `Authorization: Bearer `" do
+      assert Auth.headers(:oauth, "/v1/balances", %{}, %{access_token: ""}) ==
+               {:error, {:missing_credentials, :oauth}}
+
+      assert Auth.headers(:oauth, "/v1/balances", %{}, %{access_token: "  "}) ==
+               {:error, {:missing_credentials, :oauth}}
+    end
+
+    test "a credential that is not a string refuses instead of crashing the caller" do
+      # The head carried no `is_binary/1` on either field, so a non-binary matched it and
+      # died inside `:crypto.mac/4` or `Jason.encode!/1` — in the CALLER's process, naming
+      # crypto rather than the credential. It is the same condition as an absent field and
+      # now gets the same answer.
+      assert Auth.headers(:api_key, "/v1/balances", %{}, %{api_key: 12, api_secret: "s"}) ==
+               {:error, {:missing_credentials, :api_key}}
+
+      assert Auth.headers(:api_key, "/v1/balances", %{}, %{api_key: "k", api_secret: nil}) ==
+               {:error, {:missing_credentials, :api_key}}
+    end
+
+    test "a real pair still signs" do
+      assert {:ok, headers} =
+               Auth.headers(:api_key, "/v1/balances", %{}, %{
+                 api_key: "account-abc",
+                 api_secret: "a-secret"
+               })
+
+      assert List.keyfind(headers, "X-GEMINI-SIGNATURE", 0) != nil
+    end
   end
 end

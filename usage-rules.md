@@ -395,6 +395,15 @@ global switch, and it will not redirect your live path.
 It **signs** a request when you hand it credentials and tell it which scheme you chose. It
 never obtains, stores, refreshes, or infers one, and it has no default scheme.
 
+**A blank credential counts as a missing one.** An `:api_key`, `:api_secret` or OAuth
+`:access_token` that is `""`, or only whitespace, is refused with
+`{:error, {:missing_credentials, scheme}}` — it is never signed with. This matters because
+the usual way a credential goes missing is not a `nil`: it is a `.env` line reading `NAME=`
+with nothing after it, and `System.get_env/1` hands that back as `""`. HMAC over an empty key
+is a perfectly good HMAC, so signing with it produced a well-formed request the venue refused
+for a reason naming signatures — which points at the signing code rather than at the
+credential.
+
 That is a boundary, not a gap. Gemini offers two authentication types and they are not two
 spellings of one thing:
 

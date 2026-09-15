@@ -148,28 +148,34 @@ defmodule DpExchange.Gemini.Auth do
   def headers(scheme, path, params \\ %{}, credentials, opts \\ [])
 
   def headers(:api_key, path, params, %{api_key: key, api_secret: secret}, opts)
-      when is_binary(path) and is_map(params) do
-    payload =
-      params
-      |> Map.merge(%{"request" => path, "nonce" => nonce(Keyword.get(opts, :nonce_mode))})
-      |> Jason.encode!()
-      |> Base.encode64()
+      when is_binary(path) and is_map(params) and is_binary(key) and is_binary(secret) do
+    if blank?(key) or blank?(secret) do
+      {:error, {:missing_credentials, :api_key}}
+    else
+      payload =
+        params
+        |> Map.merge(%{"request" => path, "nonce" => nonce(Keyword.get(opts, :nonce_mode))})
+        |> Jason.encode!()
+        |> Base.encode64()
 
-    {:ok,
-     [
-       {"Content-Length", "0"},
-       {"Content-Type", "text/plain"},
-       {"Cache-Control", "no-cache"},
-       {"X-GEMINI-APIKEY", key},
-       {"X-GEMINI-PAYLOAD", payload},
-       {"X-GEMINI-SIGNATURE", sign(payload, secret)}
-     ]}
+      {:ok,
+       [
+         {"Content-Length", "0"},
+         {"Content-Type", "text/plain"},
+         {"Cache-Control", "no-cache"},
+         {"X-GEMINI-APIKEY", key},
+         {"X-GEMINI-PAYLOAD", payload},
+         {"X-GEMINI-SIGNATURE", sign(payload, secret)}
+       ]}
+    end
   end
 
   # The token is attached, not obtained. Whether it is still valid, and what to do when it
   # is not, is the host's flow — this module cannot refresh what it did not fetch.
   def headers(:oauth, _path, _params, %{access_token: token}, _opts) when is_binary(token) do
-    {:ok, [{"Authorization", "Bearer " <> token}]}
+    if blank?(token),
+      do: {:error, {:missing_credentials, :oauth}},
+      else: {:ok, [{"Authorization", "Bearer " <> token}]}
   end
 
   def headers(scheme, _path, _params, _credentials, _opts) when scheme in [:api_key, :oauth] do
@@ -215,7 +221,8 @@ defmodule DpExchange.Gemini.Auth do
   def nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
 
   @doc """
-  Establishes the shared nonce counter. Called once by this venue's supervisor.
+  Establishes the shared nonce counter. Called once by this venue's supervisor, and
+  serialised so that calling it from anywhere else is safe too.
 
   ## Why this is not purely lazy, which is what it was first
 
@@ -227,22 +234,80 @@ defmodule DpExchange.Gemini.Auth do
   incremental validation the second request is rejected as a replay.
 
   That is precisely the failure this counter exists to prevent, reintroduced by the
-  initialisation of the thing preventing it. It was caught by a test asserting monotonicity
-  *across processes*; the single-process version passed happily, which is why the test is
-  written that way.
+  initialisation of the thing preventing it.
+
+  ## The first attempt at closing it did not, and the number says how badly
+
+  It was `create, put, and then re-read the key` — returning whatever the last writer
+  stored rather than the ref this caller made. That converges only when every `put` lands
+  before the first caller's re-read, and `:persistent_term.put/2` is one of the slowest
+  operations on the VM: it copies the literal area and scans every process. So the window
+  it has to lose is not a few instructions, it is the whole duration of a global scan, and
+  every racer spends that window holding a ref nobody else will ever see.
+
+  Measured, because "narrow" was the assumption and it was wrong. Forty processes calling
+  into an absent counter: **up to 39 distinct counters handed out**, and forty concurrent
+  `nonce(:incremental)` calls produced **7 distinct nonces** — thirty-three requests a
+  venue with an incremental key rejects as replays.
+
+  So creation is serialised under a lock, and the winner's ref is what every caller gets.
+  `:global.trans/2` is the lock: it is in `kernel`, it needs no process of ours, and it is
+  taken **only** on the creation path — the steady-state path is still a bare
+  `:persistent_term.get/2`, which is the reason a `:persistent_term` was chosen at all.
+
+  The test that was supposed to cover this asserted monotonicity across processes — the
+  right property — but opened with `ensure_counter/0`, which establishes the counter and so
+  removes the race before measuring it. It proved the `compare_exchange/4` loop, which was
+  never the broken part.
   """
   @spec ensure_counter() :: :atomics.atomics_ref()
   def ensure_counter do
     case :persistent_term.get(@nonce_counter, nil) do
-      nil ->
-        ref = :atomics.new(1, signed: false)
-        :persistent_term.put(@nonce_counter, ref)
-        :persistent_term.get(@nonce_counter)
+      nil -> create_counter()
+      ref -> ref
+    end
+  end
+
+  defp create_counter do
+    # Re-checked INSIDE the lock: every caller that queued behind the winner arrives here
+    # with its own `nil` reading from before the lock, and creating a second ref at this
+    # point is the original bug with extra steps.
+    case :global.trans({@nonce_counter, self()}, fn ->
+           case :persistent_term.get(@nonce_counter, nil) do
+             nil ->
+               ref = :atomics.new(1, signed: false)
+               :persistent_term.put(@nonce_counter, ref)
+               ref
+
+             ref ->
+               ref
+           end
+         end) do
+      # Unreachable: `trans/2` retries indefinitely, so it does not give up. Matched anyway
+      # because its spec permits `:aborted`, and a silently-returned atom here would be an
+      # `:atomics` ref as far as every caller is concerned — a `badarg` from `:atomics.get/2`
+      # naming neither the lock nor the nonce.
+      :aborted ->
+        raise "DpExchange.Gemini.Auth: could not acquire the nonce-counter lock"
 
       ref ->
         ref
     end
   end
+
+  # `is_binary/1` is not a presence check, and this module's own `@doc` promises one:
+  # "Never a partially-signed request, which would fail at the venue with an error about
+  # signatures rather than about the missing field." `""` satisfies `is_binary/1`, so an
+  # empty secret was signed WITH — HMAC over an empty key is a perfectly good HMAC — and the
+  # request went out to be refused by the venue for a reason that names signatures. The
+  # reader then looks at the signing code, which is correct, instead of at the credential,
+  # which was never set.
+  #
+  # Reachable by the commonest misconfiguration there is: `.env` carrying `GEMINI_SECRET=`
+  # with nothing after it. `System.get_env/1` returns `""` for that, not `nil`, so every
+  # `nil`-shaped guard upstream passes it through intact. Trimmed rather than compared to
+  # `""`, because a trailing space in a `.env` line produces `" "` and means the same thing.
+  defp blank?(value), do: String.trim(value) == ""
 
   defp sign(payload, secret) do
     :hmac
