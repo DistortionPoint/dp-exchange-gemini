@@ -100,9 +100,38 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "a book is an OrderBook with Decimal level tuples" do
-      assert {:ok, %OrderBook{bids: [{price, size}]}} = Fake.get_order_book("BTC-USD")
-      assert %Decimal{} = price
-      assert %Decimal{} = size
+      assert {:ok, %OrderBook{bids: bids, asks: asks}} = Fake.get_order_book("BTC-USD")
+
+      for {price, size} <- bids ++ asks do
+        assert %Decimal{} = price
+        assert %Decimal{} = size
+      end
+    end
+
+    test "the book is deep enough for its own ordering to be checkable" do
+      # This pinned `bids: [{price, size}]` — one level, exactly — and that pin was part of
+      # why the fixture stayed one level deep. `Core.AdapterContract`'s assertion 25 checks
+      # that bids come back highest-first and asks lowest-first, and against a one-element
+      # list it cannot fail: there is no pair of prices to put in the wrong order. The
+      # assertion ran, reached this function, and reported green for having looked at
+      # nothing.
+      #
+      # So the depth is asserted here as a property of the fixture, in this package, next to
+      # the fake it constrains — Core refuses a thinner book too, and the two are meant to
+      # be saying the same thing from both ends.
+      assert {:ok, %OrderBook{bids: bids, asks: asks}} = Fake.get_order_book("BTC-USD")
+
+      assert length(bids) >= 2, "a one-level book makes assertion 25 incapable of failing"
+      assert length(asks) >= 2, "a one-level book makes assertion 25 incapable of failing"
+    end
+
+    test "the book is ordered the way Core.Types.OrderBook requires" do
+      assert {:ok, %OrderBook{bids: bids, asks: asks}} = Fake.get_order_book("BTC-USD")
+
+      prices = fn levels -> Enum.map(levels, fn {price, _size} -> price end) end
+
+      assert prices.(bids) == Enum.sort_by(prices.(bids), & &1, {:desc, Decimal})
+      assert prices.(asks) == Enum.sort_by(prices.(asks), & &1, {:asc, Decimal})
     end
 
     test "its symbols include the overlapping-quote pairs that break naive splitting" do

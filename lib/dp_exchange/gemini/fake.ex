@@ -197,11 +197,31 @@ defmodule DpExchange.Gemini.Fake do
         {:ok, price} ->
           bid = Decimal.new(price)
 
+          # **Three levels a side, and the depth is load-bearing.** This fake returned one
+          # level each way, and `Core.AdapterContract`'s assertion 25 — the one that exists
+          # to check that bids come back highest-first and asks lowest-first — ran against
+          # it, reached the behaviour, and passed. It could not have done anything else: a
+          # list of one is sorted under every comparator, so there was no edit to this
+          # function that could have made that assertion fail. Adding a second, deliberately
+          # misordered level turned the suite red immediately (48 tests, 1 failure), which
+          # is how the inertness was measured rather than argued.
+          #
+          # Core now refuses a book this thin, so this cannot silently go back to one level.
+          # Keeping the ladder here as well, rather than relying only on that refusal, is
+          # the point: the fixture is what gives the assertion something to be wrong about.
           {:ok,
            %Types.OrderBook{
              symbol: symbol,
-             bids: [{bid, Decimal.new("0.0031")}],
-             asks: [{Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")}],
+             bids: [
+               {bid, Decimal.new("0.0031")},
+               {Decimal.sub(bid, Decimal.new("0.01")), Decimal.new("0.0140")},
+               {Decimal.sub(bid, Decimal.new("0.02")), Decimal.new("0.2500")}
+             ],
+             asks: [
+               {Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")},
+               {Decimal.add(bid, Decimal.new("0.02")), Decimal.new("0.0910")},
+               {Decimal.add(bid, Decimal.new("0.03")), Decimal.new("0.3300")}
+             ],
              venue_time: @at,
              observed_at: @at,
              provider: :gemini

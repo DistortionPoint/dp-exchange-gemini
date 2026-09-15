@@ -24,6 +24,25 @@ acceptable changelog line.
 
 ### Fixed
 
+- **The fake's order book was one level a side, which made the conformance suite's ordering
+  assertion incapable of failing on this package.** `Core.AdapterContract`'s assertion 25
+  checks that bids come back highest-first and asks lowest-first. It ran here, reached
+  `Fake.get_order_book/2`, compared a one-element list to itself and passed — as it would
+  have for any content whatsoever, because a list of one is sorted under every comparator.
+
+  Measured by breaking it on purpose: adding a second, deliberately misordered level took the
+  suite from 48 tests / 0 failures to 48 tests / 1 failure. The assertion was never broken.
+  It had nothing to work on.
+
+  The fake now carries a three-level ladder each way, with tests in this package pinning both
+  the depth and the ordering next to the fixture they constrain. Core refuses a book this
+  thin as of the same day, so the two say the same thing from both ends.
+
+  The test that pinned `bids: [{price, size}]` — one level, exactly — was part of why the
+  fixture stayed one level deep, and now asserts the shape across every level instead.
+
+### Fixed
+
 - **Concurrent first callers of the incremental nonce counter were handed different
   counters, and so the same nonces.** `ensure_counter/0` created an `:atomics` ref, stored
   it, and then re-read the key — which converges only if every racing `put` lands before the
