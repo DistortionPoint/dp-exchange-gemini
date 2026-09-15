@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.42] - 2026-09-15
+
 ### Fixed
 
 - **Concurrent first callers of the incremental nonce counter were handed different
