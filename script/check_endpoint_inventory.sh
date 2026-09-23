@@ -99,12 +99,18 @@ compare() {
   echo "  CHANGED  $label"
   if [ -n "$added" ]; then
     echo "    APPEARED since the committed inventory was taken:"
-    printf '      %s\n' $added
+    # `sed`, not `printf '      %s\n' $var`. That variable was UNQUOTED, so bash word-split
+    # it: this venue's operation list is `METHOD /path` per line, and a vanished
+    # `GET /v1/feepromos` was reported as two separate entries — `GET` and `/v1/feepromos` —
+    # as though the verb itself had disappeared from the venue. An entry containing a glob
+    # character would have been expanded against the filesystem too. A checker whose entire
+    # output is a diff has to render that diff exactly as it found it.
+    printf '%s\n' "$added" | sed 's/^/      /'
     echo "      -> a capabilities/0 :unsupported declaration may now be FALSE."
   fi
   if [ -n "$removed" ]; then
     echo "    VANISHED since the committed inventory was taken:"
-    printf '      %s\n' $removed
+    printf '%s\n' "$removed" | sed 's/^/      /'
     echo "      -> a claim this package makes may now rest on nothing. This venue removes"
     echo "         things with no changelog entry; absence IS the announcement."
   fi

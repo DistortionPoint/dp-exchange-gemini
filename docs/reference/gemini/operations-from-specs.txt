@@ -10,10 +10,27 @@
 # the package is recorded at `WsChannels`'s own entry, which is kept rather than deleted:
 # absent from the spec is not the same fact as absent from the venue, and this venue has
 # diverged from its own documentation in both directions before.
+#
+# Re-diffed 2026-09-23 by the same script. Prediction markets (31) and WebSocket channels
+# (21) unchanged. ONE REST operation removed by the vendor: `GET /v1/feepromos`, present
+# 2026-09-09, absent now, again with no changelog entry. Struck from this list for the same
+# reason as above — this list is "what the vendor publishes".
+#
+# **The capability moved rather than disappeared, and that was checked rather than assumed.**
+# The current `rest.yaml` gives the authenticated `/v1/notionalvolume` an optional `symbol`,
+# described in the vendor's own words as "The symbol to get fee promotions or specific fee
+# schedule rates for", with a worked example named `withSymbol` summarised "Request with
+# symbol parameter for fee promotions". So fee promotions went from a public path to a
+# signed one. `DpExchange.Gemini.Private.get_fees/2` now takes `opts[:symbol]` for it.
+#
+# `Rest.list_fee_promos/1` is KEPT and still declared `:experimental`. A path removed from a
+# document is not a refusal the venue made — `Core.Capabilities` is explicit that
+# `:unsupported` "would claim a refusal the venue never made" — and this repository cannot
+# probe the live endpoint to find out which it is, because tier 2 never runs on a schedule.
+# Its own `@doc` carries the warning a caller needs.
 
 ## REST (specs/openapi/rest.yaml)
 GET /v1/book/{symbol}
-GET /v1/feepromos
 GET /v1/fundingamount/{symbol}
 GET /v1/fundingamountreport/records.xlsx
 GET /v1/nextfundingtimestamp/{symbol}

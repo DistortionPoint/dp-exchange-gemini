@@ -1326,4 +1326,84 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert Process.get(:rate_limiter_call) == :check
     end
   end
+
+  describe "get_fees/2 reaches fee promotions, which moved off the public path" do
+    # `GET /v1/feepromos` — the path `Rest.list_fee_promos/1` calls — vanished from Gemini's
+    # OpenAPI document, found by `script/check_endpoint_inventory.sh` on 2026-09-21. On this
+    # venue absence is the announcement: it removes things with no changelog entry.
+    #
+    # The capability moved rather than disappeared. The same specification gives
+    # `/v1/notionalvolume` an optional `symbol` — "The symbol to get fee promotions or
+    # specific fee schedule rates for", with a worked example whose summary is "Request with
+    # symbol parameter for fee promotions". This asserts the package sends it.
+    #
+    # **Read from the specification, not probed.** This repository holds no Gemini
+    # credentials, so the claim is exactly what the vendor's document says: that the
+    # parameter exists and what it is for.
+    defp capturing_payload(body, test_pid) do
+      fn conn ->
+        payload =
+          conn
+          |> Plug.Conn.get_req_header("x-gemini-payload")
+          |> List.first()
+          |> Base.decode64!()
+          |> Jason.decode!()
+
+        send(test_pid, {:fee_payload, payload})
+
+        Req.Test.json(conn, body)
+      end
+    end
+
+    test "opts[:symbol] is sent, in the venue's own symbol format" do
+      test_pid = self()
+
+      assert {:ok, _fees} =
+               Private.get_fees(@credentials,
+                 symbol: "BTC-USD",
+                 plug: capturing_payload(%{"api_maker_fee_bps" => 10}, test_pid),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:fee_payload, payload}
+
+      # The canonical pair goes out in the venue's spelling, the same as every other symbol
+      # this package sends — the vendor's own example for this parameter is `btcusd`.
+      assert payload["symbol"] == DpExchange.Gemini.SymbolFormat.to_exchange_symbol("BTC-USD")
+      assert payload["request"] == "/v1/notionalvolume"
+    end
+
+    test "no symbol means no symbol key, not an empty one" do
+      # An empty string here is a symbol the venue was asked about and does not list, which
+      # is a different request from asking for the account's whole schedule. The payload must
+      # be exactly what it was before this option existed.
+      test_pid = self()
+
+      assert {:ok, _fees} =
+               Private.get_fees(@credentials,
+                 plug: capturing_payload(%{"api_maker_fee_bps" => 10}, test_pid),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:fee_payload, payload}
+      refute Map.has_key?(payload, "symbol")
+    end
+
+    test "a symbol that is not a string is treated as absent, never sent as one" do
+      # `opts` is forwarded verbatim through several layers in this family, so an explicit
+      # `symbol: nil` arrives here whenever nothing upstream ever set one — the trap
+      # `Core.Config.opt/3` exists for.
+      test_pid = self()
+
+      assert {:ok, _fees} =
+               Private.get_fees(@credentials,
+                 symbol: nil,
+                 plug: capturing_payload(%{"api_maker_fee_bps" => 10}, test_pid),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:fee_payload, payload}
+      refute Map.has_key?(payload, "symbol")
+    end
+  end
 end

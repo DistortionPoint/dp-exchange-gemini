@@ -118,7 +118,7 @@ defmodule DpExchange.Gemini do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Venue}
-  alias DpExchange.Gemini.{Environment, Feed, Private, Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Auth, Environment, Feed, Private, Rest, SymbolFormat}
 
   # Account and trading ARE implemented: credentials arrive as function arguments and are
   # used to sign that one request (§6.0, invariant #2). Credential *storage* is the host's
@@ -1213,6 +1213,29 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_roles(opts \\ []), do: Private.get_roles(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Raises the incremental nonce counter to `value`, once — for a key whose stored mark is
+  already out of reach.
+
+  Venue-specific, and on the facade because `DpExchange.Gemini.Auth` is internal: a host has
+  no other way in. See `DpExchange.Gemini.Auth.seed_nonce/1` for the full argument, and that
+  module's "When a key is out of reach" section for how to tell this case from a mode
+  mismatch — the venue's own error sentence separates them.
+
+  In short: an incremental key whose high-water mark sits above epoch milliseconds cannot be
+  satisfied by `nonce_mode: :incremental` either, because both modes emit numbers below the
+  mark. This sets the counter to a value the host chooses and can record, once. Afterwards
+  the sequence advances by exactly one per call as it always did, so a seed does not
+  reintroduce the escalation that consumes a key's space for good.
+
+  Returns `{:error, :below_current}` rather than lowering the counter, and
+  `{:error, :above_counter_range}` for a mark beyond `2^64 - 1` — that key must be rotated,
+  and no option here changes it.
+  """
+  @spec seed_nonce(pos_integer()) ::
+          :ok | {:error, :below_current | :above_counter_range | :invalid_seed}
+  defdelegate seed_nonce(value), to: Auth
 
   @doc """
   Exchanges a refresh token for a new access token. **Credential use, not consent.**

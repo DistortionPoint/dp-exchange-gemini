@@ -74,7 +74,7 @@ defmodule DpExchange.Gemini.Private do
   not a retry of this one.
   """
 
-  alias DpExchange.Core.HttpClient
+  alias DpExchange.Core.{Config, HttpClient}
 
   alias DpExchange.Core.Types.{
     ApprovedAddress,
@@ -116,10 +116,33 @@ defmodule DpExchange.Gemini.Private do
   Returned as the venue states it — basis points, per maker/taker, alongside the notional
   volume that determined the tier. Nothing is converted to a rate, because the venue's own
   units are what a caller will reconcile against.
+
+  ## `opts[:symbol]` — where fee promotions live now
+
+  The vendor's current OpenAPI document gives this operation an optional `symbol`, described
+  in its own words as "The symbol to get fee promotions or specific fee schedule rates for",
+  with a worked example named `withSymbol` whose summary is "Request with symbol parameter
+  for fee promotions".
+
+  That matters because `GET /v1/feepromos` — the public path `Rest.list_fee_promos/1` calls
+  — **vanished from that specification**, found by `script/check_endpoint_inventory.sh` on
+  2026-09-21. On this venue absence is the announcement: it removes things with no changelog
+  entry. So the capability did not disappear, it moved, and it moved from a public path to
+  this authenticated one.
+
+  **Read from the specification, not probed.** This repository holds no Gemini credentials
+  and tier-3 tests are not run here, so what is claimed is exactly what the vendor's document
+  says and no more. Passing no `:symbol` sends the same empty payload it always did.
   """
   @spec get_fees(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_fees(credentials, opts) do
-    with {:ok, body, _headers} <- post("/v1/notionalvolume", %{}, credentials, opts) do
+    params =
+      case Config.opt(opts, :symbol, nil) do
+        symbol when is_binary(symbol) -> %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
+        _absent -> %{}
+      end
+
+    with {:ok, body, _headers} <- post("/v1/notionalvolume", params, credentials, opts) do
       {:ok, body}
     end
   end

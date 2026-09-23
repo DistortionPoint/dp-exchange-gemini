@@ -20,6 +20,64 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`seed_nonce/1` — a bounded way back for an incremental key whose mark is out of reach**
+  (issue #2). A key whose stored high-water mark sits above epoch milliseconds cannot be
+  satisfied by `nonce/1` in either mode: `:time_based` emits seconds and `:incremental`
+  emits milliseconds, and both are below the mark, so every request returns `InvalidNonce`.
+  The reporter measured both modes back to back on one key, restarting the node between them.
+
+  The host sets the counter **once**, to a value it chooses and can record.
+  `nonce(:incremental)` is unchanged afterwards — `max(now_ms, previous + 1)`, advancing by
+  exactly one per call — so the property this module calls the one worth preserving,
+  structurally incapable of running a key's mark away, holds before and after. That is the
+  whole distinction the reporter drew and it is the right one: a seed is bounded and
+  auditable; repeated escalation by a scale factor is what consumes a key's space, and this
+  module still will not do that on its own.
+
+  It refuses to lower the counter (`{:error, :below_current}`), so a seed cannot rewind under
+  a concurrent caller, and it reports `{:error, :above_counter_range}` for a value beyond
+  `2^64 - 1` rather than raising — the counter is one unsigned 64-bit `:atomics` cell, so a
+  mark beyond it is out of reach of a seed too, and **that key must be rotated**.
+
+  On the facade, not only on `Auth`, because `Auth` is internal and a host has no other way
+  in. The moduledoc also gained the plain statement the reporter asked for as their fallback:
+  the guidance and the reachable range were in different paragraphs, and a reader could
+  conclude `:incremental` would help when it cannot.
+
+- **`Private.get_fees/2` takes `opts[:symbol]`** — the route fee promotions moved to. See
+  below.
+
+### Fixed
+
+- **`script/check_endpoint_inventory.sh` word-split its own diff output.**
+  `printf '      %s\n' $removed` was unquoted, and this venue's entries are `METHOD /path`,
+  so a vanished `GET /v1/feepromos` was reported as two entries — `GET` and `/v1/feepromos`
+  — as though the verb itself had disappeared from the venue. An entry containing a glob
+  character would have been expanded against the filesystem too. A checker whose entire
+  output is a diff has to render that diff exactly as it found it.
+
+### Documentation
+
+- **`GET /v1/feepromos` vanished from the vendor's specification**, found 2026-09-21. On this
+  venue absence is the announcement — it removes things with no changelog entry.
+
+  **The capability moved rather than disappeared, and that was checked rather than assumed.**
+  The current `rest.yaml` gives the authenticated `/v1/notionalvolume` an optional `symbol`,
+  in the vendor's own words "The symbol to get fee promotions or specific fee schedule rates
+  for", with a worked example named `withSymbol` summarised "Request with symbol parameter
+  for fee promotions". So it went from a public path to a signed one, and
+  `Private.get_fees/2` now sends that parameter.
+
+  `Rest.list_fee_promos/1` is **kept**, and still `:experimental`. A path removed from a
+  document is not a refusal the venue made — `Core.Capabilities` is explicit that
+  `:unsupported` "would claim a refusal the venue never made" — and this repository cannot
+  probe the live endpoint to find out which it is, because tier 2 never runs on a schedule.
+  Its `@doc` now carries the warning and points at the replacement.
+
+  Read from the specification, not probed: this repository holds no Gemini credentials.
+
 ## [0.2.44] - 2026-09-15
 
 ### Fixed

@@ -395,6 +395,23 @@ global switch, and it will not redirect your live path.
 It **signs** a request when you hand it credentials and tell it which scheme you chose. It
 never obtains, stores, refreshes, or infers one, and it has no default scheme.
 
+**An incremental key whose mark is above epoch milliseconds is stuck, and `seed_nonce/1` is
+the way out.** Both nonce modes emit numbers below such a mark — `:time_based` seconds,
+`:incremental` milliseconds — so every request comes back `InvalidNonce` and switching modes
+does not help. The venue's own sentence tells you which case you are in: "has not increased
+since your last call" is the incremental validator, and a bad key or signature would answer
+`InvalidApiKey` / `InvalidSignature` instead. Call `DpExchange.Gemini.seed_nonce/1` once with
+a value above the mark; the sequence then advances by one per call as normal. It refuses to
+lower the counter, and a mark beyond `2^64 - 1` cannot be reached at all — that key must be
+rotated.
+
+**Fee promotions moved off the public path.** `GET /v1/feepromos`, which
+`Rest.list_fee_promos/1` calls, is no longer in the vendor's specification as of 2026-09-21;
+this venue announces removals by absence. Ask `get_fees/2` with `symbol:` instead — the
+vendor moved the parameter onto the authenticated `/v1/notionalvolume`. `list_fee_promos/1`
+is still declared `:experimental` rather than `:unsupported`, because a path missing from a
+document is not a refusal the venue made and this repository cannot probe it to find out.
+
 **A blank credential counts as a missing one.** An `:api_key`, `:api_secret` or OAuth
 `:access_token` that is `""`, or only whitespace, is refused with
 `{:error, {:missing_credentials, scheme}}` — it is never signed with. This matters because

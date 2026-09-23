@@ -642,6 +642,23 @@ defmodule DpExchange.Gemini.Rest do
 
   An empty list means the venue is running no promotions, which is a real state and not an
   error.
+
+  > #### This path is gone from the vendor's specification {: .warning}
+  >
+  > `GET /v1/feepromos` was in Gemini's OpenAPI document when this was written and is not in
+  > it as of **2026-09-21**, found by `script/check_endpoint_inventory.sh`. On this venue
+  > absence IS the announcement — it removes things with no changelog entry.
+  >
+  > The capability moved rather than disappeared: the same specification now gives the
+  > authenticated `/v1/notionalvolume` an optional `symbol`, "The symbol to get fee
+  > promotions or specific fee schedule rates for". `DpExchange.Gemini.Private.get_fees/2`
+  > takes `opts[:symbol]` for exactly that, and is the route to prefer.
+  >
+  > **This function is left in place and still declared `:experimental`.** A path removed
+  > from a document is not a refusal the venue made, and `Core.Capabilities` is explicit that
+  > `:unsupported` "would claim a refusal the venue never made" — this repository cannot
+  > probe the live endpoint to find out which it is (tier 2 is never run on a schedule), so
+  > it does not guess in either direction. What is known is written here.
   """
   @spec list_fee_promos(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_fee_promos(opts) do

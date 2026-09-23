@@ -91,9 +91,42 @@ defmodule DpExchange.Gemini.Auth do
 
   Reported by a consumer on dp-exchange-gemini issue #1, who reached the diagnosis using the
   venue `message` that same issue restored.
+
+  ## When a key is out of reach, and the one bounded way back
+
+  The section above explains why this module will not escalate. It did not say, in one
+  place, what that leaves a host holding — and dp-exchange-gemini issue #2 is a reader
+  reaching the reasonable wrong conclusion that `:incremental` would help when it cannot.
+  Stated plainly here:
+
+  **An incremental key whose stored mark is already above epoch milliseconds cannot be
+  satisfied by `nonce/1` in either mode.** `:time_based` emits seconds (~`1.789e9`) and
+  `:incremental` emits milliseconds (~`1.789e12`), and both are below the mark, so every
+  request returns `InvalidNonce` — "has not increased since your last call", which is the
+  incremental validator's own sentence and the thing that tells you the mode is not in
+  doubt. The signature is fine; an unknown key or a bad one answers `InvalidApiKey` or
+  `InvalidSignature` instead.
+
+  `seed_nonce/1` is the way out, and it is deliberately not a mode. A host sets the counter
+  **once**, to a value it chooses and can record, and `nonce(:incremental)` then advances
+  from there by exactly one per call — the `max(now_ms, previous + 1)` property is
+  untouched, so the sequence still cannot run a key's space away. That is the whole
+  distinction: a seed is bounded and auditable, escalation by a scale factor is not, and it
+  is escalation this module refuses rather than reachability.
+
+  Above `2^64 - 1` nothing helps. The counter is a 64-bit unsigned `:atomics` cell, so a
+  mark beyond it — the `1.78e21` the section above records — is out of reach of a seed too,
+  and `seed_nonce/1` says so with `{:error, :above_counter_range}` rather than raising or
+  truncating. **That key must be rotated, which is a human action**, and no option here
+  changes it.
   """
 
   @nonce_counter {__MODULE__, :nonce_counter}
+
+  # The counter is `:atomics.new(1, signed: false)` — one 64-bit unsigned cell. A seed above
+  # this cannot be stored at all, and `:atomics.put/3` raises rather than saturating, so
+  # `seed_nonce/1` checks the bound itself and reports it.
+  @max_counter_value 0xFFFF_FFFF_FFFF_FFFF
 
   @typedoc "An API key pair the host provisioned. This module signs with it and forgets it."
   @type api_key_credentials :: %{
@@ -308,6 +341,67 @@ defmodule DpExchange.Gemini.Auth do
   # `nil`-shaped guard upstream passes it through intact. Trimmed rather than compared to
   # `""`, because a trailing space in a `.env` line produces `" "` and means the same thing.
   defp blank?(value), do: String.trim(value) == ""
+
+  @doc """
+  Raises the incremental nonce counter to `value`, once.
+
+  Returns `:ok` when the counter moved, `{:error, :below_current}` when `value` is not above
+  where it already is, `{:error, :above_counter_range}` when it exceeds the 64-bit unsigned
+  cell this counter lives in, and `{:error, :invalid_seed}` for anything that is not a
+  positive integer.
+
+  ## Why this exists, and why it is not a mode
+
+  An incremental key whose stored high-water mark is above epoch milliseconds is unreachable
+  by `nonce/1`: both modes emit numbers below the mark, so every request comes back
+  `InvalidNonce`. See the moduledoc's "When a key is out of reach" section for how to tell
+  that case from a mode mismatch — the venue's own sentence separates them.
+
+  This lets a host lift the counter to meet such a key **one time**, with a value it chose
+  and can record. It is the host's key and the host's number, which is the same division
+  `:nonce_mode` already makes.
+
+  **It does not reintroduce escalation.** After seeding, `nonce(:incremental)` is unchanged:
+  `max(now_ms, previous + 1)`, advancing by exactly one per call. The property the moduledoc
+  calls the one worth preserving — structurally incapable of running a key's mark away — is
+  the same before and after. A seed is bounded and auditable; repeated escalation by a scale
+  factor is what consumes a key's space, and this module still will not do that on its own.
+
+  **It refuses to lower the counter**, so a seed cannot hand two callers the same nonce by
+  rewinding under them, and a racing second seed cannot undo the first.
+
+  Requested with this shape on dp-exchange-gemini issue #2 by the consumer who hit it.
+  """
+  @spec seed_nonce(pos_integer()) ::
+          :ok | {:error, :below_current | :above_counter_range | :invalid_seed}
+  def seed_nonce(value) when is_integer(value) and value > 0 do
+    if value > @max_counter_value do
+      {:error, :above_counter_range}
+    else
+      value |> ensure_counter() |> raise_counter(value)
+    end
+  end
+
+  def seed_nonce(_not_a_positive_integer), do: {:error, :invalid_seed}
+
+  # `ensure_counter/0` takes no argument; this is the pipe's discard so the counter is
+  # established exactly the way every other caller establishes it.
+  defp ensure_counter(_value), do: ensure_counter()
+
+  # The same compare-and-exchange loop `nonce(:incremental)` uses, for the same reason: two
+  # processes may be doing this at once, and the loser must re-read rather than overwrite.
+  defp raise_counter(counter, value) do
+    previous = :atomics.get(counter, 1)
+
+    if value <= previous do
+      {:error, :below_current}
+    else
+      case :atomics.compare_exchange(counter, 1, previous, value) do
+        :ok -> :ok
+        _lost_the_race -> raise_counter(counter, value)
+      end
+    end
+  end
 
   defp sign(payload, secret) do
     :hmac
