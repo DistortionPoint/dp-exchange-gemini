@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.45] - 2026-09-23
+
 ### Added
 
 - **`seed_nonce/1` — a bounded way back for an incremental key whose mark is out of reach**
