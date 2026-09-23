@@ -117,7 +117,7 @@ defmodule DpExchange.Gemini do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Capabilities, Venue}
+  alias DpExchange.Core.{Capabilities, Config, Venue}
   alias DpExchange.Gemini.{Auth, Environment, Feed, Private, Rest, SymbolFormat}
 
   # Account and trading ARE implemented: credentials arrive as function arguments and are
@@ -746,7 +746,7 @@ defmodule DpExchange.Gemini do
   @impl true
   def subscribe_notices(opts \\ []), do: Feed.subscribe_notices(feed(opts), opts)
 
-  defp feed(opts), do: Keyword.get(opts, :feed, Feed)
+  defp feed(opts), do: Config.opt(opts, :feed, Feed)
 
   defp alive?(name) when is_atom(name), do: is_pid(GenServer.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)

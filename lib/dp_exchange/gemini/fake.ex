@@ -61,7 +61,7 @@ defmodule DpExchange.Gemini.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Capabilities, FakeInjection, Notice, Timeframe, Types, Venue}
+  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Notice, Timeframe, Types, Venue}
   alias DpExchange.Gemini.{Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
@@ -551,7 +551,7 @@ defmodule DpExchange.Gemini.Fake do
     if FakeInjection.credentials_bypassed?(:gemini) do
       :ok
     else
-      scheme = Keyword.get(opts, :auth_scheme, resolve_scheme(credentials))
+      scheme = Config.opt(opts, :auth_scheme, resolve_scheme(credentials))
       authenticated_venue_faithful(scheme, credentials)
     end
   end
@@ -646,7 +646,7 @@ defmodule DpExchange.Gemini.Fake do
   # cannot tell the difference, which is the property the facade exists to hold.
   @impl true
   def subscribe(symbols, opts \\ []) do
-    target = Keyword.get(opts, :to, self())
+    target = Config.opt(opts, :to, self())
 
     for symbol <- symbols, symbol in @symbols do
       case get_price(symbol, []) do
@@ -713,7 +713,7 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def subscribe_notices(opts \\ []) do
-    send(Keyword.get(opts, :to, self()), {:dp_exchange, :gemini, Notice.new(:link_up, :gemini)})
+    send(Config.opt(opts, :to, self()), {:dp_exchange, :gemini, Notice.new(:link_up, :gemini)})
     :ok
   end
 
@@ -1180,7 +1180,7 @@ defmodule DpExchange.Gemini.Fake do
          %Types.Withdrawal{
            # The idempotency key the real package always sends, echoed so a consumer can
            # assert its own was used.
-           id: Keyword.get(opts, :client_transfer_id, "fake-transfer-1"),
+           id: Config.opt(opts, :client_transfer_id, "fake-transfer-1"),
            # **`:pending`, never `:completed`.** The venue accepting a withdrawal is not the
            # chain confirming it, and a fake that reported completion would teach a consumer
            # the money has arrived.
@@ -1218,7 +1218,7 @@ defmodule DpExchange.Gemini.Fake do
   def add_payment_method(details, opts \\ []) do
     with_injection(fn ->
       with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts),
-           {:ok, _path} <- fake_country(Keyword.get(opts, :country, "US")) do
+           {:ok, _path} <- fake_country(Config.opt(opts, :country, "US")) do
         # **Pending, never verified.** The venue verifies out of band; a fake that returned a
         # usable method would teach a consumer the first transfer will work.
         {:ok, Map.merge(%{"id" => "bank-3", "status" => "pending"}, details)}
@@ -1392,7 +1392,7 @@ defmodule DpExchange.Gemini.Fake do
             {:ok,
              %{
                "account" => name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-"),
-               "type" => Keyword.get(opts, :type, "exchange")
+               "type" => Config.opt(opts, :type, "exchange")
              }}
           end
 

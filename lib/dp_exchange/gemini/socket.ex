@@ -51,7 +51,7 @@ defmodule DpExchange.Gemini.Socket do
 
   use WebSockex
 
-  alias DpExchange.Core.{Notice, Telemetry}
+  alias DpExchange.Core.{Config, Notice, Telemetry}
   alias DpExchange.Core.Types.Quote
   alias DpExchange.Gemini.{Environment, SymbolFormat, WsChannels, WsDecode}
 
@@ -135,8 +135,8 @@ defmodule DpExchange.Gemini.Socket do
   def connect_opts(opts) do
     [
       socket_connect_timeout:
-        Keyword.get(opts, :socket_connect_timeout, @socket_connect_timeout_ms),
-      socket_recv_timeout: Keyword.get(opts, :socket_recv_timeout, @socket_recv_timeout_ms)
+        Config.opt(opts, :socket_connect_timeout, @socket_connect_timeout_ms),
+      socket_recv_timeout: Config.opt(opts, :socket_recv_timeout, @socket_recv_timeout_ms)
     ]
   end
 

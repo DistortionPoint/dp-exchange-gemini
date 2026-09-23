@@ -159,7 +159,7 @@ defmodule DpExchange.Gemini.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.{Capabilities, Fanout, Notice}
+  alias DpExchange.Core.{Capabilities, Config, Fanout, Notice}
   alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Gemini.Socket
 
@@ -185,7 +185,7 @@ defmodule DpExchange.Gemini.Feed do
 
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts) do
-    GenServer.call(feed, {:subscribe, symbols, Keyword.get(opts, :to, self())}, @call_timeout)
+    GenServer.call(feed, {:subscribe, symbols, Config.opt(opts, :to, self())}, @call_timeout)
   end
 
   @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
@@ -231,7 +231,7 @@ defmodule DpExchange.Gemini.Feed do
   # calling process for asking during exactly the conditions it exists to report.
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed, opts),
-    do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())}, @call_timeout)
+    do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
 
   # --- server ------------------------------------------------------------
 

@@ -920,7 +920,7 @@ defmodule DpExchange.Gemini.Private do
            "side" => opts |> Keyword.fetch!(:side) |> to_string(),
            "quantity" => to_string(Keyword.fetch!(opts, :amount)),
            "price" => to_string(Keyword.fetch!(opts, :price)),
-           "fee" => to_string(Keyword.get(opts, :fee, "0"))
+           "fee" => to_string(Config.opt(opts, :fee, "0"))
          }}
 
       missing ->
@@ -1476,7 +1476,7 @@ defmodule DpExchange.Gemini.Private do
   @spec add_payment_method(map(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def add_payment_method(details, credentials, opts) do
-    with {:ok, path} <- addbank_path(Keyword.get(opts, :country, "US")) do
+    with {:ok, path} <- addbank_path(Config.opt(opts, :country, "US")) do
       # `post_once`: `details` is the caller's own map, opaque to this module, so there is
       # nothing here the venue could tell a retry by — and `HttpClient` retries a timeout or
       # a 5xx three times by default. Adding a bank account twice is not a retry, it is a
@@ -2543,7 +2543,7 @@ defmodule DpExchange.Gemini.Private do
       }
       |> put_present("client_secret", Keyword.get(opts, :client_secret))
 
-    url = Keyword.get(opts, :auth_url, "https://exchange.gemini.com") <> "/auth/token"
+    url = Config.opt(opts, :auth_url, "https://exchange.gemini.com") <> "/auth/token"
     headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
 
     case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do

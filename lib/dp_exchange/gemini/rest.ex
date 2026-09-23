@@ -75,7 +75,7 @@ defmodule DpExchange.Gemini.Rest do
   consumer writing a `nil` branch for this venue's quotes is writing dead code.
   """
 
-  alias DpExchange.Core.{HttpClient, Timeframe}
+  alias DpExchange.Core.{Config, HttpClient, Timeframe}
 
   alias DpExchange.Core.Types.{
     Candle,
@@ -401,7 +401,7 @@ defmodule DpExchange.Gemini.Rest do
     native = SymbolFormat.to_exchange_symbol(symbol)
     # 50 is the venue's own documented default for both limit_bids and limit_asks — see
     # this function's own @doc and docs/reference/gemini/order-book.md.
-    depth = Keyword.get(opts, :depth, 50)
+    depth = Config.opt(opts, :depth, 50)
     params = [limit_bids: depth, limit_asks: depth]
 
     with {:ok, body} <- get_body("/v1/book/#{native}", Keyword.put(opts, :params, params)),
@@ -912,7 +912,7 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp query(opts) do
-    case Keyword.get(opts, :params, []) do
+    case Config.opt(opts, :params, []) do
       [] -> ""
       params -> "?" <> URI.encode_query(params)
     end
