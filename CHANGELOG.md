@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.48] - 2026-09-23
+
 ### Fixed
 
 - **Three money-moving calls sent amounts in scientific notation.** `withdraw/6`,
