@@ -667,4 +667,58 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert_receive :attempt, 1_000
     end
   end
+
+  describe "a write the venue cannot dedupe is sent once" do
+    # `Core.HttpClient` retries a timeout or a 5xx three times by default. `post_once/4`
+    # exists because a retried write is only safe when the venue can tell the second attempt
+    # from the first, and it states that test in its own comment. This asserts the rule is
+    # applied where it holds and NOT applied where it does not — both halves, because a rule
+    # flattened onto every write would cost callers their retries on requests that are
+    # perfectly safe to repeat.
+    setup do
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        Plug.Conn.resp(conn, 500, "upstream is having a bad day")
+      end
+
+      {:ok, counter: counter, plug: plug}
+    end
+
+    test "add_payment_method/3 — the body is the caller's, so nothing here is a key",
+         %{counter: counter, plug: plug} do
+      assert {:error, _reason} =
+               Private.add_payment_method(%{"type" => "bank"}, @credentials,
+                 plug: plug,
+                 retry_delay: 1
+               )
+
+      assert :counters.get(counter, 1) == 1,
+             "adding a bank account twice is a second payment method, not a retry"
+    end
+
+    test "create_account/3 — a duplicate subaccount is an Administrator's problem",
+         %{counter: counter, plug: plug} do
+      assert {:error, _reason} =
+               Private.create_account("second-desk", @credentials, plug: plug, retry_delay: 1)
+
+      assert :counters.get(counter, 1) == 1
+    end
+
+    test "request_approved_address/4 still retries — the address IS the key",
+         %{counter: counter, plug: plug} do
+      # The control, and the reason this describe block asserts both directions. Re-sending
+      # this asks for the same allowlist entry rather than a second one, so the retries are
+      # kept and a future sweep should not flatten it in with the two above.
+      assert {:error, _reason} =
+               Private.request_approved_address("ethereum", "0xabc", "cold", @credentials,
+                 plug: plug,
+                 retry_delay: 1
+               )
+
+      assert :counters.get(counter, 1) > 1,
+             "a write the venue can dedupe from the payload keeps its retries"
+    end
+  end
 end

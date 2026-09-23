@@ -20,6 +20,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two writes that create durable artifacts were retried with nothing the venue could
+  dedupe on.** `Core.HttpClient` retries a timeout or a 5xx three times by default, and
+  `post_once/4` exists in this module precisely because a retried write is only safe when
+  the venue can tell the second attempt from the first. Two calls were on the wrong side of
+  that test:
+
+  * **`add_payment_method/3`** — the body is the caller's own map, opaque here, so there is
+    nothing this module could offer as a key. Adding a bank account twice is not a retry, it
+    is a second payment method, and this API does not remove one.
+  * **`create_account/3`** — the account name is the only candidate key, and this package has
+    no evidence the venue rejects a duplicate. A second subaccount is an artifact only an
+    Administrator can clear up.
+
+  Both now use `post_once/4`. A caller whose call times out re-issues it deliberately, which
+  is the right way round.
+
+  **`request_approved_address/4` deliberately still retries**, and that is asserted rather
+  than left implicit: the thing being created IS the key — one address on one network — so
+  re-sending asks for the same allowlist entry rather than a second one. A rule flattened
+  onto every write would cost callers their retries on requests that are perfectly safe to
+  repeat, so the test breaks in that direction too.
+
 ## [0.2.45] - 2026-09-23
 
 ### Added

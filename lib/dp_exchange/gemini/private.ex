@@ -1477,7 +1477,11 @@ defmodule DpExchange.Gemini.Private do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def add_payment_method(details, credentials, opts) do
     with {:ok, path} <- addbank_path(Keyword.get(opts, :country, "US")) do
-      with {:ok, body, _headers} <- post(path, details, credentials, opts) do
+      # `post_once`: `details` is the caller's own map, opaque to this module, so there is
+      # nothing here the venue could tell a retry by — and `HttpClient` retries a timeout or
+      # a 5xx three times by default. Adding a bank account twice is not a retry, it is a
+      # second payment method, and removing one is not something this API does.
+      with {:ok, body, _headers} <- post_once(path, details, credentials, opts) do
         {:ok, body}
       end
     end
@@ -1540,6 +1544,12 @@ defmodule DpExchange.Gemini.Private do
   def request_approved_address(network, address, label, credentials, opts) do
     params = put_present(%{"address" => address}, "label", label)
 
+    # Still `post/4`, deliberately. Unlike the two writes above, the thing being
+    # created IS the key: the request names one address on one network, and re-sending
+    # it asks for the same allowlist entry rather than a second one. That is the test
+    # `post_once/4` states — "can the venue tell the second attempt from the first" —
+    # and here it can, from the payload this module builds itself. Recorded so the
+    # next sweep does not flatten all three into one rule.
     with {:ok, body, _headers} <-
            post("/v1/approvedAddresses/#{network}/request", params, credentials, opts) do
       {:ok, body}
@@ -2420,7 +2430,12 @@ defmodule DpExchange.Gemini.Private do
   def create_account(name, credentials, opts) when is_binary(name) do
     params = put_present(%{"name" => name}, "type", Keyword.get(opts, :type))
 
-    with {:ok, body, _headers} <- post("/v1/account/create", params, credentials, opts),
+    # `post_once`. The account NAME is the only thing here a venue could dedupe on, and this
+    # package has no evidence it does — Gemini documents no uniqueness constraint on it, and
+    # a second subaccount is an artifact only an Administrator can clear up. A caller whose
+    # call times out re-issues it deliberately, which is the right way round; guessing that
+    # the venue would have refused the duplicate is not.
+    with {:ok, body, _headers} <- post_once("/v1/account/create", params, credentials, opts),
          do: {:ok, body}
   end
 

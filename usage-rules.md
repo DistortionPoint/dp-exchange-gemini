@@ -395,6 +395,16 @@ global switch, and it will not redirect your live path.
 It **signs** a request when you hand it credentials and tell it which scheme you chose. It
 never obtains, stores, refreshes, or infers one, and it has no default scheme.
 
+**Some writes are sent once and are not retried, on purpose.** `Core.HttpClient` retries a
+timeout or a 5xx three times by default, which is safe only where the venue can tell the
+second attempt from the first. Orders, conversions and staking are sent once;
+`add_payment_method/3` and `create_account/3` are too, because a duplicate bank account or
+subaccount is an artifact you would have to clean up by hand. `withdraw/6` **is** retried,
+because it always sends a `clientTransferId` — generated if you give none — and the venue
+answers a repeat with the original transfer. `request_approved_address/4` is retried too:
+the address is its own key. If one of the once-only calls times out, re-issue it
+deliberately rather than assuming it did not land — and check first.
+
 **An incremental key whose mark is above epoch milliseconds is stuck, and `seed_nonce/1` is
 the way out.** Both nonce modes emit numbers below such a mark — `:time_based` seconds,
 `:incremental` milliseconds — so every request comes back `InvalidNonce` and switching modes
