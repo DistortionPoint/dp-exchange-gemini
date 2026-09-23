@@ -908,25 +908,45 @@ defmodule DpExchange.Gemini.Private do
   # `/v1/instant/execute` does not take the quote id alone. A caller holding the
   # `Conversion` this package returned has all of them, so they come from `opts` and a
   # missing one is an error rather than a value invented here.
+  #
+  # **Two defects lived here, both on the call that moves the money.**
+  #
+  # The guard was `Keyword.has_key?/2`, which answers `true` for `price: nil`. So a caller
+  # forwarding options its own caller never set passed the check, and `to_string(nil)` put
+  # `"quantity": ""` and `"price": ""` into a signed `/v1/instant/execute` — measured on the
+  # wire. The comment above promises "a missing one is an error rather than a value invented
+  # here", and an empty string is an invented value. Presence is now judged by what the value
+  # IS, through `Config.opt/3`, and a blank string counts as absent too.
+  #
+  # And the numbers went out through `to_string/1`, which on a `Decimal` means
+  # `String.Chars` and therefore scientific notation: `0.00000001` was sent as `"1E-8"` and
+  # `1500000` as `"1.5E+6"`, also measured on the wire. `place_order/3` in this same module
+  # already sends through `decimal_string/1` for exactly that reason; this path was the one
+  # the earlier sweep missed.
   defp execute_params(id, opts) do
     required = [:symbol, :side, :amount, :price]
+    values = Map.new(required, &{&1, Config.opt(opts, &1, nil)})
 
-    case Enum.reject(required, &Keyword.has_key?(opts, &1)) do
+    case Enum.reject(required, &present?(values[&1])) do
       [] ->
         {:ok,
          %{
            "quoteId" => id,
-           "symbol" => SymbolFormat.to_exchange_symbol(Keyword.fetch!(opts, :symbol)),
-           "side" => opts |> Keyword.fetch!(:side) |> to_string(),
-           "quantity" => to_string(Keyword.fetch!(opts, :amount)),
-           "price" => to_string(Keyword.fetch!(opts, :price)),
-           "fee" => to_string(Config.opt(opts, :fee, "0"))
+           "symbol" => SymbolFormat.to_exchange_symbol(values.symbol),
+           "side" => to_string(values.side),
+           "quantity" => decimal_string(values.amount),
+           "price" => decimal_string(values.price),
+           "fee" => decimal_string(Config.opt(opts, :fee, "0"))
          }}
 
       missing ->
         {:error, {:missing_option, missing}}
     end
   end
+
+  defp present?(nil), do: false
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(_value), do: true
 
   defp instant_pair(from, to, opts) do
     case {Keyword.get(opts, :symbol), Keyword.get(opts, :side)} do
@@ -1366,7 +1386,11 @@ defmodule DpExchange.Gemini.Private do
       params =
         %{
           "address" => address,
-          "amount" => to_string(amount),
+          # `decimal_string/1`, not `to_string/1` — on a `Decimal` the latter goes through
+          # `String.Chars` and so scientific notation, and a one-satoshi withdrawal went out
+          # as `"1E-8"`. The same defect `execute_params/2` had; `place_order/3` in this
+          # module already avoided it.
+          "amount" => decimal_string(amount),
           # Always sent. A retry without one is a second withdrawal.
           "clientTransferId" => transfer_id
         }
@@ -1511,7 +1535,8 @@ defmodule DpExchange.Gemini.Private do
       params = %{
         "sourceAccount" => from,
         "targetAccount" => to,
-        "amount" => to_string(amount)
+        # Full notation — see `withdraw/6`.
+        "amount" => decimal_string(amount)
       }
 
       currency = String.downcase(asset)

@@ -721,4 +721,73 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
              "a write the venue can dedupe from the payload keeps its retries"
     end
   end
+
+  describe "amounts go on the wire in full notation, and a missing one is refused" do
+    # `to_string/1` on a `Decimal` goes through `String.Chars`, which is scientific notation:
+    # measured on the wire, a one-satoshi quantity went out as `"1E-8"` and 1,500,000 as
+    # `"1.5E+6"`, on `withdraw/6`, `transfer_internal/5` and the conversion execute alike.
+    # `place_order/3` in the same module already sent through `decimal_string/1`; these three
+    # money-moving paths were the ones an earlier sweep missed.
+    @tiny Decimal.new("0.00000001")
+    @large Decimal.new("1.5E+6")
+
+    test "withdraw/6 sends a one-satoshi amount as 0.00000001, not 1E-8" do
+      assert {:ok, _withdrawal} =
+               Private.withdraw("BTC", "bitcoin", @tiny, "bc1q-addr", @credentials,
+                 plug: capturing(%{"withdrawalId" => "w-1", "status" => "pending"}, self()),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, _path}
+      assert payload["amount"] == "0.00000001"
+    end
+
+    test "transfer_internal/5 sends a large amount as 1500000, not 1.5E+6" do
+      assert {:ok, _transfer} =
+               Private.transfer_internal("BTC", @large, [from: "a", to: "b"], @credentials,
+                 plug: capturing(%{"ok" => true}, self()),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, _path}
+      assert payload["amount"] == "1500000"
+    end
+
+    test "commit_conversion/2 sends quantity and price in full notation" do
+      Private.commit_conversion("q-1",
+        credentials: @credentials,
+        symbol: "BTC-USD",
+        side: :buy,
+        amount: @tiny,
+        price: @large,
+        plug: capturing(%{"quoteId" => "q-1"}, self()),
+        retry_attempts: 0
+      )
+
+      assert_receive {:payload, payload, "/v1/instant/execute"}
+      assert payload["quantity"] == "0.00000001"
+      assert payload["price"] == "1500000"
+    end
+
+    test "commit_conversion/2 refuses a forwarded nil amount rather than sending an empty one" do
+      # The guard was `Keyword.has_key?/2`, which is `true` for `price: nil`, so a caller
+      # forwarding options its own caller never set passed it and `to_string(nil)` put
+      # `"quantity": ""` and `"price": ""` into a signed execute — measured on the wire. This
+      # module's own comment promises "a missing one is an error rather than a value
+      # invented here".
+      assert {:error, {:missing_option, missing}} =
+               Private.commit_conversion("q-1",
+                 credentials: @credentials,
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 amount: nil,
+                 price: "  ",
+                 plug: capturing(%{"quoteId" => "q-1"}, self()),
+                 retry_attempts: 0
+               )
+
+      assert Enum.sort(missing) == [:amount, :price]
+      refute_receive {:payload, _payload, _path}, 100
+    end
+  end
 end

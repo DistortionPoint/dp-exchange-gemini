@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Three money-moving calls sent amounts in scientific notation.** `withdraw/6`,
+  `transfer_internal/5` and the conversion execute built `"amount"`/`"quantity"`/`"price"`
+  with `to_string/1`, which on a `Decimal` goes through `String.Chars` and so the scientific
+  format. Measured on the wire: a one-satoshi quantity went out as **`"1E-8"`** and 1,500,000
+  as **`"1.5E+6"`**. `place_order/3` in this same module already sent through
+  `decimal_string/1` for exactly this reason; these three were the ones an earlier sweep
+  missed. All now send full notation.
+
+- **`commit_conversion/2` sent `"quantity": ""` and `"price": ""` for a forwarded `nil`.**
+  Its required-option guard was `Keyword.has_key?/2`, which is `true` for `price: nil`, so a
+  caller forwarding options its own caller never set passed it and `to_string(nil)` put empty
+  strings into a signed `/v1/instant/execute` — measured on the wire. The function's own
+  comment promises "a missing one is an error rather than a value invented here", and an empty
+  string is an invented value. Presence is now judged by the value, blank strings included,
+  and nothing is sent.
+
+  Tests assert both on the wire, red against the previous code.
+
 ## [0.2.47] - 2026-09-23
 
 ### Fixed

@@ -1245,7 +1245,7 @@ defmodule DpExchange.Gemini.Fake do
             {:ok,
              %{
                "asset" => asset,
-               "amount" => to_string(amount),
+               "amount" => Decimal.to_string(Decimal.new(amount), :normal),
                "sourceAccount" => from,
                "targetAccount" => to
              }}
