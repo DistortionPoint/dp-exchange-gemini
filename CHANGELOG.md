@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.47] - 2026-09-23
+
 ### Fixed
 
 - **A forwarded `nil` option was used as the value instead of meaning "not set".** This
