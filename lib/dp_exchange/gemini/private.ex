@@ -163,8 +163,14 @@ defmodule DpExchange.Gemini.Private do
   def get_transfers(credentials, opts) do
     params = take_params(opts, [:limit_transfers, :currency, :timestamp])
 
-    with {:ok, rows, _headers} <- post("/v2/transfers", params, credentials, opts) do
-      {:ok, List.wrap(rows)}
+    # `Rest.list/1`, not `List.wrap/1`. The vendor's OpenAPI document gives this endpoint's
+    # 200 as `type: array` of `V2Transfer` — never an object — so an object here is not a
+    # transfer, and `List.wrap/1` handed it back as one: the same wrapper-as-row defect
+    # `dp_exchange_webull`'s `rows/1` had. `list_networks/2` keeps its `List.wrap/1` because
+    # ITS documented 200 is a single object (`NetworkAssets`), which is one row honestly.
+    with {:ok, body, _headers} <- post("/v2/transfers", params, credentials, opts),
+         {:ok, rows} <- Rest.list(body) do
+      {:ok, rows}
     end
   end
 
@@ -1175,6 +1181,9 @@ defmodule DpExchange.Gemini.Private do
 
     with {:ok, body, _headers} <-
            post("/v1/deposit/#{network}/newAddress", params, credentials, opts),
+         # An object, or a refusal — `body["address"]` on a list raises. See
+         # `Rest.object/1`.
+         {:ok, body} <- Rest.object(body),
          # `:address` is in `DepositAddress`'s `@enforce_keys`, so its `new/1` refuses a
          # `nil` there — and nothing here calls `new/1`, the struct being built literally as
          # everywhere in this family, so that check never ran. An address is the entire

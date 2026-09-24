@@ -20,6 +20,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Seven endpoints raised on a response of the wrong shape.** The decoders read
+  `body["field"]`, and `Access` on a LIST raises `ArgumentError`: `get_top_of_book/2`,
+  `get_funding/2`, `get_contract_stats/2` and `get_deposit_address/3` all raised on `[]`. They
+  iterate rows, and iterating `null` raises while iterating an object walks key/value pairs
+  into a row decoder: `get_symbols/1`, `get_market_overview/1` and `get_historical_prices/4`.
+  `Rest.object/1` and `Rest.list/1` now check the shape and refuse with
+  `:unexpected_response_shape`, the atom this module already used for the same condition.
+
+- **`get_transfers/2` returned an object as a transfer.** It used `List.wrap/1`; the vendor's
+  OpenAPI document gives the 200 as `type: array` of `V2Transfer`, never an object, so any
+  object is now refused. `list_networks/2` keeps `List.wrap/1` deliberately — its documented
+  200 is a single `NetworkAssets` object, which is one row honestly.
+
+  Found by feeding every active facade callback a set of plausible-but-wrong bodies — `[]`,
+  `null`, `{}`, an object whose list fields are all `null`, and `{"data": {}}` — and
+  flagging any call that raised, or that answered with a wrapper as a row or a record with
+  no identity. `Core.Venue`'s error discipline is that a facade answers and never raises in
+  the caller's process. `response_shape_test.exs` pins each body that used to fail, driven
+  through the facade, red against the previous code.
+
 ## [0.2.49] - 2026-09-24
 
 ### Fixed

@@ -230,7 +230,8 @@ defmodule DpExchange.Gemini.Rest do
   def get_top_of_book(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts) do
+    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts),
+         {:ok, body} <- object(body) do
       {:ok,
        %TopOfBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
@@ -280,7 +281,8 @@ defmodule DpExchange.Gemini.Rest do
 
     with {:ok, path, time_frame} <- candles_path(native, timeframe),
          :ok <- range_within_window(timeframe, range),
-         {:ok, rows} <- get_body("#{path}/#{native}/#{time_frame}", opts) do
+         {:ok, body} <- get_body("#{path}/#{native}/#{time_frame}", opts),
+         {:ok, rows} <- list(body) do
       with {:ok, candles} <- rows_to_candles(rows, symbol, timeframe) do
         {:ok,
          candles
@@ -330,9 +332,11 @@ defmodule DpExchange.Gemini.Rest do
   """
   @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def get_symbols(opts) do
-    with {:ok, symbols} <- get_body("/v1/symbols", opts) do
+    with {:ok, body} <- get_body("/v1/symbols", opts),
+         {:ok, symbols} <- list(body) do
       {:ok,
        symbols
+       |> Enum.filter(&is_binary/1)
        |> Enum.reject(&SymbolFormat.perpetual?/1)
        |> Enum.map(&SymbolFormat.to_canonical_symbol/1)
        |> Enum.sort()}
@@ -348,9 +352,12 @@ defmodule DpExchange.Gemini.Rest do
   """
   @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()}
   def get_market_overview(opts) do
-    with {:ok, rows} <- get_body("/v1/pricefeed", opts) do
+    with {:ok, body} <- get_body("/v1/pricefeed", opts),
+         {:ok, rows} <- list(body) do
       {:ok,
-       Map.new(rows, fn row ->
+       rows
+       |> Enum.filter(&is_map/1)
+       |> Map.new(fn row ->
          {SymbolFormat.to_canonical_symbol(row["pair"]),
           %{price: decimal(row["price"]), change_24h: decimal(row["percentChange24h"])}}
        end)}
@@ -787,7 +794,8 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_funding(String.t(), keyword()) ::
           {:ok, Funding.t()} | {:error, term()} | {:refused, term()}
   def get_funding(symbol, opts) do
-    with {:ok, body} <- get_body("/v1/fundingamount/#{symbol}", opts) do
+    with {:ok, raw} <- get_body("/v1/fundingamount/#{symbol}", opts),
+         {:ok, body} <- object(raw) do
       {:ok,
        %Funding{
          symbol: body["symbol"] || symbol,
@@ -841,7 +849,8 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_contract_stats(String.t(), keyword()) ::
           {:ok, ContractStats.t()} | {:error, term()} | {:refused, term()}
   def get_contract_stats(symbol, opts) do
-    with {:ok, body} <- get_body("/v1/riskstats/#{symbol}", opts) do
+    with {:ok, raw} <- get_body("/v1/riskstats/#{symbol}", opts),
+         {:ok, body} <- object(raw) do
       {:ok,
        %ContractStats{
          symbol: body["symbol"] || symbol,
@@ -872,6 +881,27 @@ defmodule DpExchange.Gemini.Rest do
 
   defp epoch_ms(_other), do: nil
   # --- internals ----------------------------------------------------------
+
+  # **A response of the wrong JSON shape is a refusal, never a raise.** These decoders read
+  # `body["field"]`, and `Access` on a LIST raises `ArgumentError`; they iterate rows, and
+  # iterating `null` raises `Protocol.UndefinedError` while iterating an object walks its
+  # key/value pairs into a function expecting a row. Found by feeding every active facade
+  # call a set of plausible-but-wrong bodies — `[]`, `null`, `{}`, an object whose lists are
+  # all `null` — and seven raised in the CALLER's process: `get_top_of_book/2`,
+  # `get_funding/2` and `get_contract_stats/2` on `[]`; `get_symbols/1`,
+  # `get_market_overview/1` and `get_historical_prices/4` on `null` or an object;
+  # `Private.get_deposit_address/4` on `[]`. `Core.Venue`'s error discipline is that a facade
+  # answers, and never raises. `:unexpected_response_shape` is the refusal this module
+  # already uses for the same condition in `quoted_price/1` and `to_fx_rate/3`.
+  @doc false
+  @spec object(term()) :: {:ok, map()} | {:error, :unexpected_response_shape}
+  def object(%{} = body), do: {:ok, body}
+  def object(_other), do: {:error, :unexpected_response_shape}
+
+  @doc false
+  @spec list(term()) :: {:ok, list()} | {:error, :unexpected_response_shape}
+  def list(body) when is_list(body), do: {:ok, body}
+  def list(_other), do: {:error, :unexpected_response_shape}
 
   defp get_body(path, opts) do
     with {:ok, body, _headers} <- get_with_headers(path, opts), do: {:ok, body}
