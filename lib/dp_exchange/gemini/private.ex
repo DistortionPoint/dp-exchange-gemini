@@ -1479,6 +1479,12 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp payment_rows(%{"methods" => rows}) when is_list(rows), do: rows
+  # **The wrapper is never a row.** When `"methods"` is present it decides the shape whatever
+  # it holds; only a response with no `"methods"` key at all is treated as one bare object.
+  # The catch-all used to take the wrapper too: `{"methods": null}` came back as
+  # `{:ok, [%{"methods" => nil}]}`. The same defect
+  # `dp_exchange_webull`'s `rows/1` had, found the same day.
+  defp payment_rows(%{"methods" => _not_a_list}), do: []
   defp payment_rows(rows) when is_list(rows), do: rows
   defp payment_rows(%{} = row), do: [row]
   defp payment_rows(_other), do: []

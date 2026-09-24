@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A wrapper came back as a row.** `payment_rows/1` and `Rest.promo_rows/1` each end in a
+  clause that wraps any map as one row, and it caught the wrapper itself when its list was
+  `null`: measured, `list_payment_methods/2` answered `{:ok, [%{"methods" => nil}]}` and
+  `list_fee_promos/1` answered `{:ok, [%{"symbols" => nil}]}`. The wrapper key, when present,
+  now decides the shape whatever it holds, and both answer `{:ok, []}`. The same defect
+  `dp_exchange_webull`'s `rows/1` had, found the same day.
+
 ## [0.2.48] - 2026-09-23
 
 ### Fixed

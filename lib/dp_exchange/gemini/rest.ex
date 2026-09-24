@@ -670,6 +670,12 @@ defmodule DpExchange.Gemini.Rest do
   defp promo_rows(%{"symbols" => symbols}) when is_list(symbols),
     do: Enum.map(symbols, &%{"symbol" => &1})
 
+  # **The wrapper is never a row.** When `"symbols"` is present it decides the shape whatever
+  # it holds; only a response with no `"symbols"` key at all is treated as one bare object.
+  # The catch-all used to take the wrapper too: `{"symbols": null}` came back as
+  # `{:ok, [%{"symbols" => nil}]}`. The same defect
+  # `dp_exchange_webull`'s `rows/1` had, found the same day.
+  defp promo_rows(%{"symbols" => _not_a_list}), do: []
   defp promo_rows(rows) when is_list(rows), do: rows
   defp promo_rows(%{} = row), do: [row]
   defp promo_rows(_other), do: []

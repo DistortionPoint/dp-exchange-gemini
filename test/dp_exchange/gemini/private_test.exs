@@ -1406,4 +1406,25 @@ defmodule DpExchange.Gemini.PrivateTest do
       refute Map.has_key?(payload, "symbol")
     end
   end
+
+  describe "a wrapper is never a row" do
+    # `payment_rows/1` wrapped any map as one row, so `{"methods": null}` came back as
+    # `{:ok, [%{"methods" => nil}]}` — the wrapper as a payment method. `Rest.promo_rows/1`
+    # did the same with `{"symbols": null}`.
+    test "list_payment_methods/2 with methods: null is no rows" do
+      assert {:ok, []} =
+               Private.list_payment_methods(@credentials,
+                 plug: fn conn -> Req.Test.json(conn, %{"methods" => nil}) end,
+                 retry_attempts: 0
+               )
+    end
+
+    test "list_fee_promos/1 with symbols: null is no rows" do
+      assert {:ok, []} =
+               DpExchange.Gemini.Rest.list_fee_promos(
+                 plug: fn conn -> Req.Test.json(conn, %{"symbols" => nil}) end,
+                 retry_attempts: 0
+               )
+    end
+  end
 end
