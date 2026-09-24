@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.52] - 2026-09-24
+
 ### Fixed
 
 - **Sends to a reconnecting socket blocked `Feed` for 5s each.** `Socket` sleeps its
