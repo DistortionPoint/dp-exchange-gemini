@@ -624,6 +624,30 @@ defmodule DpExchange.Gemini.FeedTest do
       assert Enum.sort(frame["params"]) == ["btcusd@bookTicker", "ethusd@bookTicker"]
     end
 
+    test "a reconnect report resubscribes at once, without waiting for the timer" do
+      # On the timer alone, a reconnected socket carried nothing for up to 60s — see the
+      # moduledoc's "A reconnect resubscribes at once; the timer is the net".
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      socket = :sys.get_state(feed).socket
+      send(feed, {:dp_exchange, :gemini, :reconnected, socket})
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
+    end
+
+    test "a reconnect report from a socket this feed no longer holds is ignored" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      send(feed, {:dp_exchange, :gemini, :reconnected, spawn(fn -> :ok end)})
+
+      refute_receive {:frame_sent, _frame}, 50
+      assert Process.alive?(feed)
+    end
+
     test "drops what was unsubscribed rather than re-asking for it" do
       feed = start_feed()
       :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], to: self())

@@ -149,7 +149,10 @@ defmodule DpExchange.Gemini.Socket do
 
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
-      request_id: 0
+      request_id: 0,
+      # Whether `handle_connect/2` has run before — so only a RE-connect is reported to
+      # `Feed`. See `report_reconnected/1`.
+      connected_once?: false
     }
 
     WebSockex.start_link(url, __MODULE__, state, connect_opts(opts))
@@ -309,8 +312,25 @@ defmodule DpExchange.Gemini.Socket do
     # droppable, and one that graphed notices would be graphing something it is meant to
     # handle. Both fire here because this one event is genuinely both.
     Telemetry.link_up(:gemini)
-    {:ok, state}
+    if state.connected_once?, do: report_reconnected(state)
+    {:ok, %{state | connected_once?: true}}
   end
+
+  # WebSockex reconnects inside this process, and a reconnected socket carries no
+  # subscriptions. `Feed` resubscribes on a 60s timer regardless, but that left up to a
+  # minute of silence after every ordinary reconnect. This tells `Feed` at once, so it can
+  # resubscribe now. The timer stays as the net for anything this misses.
+  #
+  # A private message rather than a `Core.Notice`: it carries this socket's pid, which a
+  # consumer has no use for. The FIRST connect is not reported. `Feed` subscribes on that
+  # one itself once `start_link/1` returns, and a report would only send the same
+  # subscription twice. Lossy by contract, like `notify/2`.
+  defp report_reconnected(%{subscriber: subscriber}) when is_pid(subscriber) do
+    send(subscriber, {:dp_exchange, :gemini, :reconnected, self()})
+    :ok
+  end
+
+  defp report_reconnected(_state), do: :ok
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do

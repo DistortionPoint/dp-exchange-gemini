@@ -69,6 +69,15 @@ defmodule DpExchange.Gemini.Feed do
   not re-subscribing one it silently dropped costs this package's whole coverage until
   someone notices.
 
+  ## A reconnect resubscribes at once; the timer is the net
+
+  On the timer alone, an ordinary reconnect meant up to `@resubscribe_interval_ms` (60s)
+  of silence: the socket was back, carrying nothing, until the next tick. `Socket` now
+  reports each RE-connect to this process (`{:dp_exchange, :gemini, :reconnected, pid}`),
+  and this module resubscribes the moment it hears, without re-arming the timer. The timer
+  still runs unconditionally, for the reason above: a report can be lost, and the timer is
+  what catches that.
+
   ## A crashed socket is `Feed`'s crash too, unless `Feed` catches it — and now it does
 
   `ensure_socket/1` calls `Socket.start_link/1` from inside `Feed`'s own callback, which
@@ -405,6 +414,15 @@ defmodule DpExchange.Gemini.Feed do
 
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+    {:noreply, resubscribe(state)}
+  end
+
+  # The live socket reconnected, and it carries no subscriptions now — see the moduledoc's
+  # "A reconnect resubscribes at once; the timer is the net" section. The same work as a
+  # timer tick, but the timer is NOT re-armed here: re-sending `:resubscribe` would start
+  # a second timer chain beside the first. A report from a socket that is no longer
+  # `state.socket` falls through to the catch-all.
+  def handle_info({:dp_exchange, :gemini, :reconnected, socket}, %{socket: socket} = state) do
     {:noreply, resubscribe(state)}
   end
 

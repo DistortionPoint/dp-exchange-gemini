@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reconnect left the feed silent for up to a minute.** WebSockex reconnects `Socket` in
+  place, with no subscriptions, and `Feed` only resubscribed on its 60s timer. `Socket` now
+  reports each re-connect to `Feed` (`{:dp_exchange, :gemini, :reconnected, pid}`, the first
+  connect excluded because `Feed` subscribes on that one itself), and `Feed` resubscribes
+  at once without re-arming the timer. The timer stays as the net for a lost report.
+  Break-verified: the new socket and feed tests fail on the previous code.
+
 ## [0.2.50] - 2026-09-24
 
 ### Fixed

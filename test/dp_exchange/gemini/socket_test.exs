@@ -10,7 +10,7 @@ defmodule DpExchange.Gemini.SocketTest do
   # The frame handlers are pure given a state, so they are driven directly. No socket is
   # opened and no venue is reached — a tier-1 test that dials a venue is a tier-2 test
   # wearing the wrong tag, and it will fail in CI on a bad day rather than a bad commit.
-  defp state, do: %{subscriber: self(), request_id: 0}
+  defp state, do: %{subscriber: self(), request_id: 0, connected_once?: false}
 
   defp deliver(payload) do
     Socket.handle_frame({:text, Jason.encode!(payload)}, state())
@@ -203,6 +203,17 @@ defmodule DpExchange.Gemini.SocketTest do
   end
 
   describe "connection lifecycle" do
+    test "only a RE-connect is reported to the feed, so it can resubscribe at once" do
+      # The first connect is followed by `Feed`'s own subscribe; reporting it too would
+      # send the same subscription twice.
+      assert {:ok, first} = Socket.handle_connect(:conn, state())
+      refute_received {:dp_exchange, :gemini, :reconnected, _pid}
+
+      assert {:ok, _again} = Socket.handle_connect(:conn, first)
+      me = self()
+      assert_received {:dp_exchange, :gemini, :reconnected, ^me}
+    end
+
     test "connecting raises link_up" do
       assert {:ok, _state} = Socket.handle_connect(:conn, state())
 
