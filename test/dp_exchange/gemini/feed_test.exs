@@ -612,6 +612,26 @@ defmodule DpExchange.Gemini.FeedTest do
     # `@resubscribe_interval_ms` — the handler doesn't care who sent the message, only that
     # it arrived, so this exercises the exact code path the timer drives without a 60-second
     # test.
+    test "nothing is sent to a socket whose link is down, and nothing is lost by it" do
+      # A reconnecting socket answers no `send_frame/2`, so each send blocked the feed for
+      # 5s — see the moduledoc's "A socket that is reconnecting is not sent to".
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      send(feed, {:dp_exchange, :gemini, Notice.new(:link_down, :gemini)})
+      send(feed, :resubscribe)
+      assert :ok = Feed.subscribe(feed, ["ETH-USD"], to: self())
+
+      refute_receive {:frame_sent, _frame}, 100
+
+      socket = :sys.get_state(feed).socket
+      send(feed, {:dp_exchange, :gemini, :reconnected, socket})
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => params}}
+      assert Enum.sort(params) == ["btcusd@bookTicker", "ethusd@bookTicker"]
+    end
+
     test "resends the current subscription on the wire, unprompted by any reconnect signal" do
       feed = start_feed()
       :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], to: self())

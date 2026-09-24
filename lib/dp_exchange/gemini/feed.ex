@@ -75,8 +75,21 @@ defmodule DpExchange.Gemini.Feed do
   of silence: the socket was back, carrying nothing, until the next tick. `Socket` now
   reports each RE-connect to this process (`{:dp_exchange, :gemini, :reconnected, pid}`),
   and this module resubscribes the moment it hears, without re-arming the timer. The timer
-  still runs unconditionally, for the reason above: a report can be lost, and the timer is
-  what catches that.
+  still runs unconditionally, for what no report covers: a venue that quietly stops serving
+  a stream on a connection that never dropped.
+
+  ## A socket that is reconnecting is not sent to
+
+  `Socket.handle_disconnect/2` sleeps its backoff (up to 30s) inside the socket process,
+  and WebSockex answers no `send_frame/2` while it reconnects. So every send to such a
+  socket blocked this process for the full 5s window and came back `:send_timeout`. That
+  covered each timer tick (which also raised a "resubscribe failed" notice for a socket
+  that was only reconnecting) and each consumer `subscribe/3`, `unsubscribe/2` or
+  `update_symbols/2` that landed during the outage. `state.link_down?` is now set by the
+  socket's `:link_down` and cleared by its `:reconnected`, and nothing is sent in between.
+  Nothing is lost, because `wanted` is kept current regardless and a reconnected socket
+  gets all of it at once. Both messages come from the one socket, in order, and a crashed
+  socket's replacement starts with the flag cleared.
 
   ## A crashed socket is `Feed`'s crash too, unless `Feed` catches it — and now it does
 
@@ -270,6 +283,9 @@ defmodule DpExchange.Gemini.Feed do
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
+       # True between the socket's `:link_down` and its `:reconnected`. Nothing is sent to it
+       # meanwhile — see the moduledoc's "A socket that is reconnecting is not sent to".
+       link_down?: false,
        # Both of this venue's declared streamable kinds, pre-populated so
        # `coverage_by_kind/1` always answers with both keys — an absent key would read as
        # "unknown" where an empty map honestly reads as "nothing observed yet".
@@ -304,7 +320,7 @@ defmodule DpExchange.Gemini.Feed do
     }
 
     case ensure_socket(state) do
-      {:ok, state} -> {:reply, Socket.subscribe(state.socket, symbols), state}
+      {:ok, state} -> {:reply, when_linked(state, &Socket.subscribe(&1, symbols)), state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -314,7 +330,7 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
-    {:reply, Socket.unsubscribe(state.socket, symbols), drop(state, symbols)}
+    {:reply, when_linked(state, &Socket.unsubscribe(&1, symbols)), drop(state, symbols)}
   end
 
   def handle_call({:update_symbols, symbols}, _from, state) do
@@ -369,7 +385,7 @@ defmodule DpExchange.Gemini.Feed do
   # crash path performs, for the same reason.
   def handle_info({:dp_exchange, :gemini, %Notice{kind: :link_down} = notice}, state) do
     fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
-    {:noreply, %{state | delivering_by_kind: empty_delivery()}}
+    {:noreply, %{state | delivering_by_kind: empty_delivery(), link_down?: true}}
   end
 
   # A subscriber that died. Dropped from both sets, and its monitor forgotten.
@@ -423,7 +439,7 @@ defmodule DpExchange.Gemini.Feed do
   # a second timer chain beside the first. A report from a socket that is no longer
   # `state.socket` falls through to the catch-all.
   def handle_info({:dp_exchange, :gemini, :reconnected, socket}, %{socket: socket} = state) do
-    {:noreply, resubscribe(state)}
+    {:noreply, resubscribe(%{state | link_down?: false})}
   end
 
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
@@ -448,7 +464,7 @@ defmodule DpExchange.Gemini.Feed do
   # forever, since a socket this module never dialled has nothing for `Process.alive?/1`
   # to even check.
   defp resubscribe(%{socket: socket} = state) when is_pid(socket) do
-    if Process.alive?(socket) and MapSet.size(state.wanted) > 0 do
+    if Process.alive?(socket) and not state.link_down? and MapSet.size(state.wanted) > 0 do
       case Socket.subscribe(socket, MapSet.to_list(state.wanted)) do
         :ok ->
           resubscribe_recovered(state)
@@ -524,12 +540,19 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   defp apply_delta(%{socket: nil}, _added, _removed), do: :ok
+  defp apply_delta(%{link_down?: true}, _added, _removed), do: :ok
 
   defp apply_delta(state, added, removed) do
     with :ok <- Socket.unsubscribe(state.socket, removed) do
       Socket.subscribe(state.socket, added)
     end
   end
+
+  # A socket that is reconnecting is asleep in its backoff and answers no `send_frame/2`,
+  # so a send would block this process for its whole 5s window. Answered `:ok` because
+  # nothing is lost: `wanted` is already updated, and `:reconnected` re-issues all of it.
+  defp when_linked(%{link_down?: true}, _send), do: :ok
+  defp when_linked(%{socket: socket}, send), do: send.(socket)
 
   defp ensure_socket(%{socket: socket} = state) when is_pid(socket), do: {:ok, state}
 
@@ -547,7 +570,7 @@ defmodule DpExchange.Gemini.Feed do
   # resets to the same empty shape `init/1` starts with rather than being narrowed
   # symbol-by-symbol the way `drop/2` narrows it for an ordinary unsubscribe.
   defp isolate_crashed_socket(state, reason) do
-    state = %{state | socket: nil, delivering_by_kind: empty_delivery()}
+    state = %{state | socket: nil, delivering_by_kind: empty_delivery(), link_down?: false}
     notify_socket_crashed(state, reason)
 
     # `resubscribe/1` — the identical function the periodic timer calls — reconnects and

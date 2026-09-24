@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sends to a reconnecting socket blocked `Feed` for 5s each.** `Socket` sleeps its
+  backoff and answers no `send_frame/2` while it reconnects, so each timer tick and each
+  consumer `subscribe/3`, `unsubscribe/2` or `update_symbols/2` during an outage blocked
+  `Feed` for the full window and came back `:send_timeout`. The tick also raised a
+  "resubscribe failed" notice for a socket that was only reconnecting. `Feed` now sets
+  `link_down?` on the socket's `:link_down`, clears it on `:reconnected`, and sends nothing
+  in between. `wanted` stays current and a reconnect re-issues all of it. Break-verified:
+  the new test fails on the previous code.
+
 ## [0.2.51] - 2026-09-24
 
 ### Fixed
