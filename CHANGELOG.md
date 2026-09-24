@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.50] - 2026-09-24
+
 ### Fixed
 
 - **Seven endpoints raised on a response of the wrong shape.** The decoders read
