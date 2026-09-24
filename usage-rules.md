@@ -853,6 +853,21 @@ zero.
 This venue is also where the family learned that **positives go stale too** — a socket URL
 the vendor still published had stopped working, and only a live check said so.
 
+## An ordinary reconnect resubscribes at once; you never call `subscribe/3` again
+
+A dropped connection (no crash, just the venue or the network closing it) reconnects
+inside the same socket, and a reconnected socket carries no subscriptions. This package
+resends your `wanted` set the moment the socket reports it is back. A 60-second
+unconditional resend also runs, as a safety net.
+
+**While the socket is reconnecting, `Feed.subscribe/3`, `unsubscribe/2` and
+`update_symbols/2` answer `:ok` without touching the socket.** Your change is recorded
+in `wanted` and goes out with everything else when the socket is back. A reconnecting
+socket answers no frame, and sending to it used to block the feed for five seconds per
+call and come back `{:error, :send_timeout}` for a socket that was only reconnecting.
+`:link_down` / `:link_up` from `subscribe_notices/1` bracket that window if you need to
+know about it.
+
 ## A dead socket is not a slow one
 
 `subscribe/2` and `unsubscribe/2` answer `{:error, :send_timeout}` when the socket did not

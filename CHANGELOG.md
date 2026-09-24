@@ -20,6 +20,13 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`usage-rules.md` said nothing about ordinary reconnects.** It now says a reconnect
+  resends `wanted` at once, and that `Feed.subscribe/3`, `unsubscribe/2` and
+  `update_symbols/2` answer `:ok` without touching a reconnecting socket and send on
+  reconnect, as shipped in 0.2.51 and 0.2.52.
+
 ## [0.2.52] - 2026-09-24
 
 ### Fixed
