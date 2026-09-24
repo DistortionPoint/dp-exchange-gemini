@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.51] - 2026-09-24
+
 ### Fixed
 
 - **A reconnect left the feed silent for up to a minute.** WebSockex reconnects `Socket` in
