@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.53] - 2026-09-24
+
 ### Documentation
 
 - **`usage-rules.md` said nothing about ordinary reconnects.** It now says a reconnect
