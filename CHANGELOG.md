@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.49] - 2026-09-24
+
 ### Fixed
 
 - **A wrapper came back as a row.** `payment_rows/1` and `Rest.promo_rows/1` each end in a
