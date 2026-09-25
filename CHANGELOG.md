@@ -20,6 +20,13 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_trades/2` returned the tape newest first, as the venue sends it, and
+  `get_trade_history/2` returned the venue's order.** Both are now oldest first by
+  `:timestamp`, keeping the venue's order for equal timestamps, as `Core.Venue` now
+  documents. Break-verified: the new test fails on the previous code.
+
 ## [0.2.54] - 2026-09-25
 
 ### Fixed

@@ -58,6 +58,21 @@ defmodule DpExchange.Gemini.TradesTest do
   end
 
   describe "the tape" do
+    test "prints come back oldest first, whatever order the venue sent them in" do
+      # The venue sends the tape newest first. See `Core.Venue`'s `get_trades` doc.
+      sent = [{3, 1_547_146_813_000}, {1, 1_547_146_811_000}, {2, 1_547_146_812_000}]
+
+      rows =
+        for {tid, ms} <- sent do
+          trade(%{"tid" => tid, "timestampms" => ms, "timestamp" => div(ms, 1000)})
+        end
+
+      assert {:ok, trades} =
+               Rest.get_trades("BTC-USD", plug: responding(rows), retry_attempts: 0)
+
+      assert Enum.map(trades, & &1.id) == ["1", "2", "3"]
+    end
+
     test "a print comes back with the venue's numbers" do
       assert {:ok, [%Types.Trade{} = t]} =
                Rest.get_trades("BTC-USD", plug: responding([trade()]), retry_attempts: 0)

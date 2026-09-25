@@ -805,7 +805,8 @@ defmodule DpExchange.Gemini.Private do
       end
     end)
     |> case do
-      {:ok, fills} -> {:ok, Enum.reverse(fills)}
+      # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
+      {:ok, fills} -> {:ok, fills |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)}
       error -> error
     end
   end

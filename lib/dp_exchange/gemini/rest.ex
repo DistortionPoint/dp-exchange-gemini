@@ -474,8 +474,16 @@ defmodule DpExchange.Gemini.Rest do
         end
       end)
       |> case do
-        {:ok, trades} -> {:ok, trades |> Enum.reverse() |> reject_broken(opts)}
-        error -> error
+        # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
+        {:ok, trades} ->
+          {:ok,
+           trades
+           |> Enum.reverse()
+           |> Enum.sort_by(& &1.timestamp, DateTime)
+           |> reject_broken(opts)}
+
+        error ->
+          error
       end
     end
   end
