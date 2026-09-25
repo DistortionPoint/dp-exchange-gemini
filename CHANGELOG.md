@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.56] - 2026-09-25
+
 ### Fixed
 
 - **A half-open connection stayed "connected" indefinitely.** A network path that dies
