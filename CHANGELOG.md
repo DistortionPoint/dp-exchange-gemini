@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.55] - 2026-09-25
+
 ### Fixed
 
 - **`get_trades/2` returned the tape newest first, as the venue sends it, and
