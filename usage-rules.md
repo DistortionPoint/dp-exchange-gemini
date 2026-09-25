@@ -815,7 +815,11 @@ else. For a write it is not, because those are precisely the failures where the 
 have **received and acted on** the request before the connection broke. A retried order is a
 second order, and you see one call and one answer either way.
 
-So order-creating and order-changing calls here are sent once. A transport failure comes back
+So order-creating and order-changing calls here are sent once, and so are
+`transfer_internal/5`, `create_clearing_order/3` and `create_broker_clearing_order/3`.
+Under API-key auth the nonce happens to make a repeated request fail, but under OAuth
+there is no nonce and a retry takes effect again. Before 0.2.54 those three were retried.
+A transport failure comes back
 to you as an error, and **the outcome of that attempt is genuinely unknown** — the order may
 or may not exist at the venue. Read your open orders before placing again; do not treat the
 error as "it did not happen".

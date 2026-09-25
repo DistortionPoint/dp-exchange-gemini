@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Under OAuth, a retried internal transfer or clearing order took effect twice.** `post/4`
+  signs once and `Core.HttpClient` re-sends the same signed request after a transport
+  error. Under API-key auth the repeat is refused for its nonce (no second transfer, but a
+  success reported as a failure). Under OAuth there is no nonce, so the repeat moved the
+  funds, or made the offer, a second time. `transfer_internal/5`,
+  `create_clearing_order/3` and `create_broker_clearing_order/3` now use `post_once/4`.
+  `commit_conversion/2` sends the quote's own id, which the venue executes once, and is
+  unchanged. Break-verified: all three new tests fail on the previous code.
+
 ## [0.2.53] - 2026-09-24
 
 ### Documentation

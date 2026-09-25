@@ -417,6 +417,14 @@ defmodule DpExchange.Gemini.Private do
   # gives none". A retry there re-sends the same key and the venue answers with the original
   # transfer, so retrying is both safe and useful. That is the distinction this helper turns
   # on: not "is it a write" but "can the venue tell the second attempt from the first".
+  #
+  # **The nonce is not that key.** `post/4` signs once and `Core.HttpClient` re-sends the
+  # same signed request, so under API-key auth a retry of a request that already took effect
+  # is refused for its nonce: no second transfer, but a success reported as a failure. Under
+  # OAuth there is no nonce, and the retry takes effect again. `transfer_internal/5` and
+  # both clearing-order creates relied on the first and were exposed to the second, and
+  # use this helper now. `commit_conversion/2` sends the quote's own id, which the venue
+  # executes once, and stays on `post/4`.
   defp post_once(path, params, credentials, opts) do
     post(path, params, credentials, Keyword.put(opts, :retry_attempts, 1))
   end
@@ -1556,8 +1564,10 @@ defmodule DpExchange.Gemini.Private do
 
       currency = String.downcase(asset)
 
+      # Once: nothing in this payload lets the venue tell a second transfer from the first,
+      # and an OAuth request carries no nonce to be refused on replay. See `post_once/4`.
       with {:ok, body, _headers} <-
-             post("/v1/account/transfer/#{currency}", params, credentials, opts) do
+             post_once("/v1/account/transfer/#{currency}", params, credentials, opts) do
         {:ok, body}
       end
     end
@@ -2657,7 +2667,8 @@ defmodule DpExchange.Gemini.Private do
         |> put_present("counterparty_id", Keyword.get(opts, :counterparty_id))
         |> put_present("expires_in_hrs", Keyword.get(opts, :expires_in_hrs))
 
-      with {:ok, body, _headers} <- post("/v1/clearing/new", params, credentials, opts),
+      # Once: a repeated offer is a second offer to the counterparty. See `post_once/4`.
+      with {:ok, body, _headers} <- post_once("/v1/clearing/new", params, credentials, opts),
            do: {:ok, body}
     end
   end
@@ -2689,7 +2700,9 @@ defmodule DpExchange.Gemini.Private do
         |> Map.put("target_counterparty_id", target)
         |> Map.put("expires_in_hrs", hours)
 
-      with {:ok, body, _headers} <- post("/v1/clearing/broker/new", params, credentials, opts),
+      # Once, for the same reason as `create_clearing_order/3`.
+      with {:ok, body, _headers} <-
+             post_once("/v1/clearing/broker/new", params, credentials, opts),
            do: {:ok, body}
     end
   end
