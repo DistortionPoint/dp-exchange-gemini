@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.54] - 2026-09-25
+
 ### Fixed
 
 - **Under OAuth, a retried internal transfer or clearing order took effect twice.** `post/4`
