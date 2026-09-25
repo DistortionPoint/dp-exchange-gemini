@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A half-open connection stayed "connected" indefinitely.** A network path that dies
+  without either end being told leaves the socket open until TCP notices, which for a
+  subscribed socket that rarely sends can take as long as the OS allows. It delivers
+  nothing meanwhile and is never reconnected. The venue documents no heartbeat, so each
+  connection now pings every 30s (RFC 6455 requires a pong). A frame or a pong counts as
+  being heard from, and after 90s with neither the socket raises a `:degraded` notice
+  (`:silent_connection`) and closes, taking the ordinary reconnect path. Break-verified:
+  three of the four new tests fail on the previous code.
+
 ## [0.2.55] - 2026-09-25
 
 ### Fixed

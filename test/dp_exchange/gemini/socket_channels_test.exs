@@ -14,7 +14,16 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
   alias DpExchange.Gemini.Socket
 
   defp state(overrides \\ %{}) do
-    Map.merge(%{subscriber: self(), request_id: 0, connected_once?: false}, overrides)
+    Map.merge(
+      %{
+        subscriber: self(),
+        request_id: 0,
+        connected_once?: false,
+        last_heard_at: nil,
+        liveness: nil
+      },
+      overrides
+    )
   end
 
   defp frame(payload), do: {:text, Jason.encode!(payload)}
