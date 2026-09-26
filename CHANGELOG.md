@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.58] - 2026-09-26
+
 ### Fixed
 
 - **`get_fx_rate/3` labelled a rate with the time asked for when the venue gave none.**
