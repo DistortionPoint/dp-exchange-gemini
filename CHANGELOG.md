@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.59] - 2026-09-26
+
 ### Fixed
 
 - **A flaky test: `SideBySideTest` intermittently failed with `{:already_started, pid}`.**
