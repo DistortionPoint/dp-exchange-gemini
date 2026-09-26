@@ -336,14 +336,26 @@ defmodule DpExchange.Gemini.TradesTest do
       assert rate.as_of == DateTime.from_unix!(1_594_651_859_000, :millisecond)
     end
 
-    test "no asOf falls back to the instant requested, which is still a time" do
-      assert {:ok, rate} =
+    test "no asOf is refused, not replaced by the instant asked for" do
+      # This asserted the opposite: that the requested instant stood in. `Core.Types.FxRate`
+      # says `:as_of` is the instant echoed by the venue and that a rate without it is not a
+      # rate, and the venue may answer for a nearby moment. The requested instant was a
+      # plausible time with the wrong meaning.
+      assert {:error, :missing_venue_timestamp} =
                Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
                  plug: responding(Map.delete(@fx, "asOf")),
                  retry_attempts: 0
                )
+    end
 
-      assert rate.as_of == ~U[2020-07-13 15:30:59Z]
+    test "a non-positive or out-of-range asOf is refused, not dated 1970 or raised on" do
+      for bad <- [0, -1, 999_999_999_999_999_999] do
+        assert {:error, :missing_venue_timestamp} =
+                 Rest.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                   plug: responding(Map.put(@fx, "asOf", bad)),
+                   retry_attempts: 0
+                 )
+      end
     end
 
     test "the instant is sent as milliseconds in the path" do

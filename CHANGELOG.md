@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_fx_rate/3` labelled a rate with the time asked for when the venue gave none.**
+  `Core.Types.FxRate` says `:as_of` is the instant "echoed by the venue" and that "a rate
+  without it is a number with no time attached, which is not a rate". `Rest` fell back to
+  the requested instant when `asOf` was absent, although its own comment said the venue may
+  answer for a nearby moment. It also dated a non-positive `asOf` to 1970, and raised in the
+  caller's process on one outside `DateTime`'s range. A missing or unreadable `asOf` is now
+  `{:error, :missing_venue_timestamp}`. **Behaviour change**: a caller that received a rate
+  with no `asOf` now receives that error. The test that pinned the fallback is replaced.
+  Break-verified: both new tests fail on the previous code.
+
 ## [0.2.57] - 2026-09-26
 
 ### Fixed

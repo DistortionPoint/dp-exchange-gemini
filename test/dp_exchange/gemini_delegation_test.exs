@@ -519,7 +519,12 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "get_fx_rate/3", %{opts: sup} do
-      body = %{"fxPair" => "AUDUSD", "rate" => "0.69", "provider" => "bcb"}
+      body = %{
+        "fxPair" => "AUDUSD",
+        "rate" => "0.69",
+        "provider" => "bcb",
+        "asOf" => 1_594_651_859_000
+      }
 
       assert {:ok, rate} =
                Gemini.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z], money_opts(sup, body))

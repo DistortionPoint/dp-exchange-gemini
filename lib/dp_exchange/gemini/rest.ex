@@ -616,15 +616,16 @@ defmodule DpExchange.Gemini.Rest do
   defp fx_pair(pair) when pair in @fx_pairs, do: :ok
   defp fx_pair(pair), do: {:error, {:unsupported_fx_pair, pair}}
 
-  defp to_fx_rate(%{"rate" => rate} = body, native, requested_at) do
-    with {:ok, parsed_rate} <- required_decimal(rate, :rate) do
+  defp to_fx_rate(%{"rate" => rate} = body, native, _requested_at) do
+    with {:ok, parsed_rate} <- required_decimal(rate, :rate),
+         {:ok, as_of} <- as_of(body["asOf"]) do
       {:ok,
        %FxRate{
          pair: body["fxPair"] || native,
          rate: parsed_rate,
-         # The venue echoes the instant in `asOf`. Where it does, that is the authority —
-         # the venue may answer for a nearby moment and its own word is what happened.
-         as_of: as_of(body["asOf"], requested_at),
+         # The venue's own `asOf`, and only that. The venue may answer for a nearby moment,
+         # so the instant asked for is not a stand-in for the one it answered for.
+         as_of: as_of,
          # The institution that computed the rate. Named `provider` by the venue and
          # carried as `source` here, because `provider` in this contract means the venue.
          source: body["provider"],
@@ -636,8 +637,20 @@ defmodule DpExchange.Gemini.Rest do
 
   defp to_fx_rate(_body, _native, _requested_at), do: {:error, :unexpected_response_shape}
 
-  defp as_of(ms, _requested_at) when is_integer(ms), do: DateTime.from_unix!(ms, :millisecond)
-  defp as_of(_absent, requested_at), do: requested_at
+  # `Core.Types.FxRate`: `:as_of` is the instant "echoed by the venue", and "a rate without
+  # it is a number with no time attached, which is not a rate". This used to fall back to
+  # the instant requested when `asOf` was absent, although the comment above it said the
+  # venue may answer for a nearby moment. That labelled the rate with a time the venue never
+  # stated. It also dated a non-positive `asOf` to 1970, and raised in the caller's process
+  # (`from_unix!/2`) on one outside `DateTime`'s range.
+  defp as_of(ms) when is_integer(ms) and ms > 0 do
+    case DateTime.from_unix(ms, :millisecond) do
+      {:ok, at} -> {:ok, at}
+      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
+    end
+  end
+
+  defp as_of(_absent_or_unreadable), do: {:error, :missing_venue_timestamp}
 
   # `GET /v2/network/{token}` — the blockchain networks an asset moves over — used to live
   # here, documented "Public". It is not: measured live 2026-09-05, an unauthenticated
