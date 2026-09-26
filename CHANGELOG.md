@@ -20,6 +20,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Four ways a malformed stream frame crashed the socket, or invented a symbol.** Found by
+  mutating every value of real frames into wrong shapes:
+  - Three handlers read the symbol as `message["s"] || ""`, so a trade, book or delta the
+    venue sent without `s` was delivered for the symbol `""`. That value passes every
+    `nil` check and names nothing. Such a frame is now dropped.
+  - A non-string `s` raised in `SymbolFormat`.
+  - A trade id that was a map or list raised in `to_string/1`. It is now `nil`.
+  - An event time outside `DateTime`'s range raised in `from_unix!/2`, and zero or a
+    negative dated the event to 1970. It is now refused.
+
+  A raise in `handle_frame/2` drops the connection. Break-verified: all four new tests fail
+  on the previous code.
+
 ## [0.2.59] - 2026-09-26
 
 ### Fixed

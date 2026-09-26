@@ -467,13 +467,13 @@ defmodule DpExchange.Gemini.Socket do
       )
     end
 
-    symbol = SymbolFormat.to_canonical_symbol(message["s"] || "")
-
-    case WsDecode.to_order_book_delta(message, symbol) do
-      {:ok, delta} -> send(state.subscriber, {:dp_exchange, :gemini, delta})
-      # An undated diff cannot be ordered against anything. Silence beats a delta whose
-      # place in the sequence cannot be stated.
-      {:error, _reason} -> :ok
+    with {:ok, symbol} <- symbol_of(message),
+         {:ok, delta} <- WsDecode.to_order_book_delta(message, symbol) do
+      send(state.subscriber, {:dp_exchange, :gemini, delta})
+    else
+      # An undated diff cannot be ordered against anything, and one naming no symbol cannot
+      # be applied to any book. Silence beats a delta that cannot be placed.
+      _unplaceable -> :ok
     end
 
     {:ok, Map.put(state, :last_depth_update, message["u"])}
@@ -481,10 +481,11 @@ defmodule DpExchange.Gemini.Socket do
 
   # A partial-depth snapshot: absolute levels and a `lastUpdateId`, which is a book.
   defp handle_message(%{"lastUpdateId" => _id, "bids" => _b, "asks" => _a} = message, state) do
-    symbol = SymbolFormat.to_canonical_symbol(message["s"] || "")
+    with {:ok, symbol} <- symbol_of(message) do
+      {:ok, book} = WsDecode.to_order_book(message, symbol, DateTime.utc_now())
+      send(state.subscriber, {:dp_exchange, :gemini, book})
+    end
 
-    {:ok, book} = WsDecode.to_order_book(message, symbol, DateTime.utc_now())
-    send(state.subscriber, {:dp_exchange, :gemini, book})
     {:ok, state}
   end
 
@@ -506,7 +507,8 @@ defmodule DpExchange.Gemini.Socket do
   # that same construction inline, a second implementation of the same decode that could
   # drift from the one `WsChannelsTest` actually exercises directly. One decoder, called
   # once.
-  defp handle_message(%{"s" => native, "b" => _bid, "a" => _ask} = message, state) do
+  defp handle_message(%{"s" => native, "b" => _bid, "a" => _ask} = message, state)
+       when is_binary(native) and native != "" do
     symbol = SymbolFormat.to_canonical_symbol(native)
 
     # No error branch, because there is no longer an error to branch on: a bookTicker frame
@@ -552,8 +554,13 @@ defmodule DpExchange.Gemini.Socket do
   defp handle_message(_other, state), do: {:ok, state}
 
   defp deliver_trade(message, state) do
-    symbol = SymbolFormat.to_canonical_symbol(message["s"] || "")
+    case symbol_of(message) do
+      {:ok, symbol} -> deliver_trade(message, symbol, state)
+      :error -> {:ok, state}
+    end
+  end
 
+  defp deliver_trade(message, symbol, state) do
     case WsDecode.to_trade(message, symbol) do
       {:ok, trade} -> send(state.subscriber, {:dp_exchange, :gemini, trade})
       # An undated print cannot be placed on a tape. Silence beats a trade at the wrong
@@ -563,6 +570,16 @@ defmodule DpExchange.Gemini.Socket do
 
     {:ok, state}
   end
+
+  # The frame's symbol, or `:error`. Three handlers read it as `message["s"] || ""`, which
+  # delivered a trade, book or delta for the symbol `""` whenever the venue omitted it: a
+  # value every `nil` check passes and that names nothing. And a non-string `s` made
+  # `SymbolFormat` raise, taking the connection down. Both found by mutating real frames,
+  # 2026-09-26.
+  defp symbol_of(%{"s" => native}) when is_binary(native) and native != "",
+    do: {:ok, SymbolFormat.to_canonical_symbol(native)}
+
+  defp symbol_of(_message), do: :error
 
   # No trade price in the frame means the book has quotes and no execution to report. That
   # is a real state and it is silence here, not a `Quote` built from a bid.

@@ -209,6 +209,43 @@ defmodule DpExchange.Gemini.SocketTest do
     end
   end
 
+  describe "a malformed frame does not take the connection down, or invent a symbol" do
+    # Found by mutating real frames, 2026-09-26.
+    @trade_frame %{
+      "e" => "trade",
+      "E" => 1_787_936_147_000_000_000,
+      "s" => "btcusd",
+      "t" => 5_335_307_668,
+      "p" => "3610.85",
+      "q" => "0.27413495",
+      "m" => true
+    }
+
+    test "a trade with no symbol is dropped, not delivered for the symbol \"\"" do
+      assert {:ok, _state} = deliver(Map.delete(@trade_frame, "s"))
+      refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Trade{}}
+    end
+
+    test "a non-string symbol does not raise" do
+      for bad <- [0, %{}, []] do
+        assert {:ok, _state} = deliver(%{@trade_frame | "s" => bad})
+        assert {:ok, _state} = deliver(%{@book_ticker | "s" => bad})
+      end
+    end
+
+    test "a trade id that is not a string or integer is nil, not a raise" do
+      for bad <- [%{}, [%{}]] do
+        assert {:ok, _state} = deliver(%{@trade_frame | "t" => bad})
+        assert_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Trade{id: nil}}
+      end
+    end
+
+    test "an event time outside the calendar is refused, not raised on" do
+      assert {:ok, _state} = deliver(%{@trade_frame | "E" => 999_999_999_999_999_999_999_999_999})
+      refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Trade{}}
+    end
+  end
+
   describe "liveness — a dead connection is found by pinging it" do
     # See the moduledoc's "A dead connection is found by pinging it".
     defp checked(heard_ms_ago) do

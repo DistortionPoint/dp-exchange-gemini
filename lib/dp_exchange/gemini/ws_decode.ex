@@ -318,19 +318,31 @@ defmodule DpExchange.Gemini.WsDecode do
 
   # Nanoseconds. Reading one as milliseconds puts the event ~50,000 years out; as seconds,
   # worse, because the result still looks like a date.
-  defp nanosecond_time(ns) when is_integer(ns), do: {:ok, DateTime.from_unix!(ns, :nanosecond)}
+  #
+  # Positive and in range, or refused. Both branches used `from_unix!/2`, which RAISES on a
+  # value outside `DateTime`'s range, in the socket process, so one such frame dropped the
+  # connection. Zero and negatives dated the event to 1970.
+  defp nanosecond_time(ns) when is_integer(ns) and ns > 0 do
+    case DateTime.from_unix(ns, :nanosecond) do
+      {:ok, at} -> {:ok, at}
+      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
+    end
+  end
 
   defp nanosecond_time(ns) when is_binary(ns) do
     case Integer.parse(ns) do
-      {parsed, ""} -> {:ok, DateTime.from_unix!(parsed, :nanosecond)}
+      {parsed, ""} -> nanosecond_time(parsed)
       _not_an_epoch -> {:error, :missing_venue_timestamp}
     end
   end
 
   defp nanosecond_time(_absent), do: {:error, :missing_venue_timestamp}
 
-  defp to_string_or_nil(nil), do: nil
-  defp to_string_or_nil(value), do: to_string(value)
+  # Only a string or an integer is an id. `to_string/1` raised on a map or a list, in the
+  # socket process.
+  defp to_string_or_nil(value) when is_binary(value), do: value
+  defp to_string_or_nil(value) when is_integer(value), do: Integer.to_string(value)
+  defp to_string_or_nil(_absent_or_unreadable), do: nil
 
   # The same shape as `Rest`'s own copy, including the split between an absent field and a
   # present but unreadable one. A `nil` out of `decimal/1` means "absent, empty, unparseable,
