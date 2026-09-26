@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.57] - 2026-09-26
+
 ### Fixed
 
 - **A `Date` header in any zone was read as UTC.** Both HTTP-date parsers (`Rest` and
