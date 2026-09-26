@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.60] - 2026-09-26
+
 ### Fixed
 
 - **Four ways a malformed stream frame crashed the socket, or invented a symbol.** Found by
