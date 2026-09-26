@@ -20,6 +20,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A flaky test: `SideBySideTest` intermittently failed with `{:already_started, pid}`.**
+  Both of its trees use the default global names, and its `on_exit` stopped them with
+  `Process.exit(pid, :shutdown)`, which only sends the signal. The next test could start
+  before the old supervisor had unregistered, measured at 2 of 6 `mix test --cover` runs.
+  It now starts both trees with `start_supervised!/1`, which stops each and waits before
+  the next test. 8 of 8 runs clean afterwards. Test-only; no library change.
+
 ## [0.2.58] - 2026-09-26
 
 ### Fixed

@@ -13,18 +13,23 @@ defmodule DpExchange.Gemini.SideBySideTest do
   alias DpExchange.Core.Config
   alias DpExchange.Gemini
   alias DpExchange.Gemini.{Environment, Supervisor}
+  alias Elixir.Supervisor, as: ExSupervisor
 
   @moduletag :capture_log
 
+  # Under the test supervisor, not `start_link` with an `on_exit` exit signal. Both trees use
+  # the default GLOBAL names, and `Process.exit(pid, :shutdown)` only sends the signal: the
+  # next test could start before the old supervisor had unregistered them, and failed with
+  # `{:already_started, pid}`. Two of six `mix test --cover` runs did, measured 2026-09-26.
+  # `start_supervised!/1` stops each child and waits for it before the next test begins.
   defp start_both do
-    {:ok, production} = Gemini.start_link(environment: :production)
-    {:ok, sandbox} = Gemini.start_link(environment: :sandbox)
+    production =
+      start_supervised!(
+        ExSupervisor.child_spec({Gemini, environment: :production}, id: :production)
+      )
 
-    on_exit(fn ->
-      for pid <- [production, sandbox], Process.alive?(pid) do
-        Process.exit(pid, :shutdown)
-      end
-    end)
+    sandbox =
+      start_supervised!(ExSupervisor.child_spec({Gemini, environment: :sandbox}, id: :sandbox))
 
     {production, sandbox}
   end
