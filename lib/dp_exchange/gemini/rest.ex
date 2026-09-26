@@ -1170,7 +1170,10 @@ defmodule DpExchange.Gemini.Rest do
   # strictly: anything that does not match returns `:missing_venue_timestamp`, because a
   # header we cannot read is indistinguishable from one that was not sent.
   defp parse_http_date(value) when is_binary(value) do
-    with [_day, d, mon, y, time, _tz] <- String.split(value, [" ", ", "], trim: true),
+    # The zone is required to be the literal `GMT`, as RFC 7231's IMF-fixdate requires. It
+    # used to be matched and discarded, so a header in any other zone was read as UTC and
+    # could be hours off: a plausible time with the wrong meaning.
+    with [_day, d, mon, y, time, "GMT"] <- String.split(value, [" ", ", "], trim: true),
          {day, ""} <- Integer.parse(d),
          {year, ""} <- Integer.parse(y),
          {:ok, month} <- month_number(mon),

@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `Date` header in any zone was read as UTC.** Both HTTP-date parsers (`Rest` and
+  `Private`) split off the header's zone and discarded it, although their comment called
+  the parse strict. So `Fri, 28 Aug 2026 17:00:01 PST` became 17:00 UTC, eight hours from
+  the instant it names, with nothing to show it. The zone must now be the literal `GMT`,
+  as RFC 7231 requires, and anything else is unreadable. The public path leaves
+  `venue_time` `nil`, as it already did for an absent header, and a private call fails
+  with `:missing_venue_timestamp`. Break-verified: both new tests fail on the previous
+  code.
+
 ## [0.2.56] - 2026-09-25
 
 ### Fixed

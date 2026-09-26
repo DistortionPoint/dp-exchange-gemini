@@ -2884,7 +2884,10 @@ defmodule DpExchange.Gemini.Private do
   @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
 
   defp parse_http_date(value) when is_binary(value) do
-    with [_day, d, mon, y, time, _tz] <- String.split(value, [" ", ", "], trim: true),
+    # The zone is required to be the literal `GMT`, as RFC 7231's IMF-fixdate requires. It
+    # used to be matched and discarded, so a header in any other zone was read as UTC and
+    # could be hours off: a plausible time with the wrong meaning.
+    with [_day, d, mon, y, time, "GMT"] <- String.split(value, [" ", ", "], trim: true),
          {day, ""} <- Integer.parse(d),
          {year, ""} <- Integer.parse(y),
          month when is_integer(month) <- Enum.find_index(@months, &(&1 == mon)),

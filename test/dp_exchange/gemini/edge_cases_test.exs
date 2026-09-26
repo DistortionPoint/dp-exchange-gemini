@@ -453,6 +453,33 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                )
     end
 
+    test "a Date header in a zone other than GMT is not read as UTC" do
+      # RFC 7231 requires `GMT`. The zone used to be discarded, so this header read as
+      # 17:00 UTC, eight hours from the instant it names.
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 PST")
+        |> Req.Test.json([])
+      end
+
+      assert {:error, :missing_venue_timestamp} =
+               DpExchange.Gemini.Private.get_balances(@credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+    end
+
+    test "on the public path, a non-GMT Date header leaves the venue time unstated" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 PST")
+        |> Req.Test.json(%{"bid" => "1", "ask" => "2", "last" => "1.5", "volume" => %{}})
+      end
+
+      assert {:ok, quoted} = Rest.get_price("BTC-USD", plug: plug, retry_attempts: 0)
+      assert quoted.venue_time == nil
+    end
+
     test "a refusal with a non-JSON body is still a refusal, keeping the venue's words" do
       # See `Rest.refusal_reason/1`'s moduledoc: this used to collapse to a bare
       # `{:refused, :refused}` because `refusal/1` pre-decoded the body through the same
