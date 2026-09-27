@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.65] - 2026-09-27
+
 ### Fixed
 
 - **`paxgusd` and `usdgusd` were read as `PAX-GUSD` and `USD-GUSD`.** The symbol mapping
