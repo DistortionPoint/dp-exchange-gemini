@@ -368,8 +368,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   The test that pinned `bids: [{price, size}]` — one level, exactly — was part of why the
   fixture stayed one level deep, and now asserts the shape across every level instead.
 
-### Fixed
-
 - **Concurrent first callers of the incremental nonce counter were handed different
   counters, and so the same nonces.** `ensure_counter/0` created an `:atomics` ref, stored
   it, and then re-read the key — which converges only if every racing `put` lands before the
@@ -435,8 +433,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   `:normal` *somewhere* — in a conversion helper, a withdrawal amount, an option parameter —
   and none of them had said it on the order path, which is the one that spends money.
 
-### Fixed
-
 - **A timed-out order, conversion or staking write was retried, and could happen twice.**
   Those calls went through the shared `post/4`, which forwards `:retry_attempts` into
   `Core.HttpClient` — and that retries anything that is not a 4xx, including a timeout and a
@@ -489,8 +485,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   And two more fallback clauses hand-built the placeholder those guards exist to prevent —
   `%StakingBalance{asset: "", staked: nil}` and `%StakingReward{asset: "", amount: nil}` —
   for any row that was not a map. Both answer `{:error, :unexpected_response_shape}` now.
-
-### Fixed
 
 - **Three money-surface types could come back with the fields their own contract says cannot
   be `nil`.** Nothing in this package calls a type's `new/1` — every struct is built
@@ -868,6 +862,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   A consumer matching only `{:ok, _}` needs no change. One that enumerates error reasons now
   has them, each with whether retrying is worth anything — which is the part that decides
   what a caller does next, and the part a bare list of atoms would leave out.
+
 ## [0.2.21] - 2026-09-12
 
 ### Fixed
@@ -1194,6 +1189,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
 
   No vendor drift: every cited documentation source resolves exactly as recorded, and the
   committed endpoint inventories match the vendors' current indexes.
+
 ## [0.2.9] - 2026-09-11
 
 ### Changed
