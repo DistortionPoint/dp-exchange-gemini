@@ -102,6 +102,26 @@ Running two — two credentials, two scopes — needs distinct names:
  {DpExchange.Gemini, name: :gem_b, feed: :gem_b_feed, limiter: :gem_b_limiter}]
 ```
 
+## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
+
+Two things this package's socket does that the `websockex` library it is built on does not.
+Both come from a private, patched fork of websockex 0.5.1's process loop,
+``DpExchange.Gemini.Vendor.WebSockex``, carried from `dp_exchange_webull` on 2026-09-27.
+
+- **The opening handshake has a deadline**: `socket_connect_timeout` plus
+  `socket_recv_timeout`. Upstream bounds each read of the upgrade response separately, so
+  a peer that trickled the response held a connect open indefinitely. A connect that
+  misses the deadline now fails with `%WebSockex.ConnError{original: :timeout}`, the same
+  error a plain read timeout gives. On a reconnect, that means backoff and another try, not
+  a socket stuck connecting.
+- **A close frame with an invalid status code disconnects.** Upstream raised on it and
+  crashed the socket before its reconnect logic ran. It now produces an ordinary
+  `:link_down` and reconnect.
+
+**This package depends on `{:websockex, "== 0.5.1"}` exactly.** The fork calls that
+release's internals. If your application pins a different websockex version, dependency
+resolution will fail, so resolve to 0.5.1.
+
 ## A socket crash costs one reconnect, never your whole subscription
 
 The one socket this venue uses is a **linked** child of `Feed` — not a supervised
@@ -503,6 +523,12 @@ end in `USD`. A naive split on `USD` turns `aavegusd` into `AAVEG`/`USD`, and `A
 not an asset. It matches no catalogue entry and collects nothing, silently.
 
 The quote list, longest-first: `RLUSD USDC USDT GUSD USD EUR GBP SGD DAI BTC ETH SOL FIL`.
+
+**Longest-first is not always right either.** `paxgusd` is PAXG/USD and `usdgusd` is
+USDG/USD, but a longest-quote split reads both as `GUSD` pairs. This package maps both
+correctly. They were the only two wrong splits among the 335 spot symbols live on
+2026-09-27; see `DpExchange.Gemini.SymbolFormat`'s moduledoc for how that was checked. If
+you split symbols yourself, use the venue's catalogue, not a suffix rule alone.
 
 **Perpetuals are excluded** from `get_symbols/1`. Thirteen symbols carry a `perp` suffix;
 they are real instruments, but `get_symbols/1` is the *spot* catalogue and does not list
