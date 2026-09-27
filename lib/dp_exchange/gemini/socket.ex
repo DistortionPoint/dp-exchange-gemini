@@ -65,11 +65,18 @@ defmodule DpExchange.Gemini.Socket do
   cannot stack check chains.
   """
 
-  use WebSockex
-
   alias DpExchange.Core.{Config, Notice, Telemetry}
   alias DpExchange.Core.Types.Quote
   alias DpExchange.Gemini.{Environment, SymbolFormat, WsChannels, WsDecode}
+
+  # `use`, `start_link/4` and `send_frame/2` go to this package's vendored fork, never the
+  # real `WebSockex`, whose `open_loop/3` has no handshake deadline and whose
+  # `websocket_loop/3` crashes on a malformed close frame. See
+  # `DpExchange.Gemini.Vendor.WebSockex`. Aliased as `VendoredWebSockex`, never over
+  # `WebSockex`, so `WebSockex.Conn` and the rest still name the real dependency's modules.
+  alias DpExchange.Gemini.Vendor.WebSockex, as: VendoredWebSockex
+
+  use VendoredWebSockex
 
   require Logger
 
@@ -141,15 +148,21 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   @doc """
-  The `websockex` connection opts `start_link/1` passes to `WebSockex.start_link/4` —
+  The `websockex` connection opts `start_link/1` passes to `VendoredWebSockex.start_link/4` —
   `:socket_connect_timeout` and `:socket_recv_timeout`, defaulted to this module's own
   budget (see the moduledoc) and overridable by `opts`.
 
   Exposed as its own function, rather than inlined, so the budget the moduledoc claims can
-  be pinned by a test without opening a real connection — `start_link/1` itself cannot be
-  exercised against a fake transport, since `websockex` dials for real — and so a later
+  be pinned by a test without opening a connection. (`start_link/1` itself dials for real;
+  its own tests stand up a local TCP server for it.) And so a later
   refactor cannot silently drop either the explicit values or the override path back to
   `websockex`'s own accidental defaults.
+
+  **Their sum is also the whole handshake's deadline.** `:socket_recv_timeout` alone
+  bounds each `recv` of the upgrade response, not the response, so a peer that trickled it
+  held a start or a reconnect open indefinitely. The vendored
+  `DpExchange.Gemini.Vendor.WebSockex` ends the handshake at connect plus recv. That is
+  pinned against a local TCP server in `socket_vendored_websockex_test.exs`.
   """
   @spec connect_opts(keyword()) :: keyword()
   def connect_opts(opts) do
@@ -179,7 +192,7 @@ defmodule DpExchange.Gemini.Socket do
       liveness: nil
     }
 
-    WebSockex.start_link(url, __MODULE__, state, connect_opts(opts))
+    VendoredWebSockex.start_link(url, __MODULE__, state, connect_opts(opts))
   end
 
   @doc """
@@ -286,7 +299,7 @@ defmodule DpExchange.Gemini.Socket do
 
   defp send_rpc(socket, method, params) do
     frame = Jason.encode!(%{"method" => method, "params" => params, "id" => 1})
-    WebSockex.send_frame(socket, {:text, frame})
+    VendoredWebSockex.send_frame(socket, {:text, frame})
   catch
     # BOUNDARY: `WebSockex.send_frame/2` is `:gen.call` with a 5s default, and on timeout it
     # `exit`s rather than returning. Unconverted, that exit kills whatever sent the frame —

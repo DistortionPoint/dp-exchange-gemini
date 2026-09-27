@@ -74,7 +74,11 @@ defmodule DpExchangeGemini.MixProject do
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
-      {:websockex, "~> 0.4"},
+      # Pinned exactly: `lib/vendor/websockex.ex` is a patched fork of 0.5.1's process loop
+      # and calls `WebSockex.Conn`, `WebSockex.Frame` and `WebSockex.Utils` the way that file
+      # did. Those are internal shapes no range promises to keep. See the vendored module's
+      # "What stayed a dependency, and why".
+      {:websockex, "== 0.5.1"},
       {:jason, "~> 1.4"},
       {:decimal, "~> 2.0"},
 
@@ -91,7 +95,7 @@ defmodule DpExchangeGemini.MixProject do
     ]
   end
 
-  defp test_coverage, do: [threshold: 90, ignore_modules: []]
+  defp test_coverage, do: [threshold: 90, ignore_modules: [DpExchange.Gemini.Vendor.WebSockex]]
 
   defp aliases do
     [quality: ["format --check-formatted", "credo --strict", "dialyzer", "sobelow --config"]]
