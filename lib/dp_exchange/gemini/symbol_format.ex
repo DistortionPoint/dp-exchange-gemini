@@ -33,6 +33,27 @@ defmodule DpExchange.Gemini.SymbolFormat do
   which is how `SOL` and `FIL` got here. Guessing the list from the well-known quotes
   would have produced exactly those two silent mis-splits.
 
+  ## Longest-first is still wrong for a base that ends in a quote's first letters
+
+  `GUSD` before `USD` is right for `aavegusd`, and wrong for a base that itself ends in `G`
+  quoted in `USD`. So are the other long quotes for bases that end in their leading
+  letters. Checked against the live `/v1/symbols` list on 2026-09-27 (committed verbatim
+  at `docs/reference/gemini/symbols-2026-09-27.json`): of its 335 spot symbols, 157 have
+  more than one split. For every split, the base was looked up among the 83 bases that
+  some unambiguous symbol names. Two came out wrong:
+
+  | Native | Suffix rule gave | Catalogue says |
+  |---|---|---|
+  | `paxgusd` | `PAX-GUSD` | `PAXG-USD` (`paxggusd`, `paxgrlusd` also listed) |
+  | `usdgusd` | `USD-GUSD` | `USDG-USD` (`usdggusd`, `usdgrlusd` also listed) |
+
+  Both are real listings. Before this, a quote for PAXG/USD was delivered labelled
+  `PAX-GUSD`, a pair that does not exist. Every number was right and the pair it named was
+  wrong. `@mis_splits` names those two exactly, and a test re-runs the same check against
+  the committed snapshot. So a refreshed snapshot with a new mis-split fails there, not
+  silently in a feed. The rule stays the rule, because an exception list guessed ahead of
+  the catalogue would be the kind of claim this family refuses.
+
   ## Perpetuals are not spot pairs and do not round-trip
 
   Thirteen symbols carry a `perp` suffix (`avaxgusdperp`). They end in no quote, so they
@@ -62,6 +83,11 @@ defmodule DpExchange.Gemini.SymbolFormat do
   # four-letter quotes, which precede the three-letter ones — GUSD before USD is the
   # ordering that 80 of 346 live symbols depend on.
   @mapping %{sep: "", quotes: ~w(RLUSD USDC USDT GUSD USD EUR GBP SGD DAI BTC ETH SOL FIL)}
+
+  # Natives the longest-quote-first rule splits wrong, measured against the live catalogue on
+  # 2026-09-27. See the moduledoc's "Longest-first is still wrong...". Keyed uppercase, the
+  # form `CanonicalPair.to_canonical/2` works in.
+  @mis_splits %{"PAXGUSD" => "PAXG-USD", "USDGUSD" => "USDG-USD"}
 
   @doc """
   The mapping, exposed so the conformance suite can drive `CanonicalPair` with it.
@@ -95,7 +121,10 @@ defmodule DpExchange.Gemini.SymbolFormat do
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()
   def to_canonical_symbol(native) when is_binary(native),
-    do: CanonicalPair.to_canonical(mapping(), native)
+    do:
+      Map.get_lazy(@mis_splits, String.upcase(native), fn ->
+        CanonicalPair.to_canonical(mapping(), native)
+      end)
 
   @impl true
   @spec to_exchange_symbol(String.t()) :: String.t()

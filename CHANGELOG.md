@@ -20,6 +20,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`paxgusd` and `usdgusd` were read as `PAX-GUSD` and `USD-GUSD`.** The symbol mapping
+  splits a separatorless native by matching the longest known quote suffix, so `GUSD`
+  won over `USD` for these two real listings, whose bases are PAXG and USDG. PAXG/USD data
+  was labelled with a pair that does not exist, and every number in it was right. The
+  2026-09-27 live `/v1/symbols` list was checked split by split against the bases its own
+  unambiguous listings name: 157 of 335 spot symbols have more than one split, and these
+  two were the only wrong ones. Both now map correctly. The list is committed at
+  `docs/reference/gemini/symbols-2026-09-27.json`, and a test re-runs the same check
+  against it, so a refreshed snapshot catches a new mis-split by name.
+
 ## [0.2.64] - 2026-09-27
 
 ### Fixed

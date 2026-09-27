@@ -97,4 +97,62 @@ defmodule DpExchange.Gemini.SymbolFormatTest do
       assert lengths == Enum.sort(lengths, :desc)
     end
   end
+
+  describe "every listed spot symbol splits the way the catalogue itself evidences" do
+    # The live `/v1/symbols` list, committed verbatim. Refresh the file to re-check a newer
+    # catalogue: a symbol the suffix rule splits wrong fails here, named.
+    @snapshot "docs/reference/gemini/symbols-2026-09-27.json"
+
+    defp evidenced?(evidenced, {base, _quote}), do: MapSet.member?(evidenced, base)
+
+    defp splits(native) do
+      for quote_ <- Enum.map(SymbolFormat.quotes(), &String.downcase/1),
+          String.ends_with?(native, quote_) and native != quote_,
+          do: {String.slice(native, 0, byte_size(native) - byte_size(quote_)), quote_}
+    end
+
+    test "an ambiguous symbol takes the base some unambiguous listing names" do
+      spot = @snapshot |> File.read!() |> Jason.decode!() |> Enum.reject(&(&1 =~ ~r/perp$/))
+
+      evidenced =
+        spot
+        |> Enum.flat_map(fn native ->
+          case splits(native) do
+            [{base, _quote}] -> [base]
+            _ambiguous_or_none -> []
+          end
+        end)
+        |> MapSet.new()
+
+      wrong =
+        for native <- spot,
+            [_first, _second | _rest] = candidates <- [splits(native)],
+            [{base, quote_}] <- [Enum.filter(candidates, &evidenced?(evidenced, &1))],
+            expected = String.upcase(base) <> "-" <> String.upcase(quote_),
+            SymbolFormat.to_canonical_symbol(native) != expected,
+            do: {native, SymbolFormat.to_canonical_symbol(native), expected}
+
+      assert wrong == []
+    end
+
+    test "PAXG and USDG against USD are not read as a GUSD pair" do
+      # The two the check above found, 2026-09-27. Both are real listings.
+      assert SymbolFormat.to_canonical_symbol("paxgusd") == "PAXG-USD"
+      assert SymbolFormat.to_canonical_symbol("usdgusd") == "USDG-USD"
+      assert SymbolFormat.to_exchange_symbol("PAXG-USD") == "paxgusd"
+      assert SymbolFormat.to_exchange_symbol("USDG-USD") == "usdgusd"
+      assert SymbolFormat.to_canonical_symbol("paxggusd") == "PAXG-GUSD"
+    end
+
+    test "every spot symbol round-trips through canonical and back" do
+      spot = @snapshot |> File.read!() |> Jason.decode!() |> Enum.reject(&(&1 =~ ~r/perp$/))
+
+      assert Enum.reject(spot, fn native ->
+               canonical = SymbolFormat.to_canonical_symbol(native)
+
+               SymbolFormat.to_exchange_symbol(canonical) ==
+                 native
+             end) == []
+    end
+  end
 end
