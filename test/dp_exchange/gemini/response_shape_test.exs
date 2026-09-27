@@ -245,5 +245,45 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
 
       assert {:ok, %{id: "w-9"}} = withdraw.(%{"withdrawalId" => "w-9"})
     end
+
+    test "a quote window no venue gives is an unknown expiry, answered at once" do
+      # `DateTime.add/3` computes a date for any offset. A `maxAgeMs` of 10^27 kept this call
+      # running in the caller's process with no answer.
+      quote_body = fn max_age ->
+        %{
+          "quoteId" => 20_930,
+          "maxAgeMs" => max_age,
+          "pair" => "BTCUSD",
+          "price" => "6445.07",
+          "side" => "buy",
+          "quantity" => "0.01505181",
+          "quantityCurrency" => "BTC",
+          "fee" => "2.99",
+          "totalSpend" => "100",
+          "totalSpendCurrency" => "USD"
+        }
+      end
+
+      quote = fn max_age ->
+        task =
+          Task.async(fn ->
+            Private.quote_conversion(
+              "USD",
+              "DOGE",
+              Decimal.new(100),
+              [credentials: @credentials] ++ dated(quote_body.(max_age))
+            )
+          end)
+
+        Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill)
+      end
+
+      for max_age <- [999_999_999_999_999_999_999_999_999, -(10 ** 27), 3_600_001] do
+        assert {:ok, {:ok, %{expires_at: nil}}} = quote.(max_age), inspect(max_age)
+      end
+
+      assert {:ok, {:ok, %{expires_at: at}}} = quote.(60_000)
+      assert DateTime.compare(at, ~U[2026-08-28 17:01:01Z]) == :eq
+    end
   end
 end

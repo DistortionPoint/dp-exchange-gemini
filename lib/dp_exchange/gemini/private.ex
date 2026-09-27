@@ -1088,7 +1088,18 @@ defmodule DpExchange.Gemini.Private do
 
   defp expires_at(nil, _headers), do: nil
 
-  defp expires_at(max_age_ms, headers) when is_integer(max_age_ms) do
+  @max_quote_age_ms 3_600_000
+
+  # **Bounded, because `DateTime.add/3` is not.** It computes a date for any offset, and for
+  # an extreme one it took longer than 4 seconds (measured 2026-09-27 at 10^20 seconds and
+  # above). A REST mutation fuzz found the case: a `maxAgeMs` of 10^27 left `quote_conversion/4`
+  # and `commit_conversion/2` running in the caller's process with no answer. The venue
+  # documents a window of about 60 seconds. `@max_quote_age_ms` is one hour, chosen rather
+  # than measured, and 60 times that. A window outside 0..one hour is not a quote window
+  # this venue gives. It is `nil`, which `Conversion.expired?/2` already reports as unknown
+  # rather than as still valid.
+  defp expires_at(max_age_ms, headers)
+       when is_integer(max_age_ms) and max_age_ms in 0..@max_quote_age_ms do
     case venue_date(headers) do
       nil -> nil
       at -> DateTime.add(at, max_age_ms, :millisecond)

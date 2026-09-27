@@ -24,6 +24,16 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A conversion quote with an extreme `maxAgeMs` no longer stalls the caller.**
+  `quote_conversion/4` and `commit_conversion/2` passed `maxAgeMs` straight to
+  `DateTime.add/3`. That function computes a date for any offset, and a mutation fuzz
+  (2026-09-27) found that a value of 10^27 left the call running with no answer.
+  A window outside 0 to one hour now gives `expires_at: nil`. The venue documents about
+  60 seconds; the one-hour bound is chosen, not measured. `Conversion.expired?/2` already
+  reports `nil` as unknown, not as still valid.
+
+### Fixed
+
 - **A REST response carrying a value of the wrong type no longer raises in the caller's
   process.** A mutation fuzz (2026-09-27) replaced every nested value of real response
   bodies with the wrong shape (`nil`, `true`, `[]`, `[%{}]`, a map, a string, out-of-range
