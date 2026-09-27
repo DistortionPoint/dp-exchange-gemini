@@ -479,4 +479,21 @@ defmodule DpExchange.Gemini.SocketTest do
       assert System.monotonic_time(:millisecond) - started >= 2_000
     end
   end
+
+  describe "a send to a socket that is gone" do
+    test "answers with the reason alone, never the frame" do
+      # `send_frame/3`'s exit carries the frame; it must not reach a log or the caller.
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:send_exit, :noproc}} = Socket.subscribe(dead, ["BTC-USD"])
+        end)
+
+      assert log =~ "send exited"
+      refute log =~ "btcusd"
+    end
+  end
 end

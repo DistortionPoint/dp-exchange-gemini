@@ -20,6 +20,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed frame send answers `{:error, {:send_exit, reason}}` with the reason alone.**
+  `send_frame/3` exits with `{reason, {module, :call, [pid, frame]}}`, and the whole tuple,
+  frame included, was logged and returned, although this module's own comment named
+  `{:send_exit, :noproc}`. This venue's frames carry no credential today, but the same
+  shape leaked a signed JWT in `dp_exchange_coinbase`, so the frame is dropped here too.
+
 ## [0.2.67] - 2026-09-27
 
 ### Security

@@ -235,8 +235,9 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       ref = Process.monitor(dead)
       assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
 
-      assert {:error, {:send_exit, reason}} = Socket.subscribe(dead, ["BTC-USD"])
-      assert match?({:noproc, _call}, reason), "expected a :noproc exit, got #{inspect(reason)}"
+      # `:noproc` alone: the `{:noproc, {module, :call, [pid, frame]}}` exit used to be kept
+      # whole, frame included. See `Socket.without_frame/1`.
+      assert {:error, {:send_exit, :noproc}} = Socket.subscribe(dead, ["BTC-USD"])
     end
 
     test "subscribing to nothing sends nothing" do

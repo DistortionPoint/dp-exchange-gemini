@@ -353,10 +353,21 @@ defmodule DpExchange.Gemini.Socket do
 
       {:error, :send_timeout}
 
-    :exit, reason ->
+    :exit, exit_reason ->
+      reason = without_frame(exit_reason)
       Logger.warning("[Gemini Socket] #{method}: send exited: #{inspect(reason)}")
       {:error, {:send_exit, reason}}
   end
+
+  # `send_frame/3` exits with `{reason, {module, :call, [pid, frame]}}`, and the frame is the
+  # message being sent. Kept, it was logged by `inspect/1` above and handed back in
+  # `{:send_exit, _}` to whoever reports it next, which the comment above never intended:
+  # it names `{:send_exit, :noproc}`. This venue's frames carry no credential today, but in
+  # `dp_exchange_coinbase` the same shape put a subscribe frame's signed JWT into the logs.
+  # A failure path must not depend on what happens to be in the payload. Only the reason is
+  # kept: `:noproc`, `:normal`, and so on.
+  defp without_frame({reason, {_module, :call, _args}}), do: reason
+  defp without_frame(reason), do: reason
 
   # --- callbacks ----------------------------------------------------------
 
