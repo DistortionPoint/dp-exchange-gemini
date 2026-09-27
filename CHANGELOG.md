@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.68] - 2026-09-27
+
 ### Fixed
 
 - **A failed frame send answers `{:error, {:send_exit, reason}}` with the reason alone.**
