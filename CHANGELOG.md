@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.69] - 2026-09-27
+
 ### Fixed
 
 - **A streaming facade call answers instead of exiting the caller's process.**
