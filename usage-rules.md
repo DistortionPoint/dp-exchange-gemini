@@ -921,3 +921,13 @@ a duplicate costs nothing.
 accept the batch; the thing that needs doing is getting a new socket. If you drive the feed
 through `DpExchange.Gemini.Feed` this is already handled for you — the distinction matters if
 you hold a `Socket` pid yourself.
+
+## Streaming calls answer; they never exit your process
+
+`subscribe/2`, `unsubscribe/2`, `update_symbols/2` and `subscribe_notices/1` return
+`{:error, :feed_not_started}` when this venue's feed is not running (`unsubscribe/2`
+answers `:ok`: there is nothing to stop). They return `{:error, :feed_timeout}` when the
+feed is too busy to answer within its call budget, and `{:error, {:feed_exited, reason}}`
+when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an empty map in
+all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
+Treat the other two as a feed your supervision tree has to bring back.

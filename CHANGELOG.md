@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streaming facade call answers instead of exiting the caller's process.**
+  `subscribe/2`, `unsubscribe/2`, `update_symbols/2`, `subscribe_notices/1`, `coverage/1`
+  and `coverage_by_kind/1` called into `Feed` with a bare `GenServer.call/3`, which exits
+  the caller when no `Feed` is running (`:noproc`) or when one is too busy to answer in
+  its call budget (`:timeout`). Every one of these callbacks is specified to return a
+  value. Measured 2026-09-27: with no Feed started, four of them exited :noproc here. They now answer `{:error, :feed_not_started}` (`:ok` for `unsubscribe/2`),
+  `{:error, :feed_timeout}`, or `{:error, {:feed_exited, reason}}`, and the coverage calls
+  answer an empty map.
+
 ## [0.2.68] - 2026-09-27
 
 ### Fixed
