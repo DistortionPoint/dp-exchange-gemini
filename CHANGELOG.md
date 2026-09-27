@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.64] - 2026-09-27
+
 ### Fixed
 
 - **The WebSocket opening handshake now has a deadline: `socket_connect_timeout` plus
