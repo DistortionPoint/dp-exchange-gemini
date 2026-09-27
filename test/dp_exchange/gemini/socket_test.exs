@@ -326,10 +326,12 @@ defmodule DpExchange.Gemini.SocketTest do
     # regression back to that would not show up as a compile error or a crash, only as a
     # slow venue eventually wedging every consumer sharing one `Feed`.
     test "defaults to this package's own chosen budget, not websockex's" do
-      assert Socket.connect_opts([]) == [
-               socket_connect_timeout: 3_000,
-               socket_recv_timeout: 2_000
-             ]
+      assert [socket_connect_timeout: 3_000, socket_recv_timeout: 2_000, ssl_options: tls] =
+               Socket.connect_opts([])
+
+      # Verified TLS by default; websockex's own default is `verify: :verify_none`.
+      assert tls[:verify] == :verify_peer
+      assert is_list(tls[:cacerts]) and tls[:cacerts] != []
     end
 
     test "a caller's :socket_connect_timeout wins over the default" do
@@ -347,10 +349,8 @@ defmodule DpExchange.Gemini.SocketTest do
       # unknown key rather than reject it, so a leak here would be silent.
       opts = [subscriber: self(), url: "wss://example.invalid", socket_connect_timeout: 1_000]
 
-      assert Socket.connect_opts(opts) == [
-               socket_connect_timeout: 1_000,
-               socket_recv_timeout: 2_000
-             ]
+      assert [socket_connect_timeout: 1_000, socket_recv_timeout: 2_000, ssl_options: _tls] =
+               Socket.connect_opts(opts)
     end
   end
 

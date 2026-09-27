@@ -122,6 +122,12 @@ Both come from a private, patched fork of websockex 0.5.1's process loop,
 release's internals. If your application pins a different websockex version, dependency
 resolution will fail, so resolve to 0.5.1.
 
+**The WebSocket verifies the venue's TLS certificate** (2026-09-27). websockex's own
+default is not to (`verify: :verify_none`), and until then this package connected with
+that default, accepting any certificate. It now uses the operating system's trust store and
+HTTPS hostname rules. On a host with no system CA bundle the connection fails with a TLS
+error rather than connecting unverified. Pass your own `:ssl_options` to override.
+
 ## A socket crash costs one reconnect, never your whole subscription
 
 The one socket this venue uses is a **linked** child of `Feed` — not a supervised
