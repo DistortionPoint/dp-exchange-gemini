@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A REST response carrying a value of the wrong type no longer raises in the caller's
+  process.** A mutation fuzz (2026-09-27) replaced every nested value of real response
+  bodies with the wrong shape (`nil`, `true`, `[]`, `[%{}]`, a map, a string, out-of-range
+  numbers), one value at a time, across 41 endpoints. 232 of those mutations raised. Now
+  each gets an answer that follows its endpoint's existing policy:
+  - These are refused with `{:error, :unexpected_response_shape}`:
+    - a row that is not an object in balances, fills, the public tape or approved
+      addresses;
+    - a balances body that is not a list;
+    - a symbol-details or fee-estimate body that is not an object;
+    - an order-book side that is present but is not a list.
+  - Order ids and trade ids are no longer passed to `to_string/1`. On an order, an absent
+    or unreadable id is now `nil`; `to_string(nil)` used to turn an absent one into `""`.
+    A symbol that is not a string is also `nil`. On a fill, an `order_id` that is not an
+    id is refused.
+  - A pricefeed row that names no pair is skipped. An order-book level that is not an
+    object is dropped, the same way an unreadable price already was.
+  - `cancel_all_orders/2` refuses a result when any cancelled or rejected entry is not an
+    id. It no longer raises, and it no longer reports `""`.
+- **`withdraw/6` no longer reports an accepted withdrawal as failed.** A 2xx with an
+  unreadable body, or with no readable `withdrawalId`, used to be an error or a raise. A
+  caller retrying after that, without `opts[:client_transfer_id]`, would generate a new key
+  and send the funds a second time. Now the result is `{:ok, %Withdrawal{status: :pending}}`
+  carrying the `clientTransferId` this request sent. The venue documents that key as the
+  idempotent reference for this withdrawal.
+
 ## [0.2.61] - 2026-09-27
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

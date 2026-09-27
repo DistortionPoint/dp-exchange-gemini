@@ -328,19 +328,37 @@ defmodule DpExchange.Gemini.Private do
   defp cancel_scope(other), do: {:error, {:unsupported_scope, other}}
 
   defp cancel_all_result(%{"details" => details}) when is_map(details) do
-    {:ok,
-     %{
-       cancelled: ids(details["cancelledOrders"]),
-       rejected: ids(details["cancelRejects"])
-     }}
+    with {:ok, cancelled} <- ids(details["cancelledOrders"]),
+         {:ok, rejected} <- ids(details["cancelRejects"]) do
+      {:ok, %{cancelled: cancelled, rejected: rejected}}
+    end
   end
 
   defp cancel_all_result(_body), do: {:error, :unexpected_response_shape}
 
   # The venue sends integers; every other order id in this package is a string, and a
   # caller holding both should not have to know which call produced which.
-  defp ids(list) when is_list(list), do: Enum.map(list, &to_string/1)
-  defp ids(_absent), do: []
+  #
+  # An entry that is not an id refuses the result. `to_string/1` used to stand here: it
+  # raised on a map or a list (REST mutation fuzz, 2026-09-27) and turned `nil` into `""`.
+  # Dropping the entry instead would under-report what was cancelled, and a caller
+  # reconciling open orders against that list would see an order as still working when it
+  # is not. Cancelling everything again is safe, so an error here costs a retry and
+  # nothing more.
+  defp ids(list) when is_list(list) do
+    Enum.reduce_while(list, {:ok, []}, fn value, {:ok, acc} ->
+      case required_id(value, :order_id) do
+        {:ok, id} -> {:cont, {:ok, [id | acc]}}
+        _unreadable -> {:halt, {:error, :unexpected_response_shape}}
+      end
+    end)
+    |> case do
+      {:ok, ids} -> {:ok, Enum.reverse(ids)}
+      error -> error
+    end
+  end
+
+  defp ids(_absent), do: {:ok, []}
 
   @doc """
   Past fills for a symbol.
@@ -630,8 +648,8 @@ defmodule DpExchange.Gemini.Private do
   defp to_order(%{"order_id" => _id} = body) do
     {:ok,
      %Order{
-       id: to_string(body["order_id"]),
-       symbol: SymbolFormat.to_canonical_symbol(body["symbol"]),
+       id: order_id(body["order_id"]),
+       symbol: order_symbol(body["symbol"]),
        side: side(body["side"]),
        order_type: order_type_of(body),
        quantity: decimal(body["original_amount"]),
@@ -647,6 +665,18 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp to_order(_body), do: {:error, :unexpected_response_shape}
+
+  # The venue's id as a string, or `nil`. `to_string/1` used to stand here, so an absent
+  # `order_id` became `""` (the substitution `to_fill/2`'s note describes) and a map or a list
+  # raised out of `get_order/3`, `get_orders/2`, `cancel_order/3` and `place_order/3`. A REST
+  # mutation fuzz found the raise (2026-09-27). `nil` is what a caller can detect. It is not an
+  # error, because on `place_order/3` the order this body describes is live at the venue.
+  defp order_id(id) when is_binary(id) and id != "", do: id
+  defp order_id(id) when is_integer(id), do: Integer.to_string(id)
+  defp order_id(_unreadable), do: nil
+
+  defp order_symbol(symbol) when is_binary(symbol), do: SymbolFormat.to_canonical_symbol(symbol)
+  defp order_symbol(_absent), do: nil
 
   defp side("buy"), do: :buy
   defp side("sell"), do: :sell
@@ -703,6 +733,8 @@ defmodule DpExchange.Gemini.Private do
   # kind of required: an unknown quantity is still a balance, an unattributable one is not.
   # `available` and `hold` stay unguarded for the same reason — both are optional on this
   # type.
+  defp to_balance(row, _timestamp) when not is_map(row), do: {:error, :unexpected_response_shape}
+
   defp to_balance(row, timestamp) do
     with {:ok, currency} <- required_currency(row["currency"]) do
       {:ok,
@@ -720,6 +752,11 @@ defmodule DpExchange.Gemini.Private do
   # One unreadable row refuses the whole reply rather than leaving a gap in it. A balance
   # list with an entry silently missing reads as "you hold none of that currency", which is
   # a different and more dangerous statement than "this response could not be read".
+  # A body that is not a list at all used to reach `Enum.reduce_while/3` and raise on a
+  # string or a number, or iterate a map as tuples. It is not a balance list.
+  defp to_balances(rows, _timestamp) when not is_list(rows),
+    do: {:error, :unexpected_response_shape}
+
   defp to_balances(rows, timestamp) do
     rows
     |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
@@ -770,6 +807,8 @@ defmodule DpExchange.Gemini.Private do
   #
   # `fee`, `fee_currency` and `liquidity` stay unguarded on purpose: none is enforced, and a
   # venue that did not state a fee has not stated one.
+  defp to_fill(row, _symbol) when not is_map(row), do: {:error, :unexpected_response_shape}
+
   defp to_fill(row, symbol) do
     with {:ok, order_id} <- required_id(row["order_id"], :order_id),
          {:ok, side} <- required_side(row["type"]),
@@ -814,11 +853,15 @@ defmodule DpExchange.Gemini.Private do
   # `trade_id` is NOT enforced by `Fill`, so an absent one stays `nil` rather than becoming
   # `""`. `to_string/1` was applied to both ids alike; only one of them may be absent.
   defp fill_id(nil), do: nil
-  defp fill_id(value), do: to_string(value)
+  defp fill_id(value), do: order_id(value)
 
   defp required_id(nil, field), do: {:error, {:missing_required_field, field}}
   defp required_id("", field), do: {:error, {:missing_required_field, field}}
-  defp required_id(value, _field), do: {:ok, to_string(value)}
+  defp required_id(value, _field) when is_binary(value), do: {:ok, value}
+  defp required_id(value, _field) when is_integer(value), do: {:ok, Integer.to_string(value)}
+
+  # A map or a list is not an id, and `to_string/1` raised on it (REST fuzz, 2026-09-27).
+  defp required_id(_value, _field), do: {:error, :unexpected_response_shape}
 
   defp required_side(type) when is_binary(type) do
     case side(String.downcase(type)) do
@@ -1270,6 +1313,9 @@ defmodule DpExchange.Gemini.Private do
   # this family, so that check never ran. An allowlist entry with no address is the one shape
   # this type must not take: a caller checking whether a withdrawal destination is approved
   # would be comparing against nothing.
+  defp to_approved_address(row, _network) when not is_map(row),
+    do: {:error, :unexpected_response_shape}
+
   defp to_approved_address(row, network) do
     with {:ok, address} <- required_id(row["address"], :address) do
       {:ok, to_approved_address(row, network, address)}
@@ -1337,7 +1383,8 @@ defmodule DpExchange.Gemini.Private do
       ticker = String.downcase(asset)
 
       with {:ok, body, _headers} <-
-             post("/v2/withdraw/#{network}/#{ticker}/feeEstimate", params, credentials, opts) do
+             post("/v2/withdraw/#{network}/#{ticker}/feeEstimate", params, credentials, opts),
+           {:ok, body} <- Rest.object(body) do
         {:ok,
          %{
            fee: decimal(body["fee"] || body["feeAmount"]),
@@ -1372,6 +1419,12 @@ defmodule DpExchange.Gemini.Private do
   moving. Without a key, the safe-looking response (retry) is the one that sends the money
   again. `opts[:client_transfer_id]` lets a caller supply its own so a retry across a
   process restart is still the same request.
+
+  **An accepted withdrawal is always `{:ok, _}`, with an id.** The id is the venue's
+  `withdrawalId` where it sends a readable one, and otherwise the `clientTransferId` that went
+  out with this request. A 2xx whose body could not be read used to come back as an error.
+  That told the caller a withdrawal had failed when the venue had accepted it, and the
+  obvious next step, a retry without a key, sends the money again.
 
   ## The memo is required on some networks and this package cannot tell you which
 
@@ -1418,7 +1471,7 @@ defmodule DpExchange.Gemini.Private do
 
       with {:ok, body, _headers} <-
              post("/v2/withdraw/#{network}/#{ticker}", params, credentials, opts) do
-        to_withdrawal(body, asset, network, address, amount, memo)
+        to_withdrawal(body, transfer_id, {asset, network, address, amount, memo})
       end
     end
   end
@@ -1448,10 +1501,29 @@ defmodule DpExchange.Gemini.Private do
   # `:id` is in `Withdrawal`'s `@enforce_keys`. A withdrawal with no id is a transfer the
   # caller cannot look up, reference in a support request, or reconcile against — and the
   # money has already left. `nil` there looks like a value.
-  defp to_withdrawal(body, asset, network, address, amount, memo) do
-    with {:ok, id} <- required_id(body["withdrawalId"] || body["clientTransferId"], :id) do
-      {:ok, build_withdrawal(body, id, asset, network, address, amount, memo)}
-    end
+  #
+  # **The `clientTransferId` this package sent is the last id tried, and it is never
+  # missing.** This used to refuse a 2xx whose body named no readable id, and raised on a body
+  # that was not an object at all (REST mutation fuzz, 2026-09-27). Both told the caller the
+  # withdrawal had failed after the venue had accepted it. The caller's natural next move is
+  # to retry, and a retry without `opts[:client_transfer_id]` generates a new key and sends the
+  # money a second time. The key that went out is a real id for this withdrawal: the venue
+  # documents it as the idempotency reference for exactly this request. The body is read for
+  # anything better, and a body that cannot be read adds nothing but takes nothing away.
+  # The status stays `:pending`, which `withdrawal_status/1` already answers for a withdrawal
+  # the venue did not describe.
+  defp to_withdrawal(body, transfer_id, {asset, network, address, amount, memo}) do
+    body = if is_map(body), do: body, else: %{}
+
+    id =
+      Enum.find_value([body["withdrawalId"], body["clientTransferId"], transfer_id], fn value ->
+        case required_id(value, :id) do
+          {:ok, id} -> id
+          _unreadable -> nil
+        end
+      end)
+
+    {:ok, build_withdrawal(body, id, asset, network, address, amount, memo)}
   end
 
   defp build_withdrawal(body, id, asset, network, address, amount, memo) do
@@ -2150,6 +2222,8 @@ defmodule DpExchange.Gemini.Private do
 
   defp position_symbol(symbol) when is_binary(symbol),
     do: SymbolFormat.to_canonical_symbol(symbol)
+
+  defp position_symbol(_not_a_symbol), do: nil
 
   # The contract types this as an atom, and the venue sends "spot" or "perp". A word this
   # package does not know is `nil` rather than the nearest atom that fits — an instrument

@@ -356,13 +356,20 @@ defmodule DpExchange.Gemini.Rest do
          {:ok, rows} <- list(body) do
       {:ok,
        rows
-       |> Enum.filter(&is_map/1)
+       |> Enum.filter(&priced_pair?/1)
        |> Map.new(fn row ->
          {SymbolFormat.to_canonical_symbol(row["pair"]),
           %{price: decimal(row["price"]), change_24h: decimal(row["percentChange24h"])}}
        end)}
     end
   end
+
+  # A row that names no pair is skipped. `is_map/1` used to be the whole filter, so a row
+  # with no string `pair` reached `SymbolFormat.to_canonical_symbol/1` and raised, taking
+  # the whole overview with it (REST fuzz, 2026-09-27). A price for no named pair belongs
+  # to nothing a caller can ask about.
+  defp priced_pair?(%{"pair" => pair}) when is_binary(pair), do: true
+  defp priced_pair?(_unnamed), do: false
 
   @doc """
   The increments and minimum the venue will actually accept for a symbol.
@@ -379,7 +386,8 @@ defmodule DpExchange.Gemini.Rest do
   def quantization(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, body} <- get_body("/v1/symbols/details/#{native}", opts) do
+    with {:ok, raw} <- get_body("/v1/symbols/details/#{native}", opts),
+         {:ok, body} <- object(raw) do
       {:ok,
        %{
          price_increment: decimal(body["quote_increment"]),
@@ -518,6 +526,8 @@ defmodule DpExchange.Gemini.Rest do
   # `WsDecode.to_trade/2` — the socket arm of the same type — already used the nil-preserving
   # form. It was the one that did not guard `price` and `quantity`, which this function did.
   # Each file held the fix the other needed.
+  defp to_trade(row, _symbol) when not is_map(row), do: {:error, :unexpected_response_shape}
+
   defp to_trade(row, symbol) do
     with {:ok, timestamp} <- trade_time(row),
          {:ok, price} <- required_decimal(Map.get(row, "price"), :price),
@@ -570,7 +580,12 @@ defmodule DpExchange.Gemini.Rest do
   # `nil` stays `nil`. `to_string/1` would make it `""`, which reads as an id a consumer can
   # compare and log while identifying nothing — see `to_trade/2`.
   defp to_string_or_nil(nil), do: nil
-  defp to_string_or_nil(value), do: to_string(value)
+  defp to_string_or_nil(value) when is_binary(value), do: value
+  defp to_string_or_nil(value) when is_integer(value), do: Integer.to_string(value)
+
+  # A map or a list is not an id, and `to_string/1` raised on it (REST fuzz, 2026-09-27).
+  # `nil`, for the reason above: it is the detectable answer.
+  defp to_string_or_nil(_not_an_id), do: nil
 
   defp trade_side("buy"), do: :buy
   defp trade_side("sell"), do: :sell
@@ -1216,9 +1231,10 @@ defmodule DpExchange.Gemini.Rest do
   # `"asks": null` for an empty side crashed this with a FunctionClauseError from deep
   # inside `Enum.map`, reaching a caller as a crash rather than an answer. An absent side
   # is a book with no asks, not a malformed response. Found by a test, not in production.
-  defp book_time(%{"bids" => bids, "asks" => asks}) do
+  defp book_time(%{"bids" => bids, "asks" => asks})
+       when (is_list(bids) or is_nil(bids)) and (is_list(asks) or is_nil(asks)) do
     (List.wrap(bids) ++ List.wrap(asks))
-    |> Enum.map(&Map.get(&1, "timestamp"))
+    |> Enum.flat_map(&level_timestamp/1)
     # Rejected AFTER `to_integer/1`, not before. It used to answer `0` for a string it could
     # not read, and `0` is a timestamp: with every level unreadable the max is `0` and the
     # book is stamped 1 January 1970 — a value that passes every type check and every
@@ -1235,7 +1251,17 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
+  # A side that is present but not a list is not an empty side. It used to raise out of
+  # `Map.get/2` (REST fuzz, 2026-09-27). Answering `[]` for it would state that nobody is
+  # bidding, which the venue did not say.
+  defp book_time(%{"bids" => _bids, "asks" => _asks}), do: {:error, :unexpected_response_shape}
+
   defp book_time(_other), do: {:error, :missing_venue_timestamp}
+
+  # A level that is not an object has no price to read. It is dropped, as an unreadable
+  # price already is below, rather than raised on.
+  defp level_timestamp(%{} = level), do: [Map.get(level, "timestamp")]
+  defp level_timestamp(_not_a_level), do: []
 
   # **`book_time/1` stays strict, and that is NOT the same call `get_price/2` got.**
   #
@@ -1261,13 +1287,17 @@ defmodule DpExchange.Gemini.Rest do
   # `{direction, Decimal}` rather than term order, because `Decimal` structs do not compare
   # correctly as plain terms. A nil AMOUNT is kept: a level stating a price but no size is a
   # real shape rather than an unreadable one.
-  defp levels(rows, direction) do
+  defp levels(rows, direction) when is_list(rows) do
     rows
-    |> Enum.flat_map(fn row ->
-      case decimal(row["price"]) do
-        nil -> []
-        price -> [{price, decimal(row["amount"])}]
-      end
+    |> Enum.flat_map(fn
+      row when not is_map(row) ->
+        []
+
+      row ->
+        case decimal(row["price"]) do
+          nil -> []
+          price -> [{price, decimal(row["amount"])}]
+        end
     end)
     |> Enum.sort_by(fn {price, _amount} -> price end, {direction, Decimal})
   end

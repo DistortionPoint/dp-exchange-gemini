@@ -106,4 +106,144 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
     assert {:ok, ["BTC-USD"]} =
              DpExchange.Gemini.get_symbols(base(["btcusd"]))
   end
+
+  # **A value of the wrong type INSIDE a well-shaped body is an answer too.** A REST mutation
+  # fuzz (2026-09-27) replaced every nested value of real bodies with `nil`, `true`, `[]`,
+  # `[%{}]`, a map, a string and out-of-range numbers, one at a time, across 41 endpoints.
+  # 232 of those mutations raised. Each test below is one of the decode paths they raised out
+  # of, with the answer that endpoint's own policy gives.
+  describe "a value of the wrong type inside a response" do
+    alias DpExchange.Gemini.{Private, Rest}
+
+    defp dated(body) do
+      [
+        plug: fn conn ->
+          conn
+          |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
+          |> Req.Test.json(body)
+        end,
+        retry_attempts: 0
+      ]
+    end
+
+    test "a row that is not an object, or a body that is not a list, refuses the reply" do
+      for {label, call} <- [
+            {"balances row", fn -> Private.get_balances(@credentials, dated([true])) end},
+            {"balances body", fn -> Private.get_balances(@credentials, dated(%{"a" => nil})) end},
+            {"fills row",
+             fn ->
+               Private.get_trade_history(@credentials, [symbol: "BTC-USD"] ++ dated([true]))
+             end},
+            {"trades row", fn -> Rest.get_trades("BTC-USD", dated([true])) end},
+            {"approved row",
+             fn ->
+               Private.list_approved_addresses(
+                 @credentials,
+                 [network: "ethereum"] ++ dated(%{"approvedAddresses" => [true]})
+               )
+             end},
+            {"quantization body", fn -> Rest.quantization("BTC-USD", dated([%{}])) end},
+            {"fee estimate body",
+             fn ->
+               Private.estimate_withdrawal_fee(
+                 "ETH",
+                 "ethereum",
+                 Decimal.new(1),
+                 @credentials,
+                 [address: "0x0"] ++ dated(true)
+               )
+             end},
+            {"book side",
+             fn -> Rest.get_order_book("BTC-USD", dated(%{"bids" => "x", "asks" => []})) end}
+          ] do
+        assert {:error, :unexpected_response_shape} == answers_without_raising(label, call),
+               label
+      end
+    end
+
+    test "an order whose id or symbol is not a string decodes with nil, not a raise or \"\"" do
+      order = %{"order_id" => %{"a" => nil}, "symbol" => [1], "side" => "buy"}
+
+      assert {:ok, %{id: nil, symbol: nil}} =
+               Private.get_order(@credentials, "1", dated(order))
+
+      # `to_string(nil)` put `""` here, which passes every nil check while naming no order.
+      assert {:ok, %{id: nil}} =
+               Private.get_order(@credentials, "1", dated(%{"order_id" => nil}))
+
+      assert {:ok, %{id: "7"}} = Private.get_order(@credentials, "1", dated(%{"order_id" => 7}))
+    end
+
+    test "a fill whose order id is not an id is refused; a trade id is nil" do
+      fill = %{
+        "price" => "1",
+        "amount" => "1",
+        "timestampms" => 1_787_936_145_649,
+        "type" => "Buy",
+        "tid" => 1,
+        "order_id" => %{}
+      }
+
+      assert {:error, :unexpected_response_shape} =
+               Private.get_trade_history(@credentials, [symbol: "BTC-USD"] ++ dated([fill]))
+
+      assert {:ok, [%{trade_id: nil, order_id: "9"}]} =
+               Private.get_trade_history(
+                 @credentials,
+                 [symbol: "BTC-USD"] ++ dated([%{fill | "order_id" => 9, "tid" => [%{}]}])
+               )
+
+      trade = %{"timestampms" => 1_787_936_145_649, "tid" => %{}, "price" => "1", "amount" => "1"}
+      assert {:ok, [%{id: nil}]} = Rest.get_trades("BTC-USD", dated([trade]))
+    end
+
+    test "a catalogue row naming no pair, or a book level that is not an object, is skipped" do
+      rows = [%{"pair" => "BTCUSD", "price" => "1"}, %{"pair" => %{}}, %{}]
+      assert {:ok, overview} = Rest.get_market_overview(dated(rows))
+      assert map_size(overview) == 1
+
+      book = %{
+        "bids" => [true, %{"price" => "2", "amount" => "1", "timestamp" => "1547147541"}],
+        "asks" => [[%{}]]
+      }
+
+      assert {:ok, %{bids: [{bid, _size}], asks: []}} =
+               Rest.get_order_book("BTC-USD", dated(book))
+
+      assert Decimal.equal?(bid, 2)
+    end
+
+    test "a cancel-all entry that is not an id refuses the result, never under-reports it" do
+      body = fn cancelled ->
+        dated(%{"details" => %{"cancelledOrders" => cancelled, "cancelRejects" => []}})
+      end
+
+      cancel = &Private.cancel_all_orders(@credentials, [scope: :account] ++ &1)
+
+      assert {:ok, %{cancelled: ["1", "2"], rejected: []}} = cancel.(body.([1, "2"]))
+      assert {:error, :unexpected_response_shape} = cancel.(body.([1, %{}]))
+      assert {:error, :unexpected_response_shape} = cancel.(body.([1, nil]))
+    end
+
+    test "an accepted withdrawal with an unreadable body carries the key that was sent" do
+      # Refusing it told the caller the withdrawal failed after the venue accepted it, and a
+      # retry without a key would generate a new one and send the money again.
+      withdraw = fn body ->
+        Private.withdraw(
+          "BTC",
+          "bitcoin",
+          Decimal.new(1),
+          "addr",
+          @credentials,
+          [client_transfer_id: "key-1"] ++ dated(body)
+        )
+      end
+
+      for body <- [true, [%{}], %{}, %{"withdrawalId" => %{}}] do
+        assert {:ok, %{id: "key-1", status: :pending}} = withdraw.(body), inspect(body)
+      end
+
+      assert {:ok, %{id: "w-9"}} = withdraw.(%{"withdrawalId" => "w-9"})
+    end
+  end
 end
