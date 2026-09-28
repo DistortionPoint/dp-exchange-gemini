@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.78] - 2026-09-28
+
 ### Fixed
 
 - **The fake upper-cases subscribed symbols, as the real facade has since the previous
