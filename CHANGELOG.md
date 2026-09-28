@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.80] - 2026-09-28
+
 ### Fixed
 
 - A retried private request is signed again, with a fresh nonce. Every retry replayed the
