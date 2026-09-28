@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.77] - 2026-09-28
+
 ### Fixed
 
 - **A lower-case symbol subscribes under its canonical form again.** `subscribe/2`,
