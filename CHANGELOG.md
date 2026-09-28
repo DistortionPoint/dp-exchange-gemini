@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.74] - 2026-09-28
+
 ### Added
 
 - **`config :dp_exchange_gemini, websocket_url: ...` overrides the endpoint a socket dials
