@@ -931,3 +931,10 @@ feed is too busy to answer within its call budget, and `{:error, {:feed_exited, 
 when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an empty map in
 all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
+
+## `:websocket_url` in application config replaces the default socket endpoint
+
+`config :dp_exchange_gemini, websocket_url: "wss://your-proxy.example/..."` sends every socket
+this package opens, unless a call passes its own `:url`, to that address instead of the
+venue. Unset, the venue is the default. It exists so a test suite never dials the live venue
+by accident, and it is equally usable for a proxy.

@@ -631,7 +631,19 @@ defmodule DpExchange.Gemini.PrivateTest do
 
   describe "the environment reaches private calls too" do
     test "demo credentials go to the demo host" do
-      assert Private.get_balances(@credentials, environment: :sandbox, retry_attempts: 0) != nil
+      # This used to send a real, signed request to the sandbox and assert only `!= nil`,
+      # which any answer satisfies, a network error included. It now records where the
+      # request went, which is the claim the test name makes.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:host, conn.host})
+        Req.Test.json(conn, [])
+      end
+
+      Private.get_balances(@credentials, environment: :sandbox, plug: plug, retry_attempts: 0)
+
+      assert_receive {:host, "api.sandbox.gemini.com"}
     end
   end
 

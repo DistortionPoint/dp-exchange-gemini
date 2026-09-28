@@ -197,9 +197,7 @@ defmodule DpExchange.Gemini.Socket do
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     url =
-      Keyword.get_lazy(opts, :url, fn ->
-        opts |> Environment.resolve() |> Environment.websocket_url()
-      end)
+      Keyword.get_lazy(opts, :url, fn -> default_url(opts) end)
 
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
@@ -214,6 +212,17 @@ defmodule DpExchange.Gemini.Socket do
     }
 
     VendoredWebSockex.start_link(url, __MODULE__, state, connect_opts(opts))
+  end
+
+  # The venue's own endpoint, unless the application config names another with
+  # `:websocket_url`. The seam exists for tests. A tier-1 run sets it in `config/test.exs` to
+  # a closed local port, so a socket that no test aimed elsewhere fails at once instead of
+  # dialling the venue. Measured 2026-09-27: this package's suite had been opening live
+  # connections to the venue on every run, from tests that never meant to. A consumer can
+  # use it for a proxy. `config/` does not ship, so a consumer's default is still the venue.
+  defp default_url(opts) do
+    Config.get(:dp_exchange_gemini, :websocket_url, nil) ||
+      opts |> Environment.resolve() |> Environment.websocket_url()
   end
 
   @doc """
