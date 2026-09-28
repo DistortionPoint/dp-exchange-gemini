@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.79] - 2026-09-28
+
 ### Fixed
 
 - **Creating the nonce counter no longer stalls concurrent signers for seconds.** The first
