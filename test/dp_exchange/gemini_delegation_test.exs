@@ -202,6 +202,27 @@ defmodule DpExchange.GeminiDelegationTest do
       refute_received {:dp_exchange, :gemini, %Quote{}}
     end
 
+    test "a lower-case subscription is delivered under the canonical symbol", %{opts: opts} do
+      # Measured 2026-09-28 before the fix: `update_symbols(["btc-usd"])`, then a `BTC-USD`
+      # quote, and `coverage/1` was `%{}`. `Feed` drops a payload it does not want.
+      feed = Process.whereis(opts[:feed])
+      :ok = Gemini.update_symbols(["btc-usd"], feed: opts[:feed])
+
+      send(
+        feed,
+        {:dp_exchange, :gemini,
+         %Quote{
+           symbol: "BTC-USD",
+           price: Decimal.new("1"),
+           venue_time: ~U[2026-08-28 12:00:00Z],
+           observed_at: ~U[2026-08-28 12:00:00Z],
+           provider: :gemini
+         }}
+      )
+
+      assert Gemini.coverage(feed: opts[:feed]) == %{"BTC-USD" => :stream}
+    end
+
     test "update_symbols/2 reaches the feed", %{opts: opts} do
       assert Gemini.update_symbols(["BTC-USD"], feed: opts[:feed]) == :ok
     end

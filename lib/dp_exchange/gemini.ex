@@ -671,15 +671,22 @@ defmodule DpExchange.Gemini do
   @impl true
   def subscribe(symbols, opts \\ []),
     do:
-      feed_call(fn -> Feed.subscribe(feed(opts), symbols, opts) end, {:error, :feed_not_started})
+      feed_call(
+        fn -> Feed.subscribe(feed(opts), canonical_case(symbols), opts) end,
+        {:error, :feed_not_started}
+      )
 
   @impl true
   def unsubscribe(symbols, opts \\ []),
-    do: feed_call(fn -> Feed.unsubscribe(feed(opts), symbols) end, :ok)
+    do: feed_call(fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols)) end, :ok)
 
   @impl true
   def update_symbols(symbols, opts \\ []),
-    do: feed_call(fn -> Feed.update_symbols(feed(opts), symbols) end, {:error, :feed_not_started})
+    do:
+      feed_call(
+        fn -> Feed.update_symbols(feed(opts), canonical_case(symbols)) end,
+        {:error, :feed_not_started}
+      )
 
   # NOT declarable `:unsupported`: `coverage/1` returns a map, so it has no way to answer
   # `{:error, :not_supported}`. It always answers, and an empty map is the honest answer
@@ -783,6 +790,18 @@ defmodule DpExchange.Gemini do
   catch
     :exit, _reason -> empty
   end
+
+  # **Symbols are upper-cased on the way in.** Canonical symbols are upper case, and `Feed`
+  # drops a payload whose symbol it does not want. So a caller who subscribed `btc-usd` got
+  # nothing at all, because the venue delivers `BTC-USD`. Until 2026-09-27 that same caller
+  # was delivered to, because nothing compared the two. Measured 2026-09-28:
+  # `update_symbols(["btc-usd"])`, then a `BTC-USD` quote, and `coverage/1` was `%{}`.
+  # Case is the one difference normalised here. Anything else that is not canonical is the
+  # caller's to fix.
+  defp canonical_case(symbols) when is_list(symbols),
+    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
+
+  defp canonical_case(other), do: other
 
   # --- health ------------------------------------------------------------
 
