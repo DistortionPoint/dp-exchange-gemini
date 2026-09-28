@@ -166,6 +166,9 @@ defmodule DpExchange.GeminiDelegationTest do
         provider: :gemini
       }
 
+      # Asked for first: a payload for a symbol nobody wants is dropped, not delivered.
+      assert Gemini.update_symbols(["BTC-USD"], feed: opts[:feed]) == :ok
+
       # Delivering directly is what the socket does; the facade's job is the routing.
       send(feed, {:dp_exchange, :gemini, quote_struct})
       _settled = Gemini.coverage(feed: opts[:feed])
@@ -173,6 +176,30 @@ defmodule DpExchange.GeminiDelegationTest do
       assert Gemini.coverage(feed: opts[:feed]) == %{"BTC-USD" => :stream}
       assert Gemini.unsubscribe(["BTC-USD"], feed: opts[:feed]) == :ok
       assert Gemini.coverage(feed: opts[:feed]) == %{}
+    end
+
+    test "a frame arriving after unsubscribe is not delivered and does not restore coverage",
+         %{opts: opts} do
+      # The venue keeps sending for a moment after an unsubscribe. Such a frame used to
+      # reach subscribers and re-enter delivery tracking, and a streaming route has no
+      # staleness window, so `coverage/1` answered `:stream` for it indefinitely.
+      feed = Process.whereis(opts[:feed])
+      :ok = Gemini.update_symbols(["BTC-USD"], feed: opts[:feed])
+      :ok = Gemini.subscribe_notices(feed: opts[:feed], to: self())
+      :ok = Gemini.unsubscribe(["BTC-USD"], feed: opts[:feed])
+
+      late = %Quote{
+        symbol: "BTC-USD",
+        price: Decimal.new("1"),
+        venue_time: ~U[2026-08-28 12:00:00Z],
+        observed_at: ~U[2026-08-28 12:00:00Z],
+        provider: :gemini
+      }
+
+      send(feed, {:dp_exchange, :gemini, late})
+
+      assert Gemini.coverage(feed: opts[:feed]) == %{}
+      refute_received {:dp_exchange, :gemini, %Quote{}}
     end
 
     test "update_symbols/2 reaches the feed", %{opts: opts} do
