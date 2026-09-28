@@ -1439,4 +1439,40 @@ defmodule DpExchange.Gemini.PrivateTest do
                )
     end
   end
+
+  describe "a retried private request" do
+    test "carries a fresh nonce, not the first attempt's" do
+      # Every request's nonce may be used once. A retry re-sending the first attempt's
+      # headers replayed it, and the venue refused the retry with `InvalidNonce` although
+      # the key was fine. The first attempt here fails with a 503, so the client retries.
+      test_pid = self()
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+
+        nonce =
+          conn
+          |> Plug.Conn.get_req_header("x-gemini-payload")
+          |> List.first()
+          |> Base.decode64!()
+          |> Jason.decode!()
+          |> Map.fetch!("nonce")
+
+        send(test_pid, {:nonce, nonce})
+
+        if :counters.get(counter, 1) == 1 do
+          Plug.Conn.resp(conn, 503, "busy")
+        else
+          conn |> Plug.Conn.put_resp_header("date", @date) |> Req.Test.json([])
+        end
+      end
+
+      Private.get_balances(@credentials, plug: plug, retry_attempts: 2)
+
+      assert_received {:nonce, first}
+      assert_received {:nonce, second}
+      assert second != first
+    end
+  end
 end

@@ -450,25 +450,24 @@ defmodule DpExchange.Gemini.Private do
   defp post(path, params, credentials, opts) do
     scheme = auth_scheme(credentials, opts)
 
-    with {:ok, headers} <- Auth.headers(scheme, path, stringify(params), credentials, opts) do
-      url = base_url(opts) <> path
+    headers = signer(scheme, path, stringify(params), credentials, opts)
+    url = base_url(opts) <> path
 
-      case HttpClient.request(:post, url, headers, "", request_opts(opts)) do
-        {:ok, %{status: status, body: body, headers: response_headers}}
-        when status in 200..299 ->
-          with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
+    case HttpClient.request(:post, url, headers, "", request_opts(opts)) do
+      {:ok, %{status: status, body: body, headers: response_headers}}
+      when status in 200..299 ->
+        with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
-        # Permanent for the request as sent. A caller refreshes a token and calls again —
-        # that is a different request, not a retry of this one.
-        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-          {:refused, refusal(body)}
+      # Permanent for the request as sent. A caller refreshes a token and calls again —
+      # that is a different request, not a retry of this one.
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+        {:refused, refusal(body)}
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -477,6 +476,16 @@ defmodule DpExchange.Gemini.Private do
   # expressed a different way, not this package inferring one. Credentials carrying BOTH
   # are refused rather than resolved: sending both header families is
   # `AmbiguousAuthentication` at the venue, and picking one would be guessing.
+  # **A retry is signed again, with a fresh nonce.** Every request carries a nonce the venue
+  # refuses to see twice. `Core.HttpClient` used to retry with the first attempt's headers,
+  # so a read whose first attempt timed out was retried with a nonce already used, and the
+  # venue refused it (`InvalidNonce`, surfaced as a refusal) although nothing was wrong
+  # with the key. Passing a function makes the client sign each attempt afresh. A write
+  # that must not take effect twice is still sent once (`post_once/4`), so a fresh nonce
+  # never repeats a transfer or an order.
+  defp signer(scheme, path, params, credentials, opts),
+    do: fn -> Auth.headers(scheme, path, params, credentials, opts) end
+
   defp auth_scheme(credentials, opts) do
     Keyword.get_lazy(opts, :auth_scheme, fn ->
       case credentials do
@@ -519,21 +528,21 @@ defmodule DpExchange.Gemini.Private do
   defp signed_get(path, credentials, opts) do
     scheme = auth_scheme(credentials, opts)
 
-    with {:ok, headers} <- Auth.headers(scheme, path, %{}, credentials, opts) do
-      case HttpClient.request(:get, base_url(opts) <> path, headers, nil, request_opts(opts)) do
-        {:ok, %{status: status, body: body, headers: response_headers}}
-        when status in 200..299 ->
-          with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
+    headers = signer(scheme, path, %{}, credentials, opts)
 
-        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-          {:refused, refusal(body)}
+    case HttpClient.request(:get, base_url(opts) <> path, headers, nil, request_opts(opts)) do
+      {:ok, %{status: status, body: body, headers: response_headers}}
+      when status in 200..299 ->
+        with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+        {:refused, refusal(body)}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -549,20 +558,20 @@ defmodule DpExchange.Gemini.Private do
   defp signed_get_bytes(path, credentials, opts) do
     scheme = auth_scheme(credentials, opts)
 
-    with {:ok, headers} <- Auth.headers(scheme, path, %{}, credentials, opts) do
-      case HttpClient.request(:get, base_url(opts) <> path, headers, nil, request_opts(opts)) do
-        {:ok, %{status: status, body: body}} when status in 200..299 ->
-          {:ok, body}
+    headers = signer(scheme, path, %{}, credentials, opts)
 
-        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-          {:refused, refusal(body)}
+    case HttpClient.request(:get, base_url(opts) <> path, headers, nil, request_opts(opts)) do
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+        {:refused, refusal(body)}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

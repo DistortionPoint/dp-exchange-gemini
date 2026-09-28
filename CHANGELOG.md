@@ -20,6 +20,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A retried private request is signed again, with a fresh nonce. Every retry replayed the
+  first attempt's nonce, which the venue refuses because nonces must increase, so a retry
+  could never succeed. Headers are now a function `Core.HttpClient` calls per attempt;
+  non-idempotent writes are still sent once through `post_once`. Requires
+  `dp_exchange_core` 0.3.46.
+
 ## [0.2.79] - 2026-09-28
 
 ### Fixed
