@@ -646,6 +646,7 @@ defmodule DpExchange.Gemini.Fake do
   # cannot tell the difference, which is the property the facade exists to hold.
   @impl true
   def subscribe(symbols, opts \\ []) do
+    symbols = canonical_case(symbols)
     target = Config.opt(opts, :to, self())
 
     for symbol <- symbols, symbol in @symbols do
@@ -678,12 +679,14 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
+    symbols = canonical_case(symbols)
     Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
     :ok
   end
 
   @impl true
   def update_symbols(symbols, _opts \\ []) do
+    symbols = canonical_case(symbols)
     Process.put(__MODULE__, MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
     :ok
   end
@@ -1422,4 +1425,12 @@ defmodule DpExchange.Gemini.Fake do
       end
     end)
   end
+
+  # Upper-cased on the way in, as the real facade does, so a lower-case subscription gets
+  # the same answer here as against the venue. Without it the fake delivered nothing for
+  # `btc-usd` while the real package delivered `BTC-USD` (checked 2026-09-28).
+  defp canonical_case(symbols) when is_list(symbols),
+    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
+
+  defp canonical_case(other), do: other
 end

@@ -666,4 +666,16 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:error, {:missing_credentials, :gemini}} = Fake.unstake("ETH", Decimal.new("1"))
     end
   end
+
+  describe "a lower-case subscription" do
+    # The real facade upper-cases symbols on the way in. The fake has to give the same
+    # answer, or a consumer's tier-1 tests certify silence where the venue delivers.
+    test "is delivered under the canonical symbol, as the real package does" do
+      opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
+
+      assert :ok = DpExchange.Gemini.Fake.subscribe(["btc-usd"], opts)
+      assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 2_000
+      assert Map.has_key?(DpExchange.Gemini.Fake.coverage(opts), "BTC-USD")
+    end
+  end
 end
