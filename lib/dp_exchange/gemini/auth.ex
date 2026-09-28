@@ -305,23 +305,52 @@ defmodule DpExchange.Gemini.Auth do
     # Re-checked INSIDE the lock: every caller that queued behind the winner arrives here
     # with its own `nil` reading from before the lock, and creating a second ref at this
     # point is the original bug with extra steps.
-    case :global.trans({@nonce_counter, self()}, fn ->
-           case :persistent_term.get(@nonce_counter, nil) do
-             nil ->
-               ref = :atomics.new(1, signed: false)
-               :persistent_term.put(@nonce_counter, ref)
-               ref
+    #
+    # **Zero retries, then wait for the winner.** This used `:global.trans/2`'s default of
+    # retrying forever, and `:global` backs off between retries with random sleeps that grow
+    # to 8 seconds. Every loser slept, so creating one counter cost 0.2 to 1.2 s with the
+    # machine idle, and more than 10 s under load (measured 2026-09-28, 10 to 100 callers).
+    # A caller signing a request waited all of that. Now only one caller holds the lock,
+    # restricted to this node because the counter is per-node. Every other caller gives up
+    # at once and polls the key, which the winner fills within one `put`.
+    case :global.trans(
+           {@nonce_counter, self()},
+           fn ->
+             case :persistent_term.get(@nonce_counter, nil) do
+               nil ->
+                 ref = :atomics.new(1, signed: false)
+                 :persistent_term.put(@nonce_counter, ref)
+                 ref
 
-             ref ->
-               ref
-           end
-         end) do
-      # Unreachable: `trans/2` retries indefinitely, so it does not give up. Matched anyway
-      # because its spec permits `:aborted`, and a silently-returned atom here would be an
-      # `:atomics` ref as far as every caller is concerned — a `badarg` from `:atomics.get/2`
-      # naming neither the lock nor the nonce.
+               ref ->
+                 ref
+             end
+           end,
+           [node()],
+           0
+         ) do
       :aborted ->
-        raise "DpExchange.Gemini.Auth: could not acquire the nonce-counter lock"
+        await_counter(0)
+
+      ref ->
+        ref
+    end
+  end
+
+  # The lock is held by another caller, which is creating the counter now. Its `put` lands
+  # within milliseconds, so this polls every millisecond. After `@counter_wait_ms` with the
+  # key still absent, the holder died before storing it (its lock went with it), and this
+  # caller tries to create the counter itself.
+  @counter_wait_ms 5_000
+
+  defp await_counter(waited) do
+    case :persistent_term.get(@nonce_counter, nil) do
+      nil when waited < @counter_wait_ms ->
+        Process.sleep(1)
+        await_counter(waited + 1)
+
+      nil ->
+        create_counter()
 
       ref ->
         ref

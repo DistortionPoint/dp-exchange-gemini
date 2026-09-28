@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Creating the nonce counter no longer stalls concurrent signers for seconds.** The first
+  creation was serialised with `:global.trans/2` retrying forever, and `:global` backs off
+  between retries with random sleeps that grow to 8 s. Measured 2026-09-28: 10 to 100
+  concurrent first callers took 0.2 to 1.2 s with the machine idle, and more than 10 s
+  under load, where a test timed out. Only one caller now takes the lock, on this node
+  only. The others poll the stored counter every millisecond. The same 10 to 100 callers
+  take about 2 to 22 ms, and all still receive the one counter.
+
 ## [0.2.78] - 2026-09-28
 
 ### Fixed
