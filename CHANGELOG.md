@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.82] - 2026-09-29
+
 ### Fixed
 
 - A reply whose list cannot be found is now `{:error, :unexpected_response_shape}`, not an
