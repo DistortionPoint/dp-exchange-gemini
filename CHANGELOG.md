@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.91] - 2026-09-29
+
 ### Added
 
 - **A streamable `:trades` kind** (dp-exchange-core issue #39). Start the feed with
