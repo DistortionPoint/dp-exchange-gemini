@@ -108,8 +108,10 @@ defmodule DpExchange.Gemini.Feed do
 
   `Feed` now traps exits, and a crashed socket is handled the same way a reconnect it
   never even noticed would be: `state.socket` is cleared, `delivering_by_kind` is reset
-  (this venue has one socket carrying both streamable kinds, so a crash costs both, not a
-  partial set the way a per-shard venue's would), a `:link_down` `Core.Notice` reports it,
+  (this venue has one socket carrying every kind `state.channels` asks for — `:quotes`
+  and `:top_of_book` always, `:trades` too where opted in — so a crash costs all of them
+  at once, not a partial set the way a per-shard venue's would), a `:link_down`
+  `Core.Notice` reports it,
   and `resubscribe/1` — the same function the periodic timer already calls — attempts an
   immediate reconnect and resend of `wanted` rather than waiting out the next
   `@resubscribe_interval_ms` tick.
@@ -177,12 +179,45 @@ defmodule DpExchange.Gemini.Feed do
   package's own budget assumed — `Feed.start_link/1`'s own `opts` forward
   `:socket_connect_timeout` and `:socket_recv_timeout` straight through, alongside `:url`
   and `:environment`.
+
+  ## `channels:` — opt into the trade tape; the default is unchanged
+
+  `start_link/1` (and so `DpExchange.Gemini.Supervisor.start_link/1`, since its `opts`
+  pass straight through) takes `:channels`, the family's own convention for this
+  (`dp_exchange_coinbase`'s `Feed` established it): a non-empty list drawn from
+  `capabilities().streamable`, defaulting to `[:quotes, :top_of_book]` — exactly what
+  this feed delivered before `:trades` existed as a kind, so an existing consumer that
+  never passes the option sees no change at all.
+
+  Gemini has no separate channel for `:quotes` and `:top_of_book`: both come from the
+  same `@bookTicker` frame (see `Socket`'s moduledoc), so this option's only real effect
+  is whether `:trades` is in the list. When it is, this module also subscribes
+  `{symbol}@trade` for every `wanted` symbol, alongside `@bookTicker` — added and kept
+  through every path that builds a subscription (`subscribe/3`, `update_symbols/2`,
+  `unsubscribe/2`, the periodic resubscribe, and a reconnect), never only at boot. A
+  `Core.Types.Trade` is delivered for every print `@trade` carries; `:quotes` keeps
+  meaning "the last-trade price CHANGED", the fix 0.2.85 made — this option adds a
+  second, distinct stream rather than altering what the first one means.
+
+  **No per-connection stream limit is enforced or documented for `wss://ws.gemini.com`**
+  — see the moduledoc's "Sharding" section above, which already states this package has
+  found none for the new endpoint at the scope it has been exercised with. Subscribing
+  `:trades` doubles the number of streams this one socket carries per symbol (two
+  addresses instead of one), not the number of sockets — this module still shards
+  nothing — so there is no shard arithmetic to add here either. If a real limit exists
+  on this endpoint, doubling the per-symbol stream count is the change most likely to
+  find it, and the fix belongs here, in this package, once it is measured.
+
+  A caller who asks for a kind this venue does not stream (anything outside
+  `[:quotes, :top_of_book, :trades]`) gets an `ArgumentError` from `start_link/1` —
+  fail closed, per this family's own rule, rather than starting a feed that silently
+  never carries what was asked for.
   """
 
   use GenServer
 
   alias DpExchange.Core.{Capabilities, Config, Fanout, Notice}
-  alias DpExchange.Core.Types.{Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Gemini.Socket
 
   require Logger
@@ -193,6 +228,17 @@ defmodule DpExchange.Gemini.Feed do
   # caller-side exit instead of the `{:error, :send_timeout}` that says "retry the batch".
   @frame_window_ms 5_000
   @call_timeout @frame_window_ms * 3
+
+  # What `:channels` defaults to when a caller says nothing — exactly this feed's
+  # behaviour before `:trades` existed as a kind. See the moduledoc's "`channels:`"
+  # section.
+  @default_channels [:quotes, :top_of_book]
+
+  # The kinds this feed can be asked to carry. Not read from `DpExchange.Gemini.
+  # capabilities().streamable` itself — `dp_exchange_coinbase`'s `Feed` sets the family
+  # precedent of a local, literal list here rather than a dependency back onto the
+  # facade module, which would need to compile before this one.
+  @known_channels [:quotes, :top_of_book, :trades]
 
   # Re-issues the current `wanted` set's subscription on this cadence, unconditionally —
   # see the moduledoc on reconnects. Matches the interval `dp_exchange_coinbase` uses for
@@ -267,6 +313,8 @@ defmodule DpExchange.Gemini.Feed do
     Process.flag(:trap_exit, true)
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
+    channels = (Keyword.get(opts, :channels) || @default_channels) |> validate_channels!()
+
     {:ok,
      %{
        socket_opts:
@@ -276,6 +324,11 @@ defmodule DpExchange.Gemini.Feed do
            :socket_connect_timeout,
            :socket_recv_timeout
          ]),
+       # See the moduledoc's "`channels:`" section. Read once, here, already validated —
+       # every place that decides which `Socket` channels to carry (`active_channels/1`)
+       # reads this rather than a module attribute, so a feed always acts on what its own
+       # caller asked for.
+       channels: channels,
        # An already-established connection. Ordinary use leaves this nil and the feed
        # dials its own on first subscribe; it is set on reconnect, and by tests that need
        # the socket-bearing branches without reaching a venue.
@@ -320,8 +373,11 @@ defmodule DpExchange.Gemini.Feed do
     }
 
     case ensure_socket(state) do
-      {:ok, state} -> {:reply, when_linked(state, &Socket.subscribe(&1, symbols)), state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, state} ->
+        {:reply, when_linked(state, &subscribe_channels(&1, symbols, state)), state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -330,7 +386,7 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
-    {:reply, when_linked(state, &Socket.unsubscribe(&1, symbols)), drop(state, symbols)}
+    {:reply, when_linked(state, &unsubscribe_channels(&1, symbols, state)), drop(state, symbols)}
   end
 
   def handle_call({:update_symbols, symbols}, _from, state) do
@@ -380,8 +436,9 @@ defmodule DpExchange.Gemini.Feed do
   # for, reappearing one level down. See `Core.Venue`'s `coverage/1` doc: observation is
   # scoped to the current transport session.
   #
-  # One socket carries both streamable kinds here, so there is no partial loss to compute
-  # and the whole map resets — the same shape `init/1` starts with, and the same reset the
+  # One socket carries every kind this feed is configured for here (see `state.channels`
+  # and the moduledoc's "`channels:`" section), so there is no partial loss to compute and
+  # the whole map resets — the same shape `init/1` starts with, and the same reset the
   # crash path performs, for the same reason.
   def handle_info({:dp_exchange, :gemini, %Notice{kind: :link_down} = notice}, state) do
     fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
@@ -475,7 +532,7 @@ defmodule DpExchange.Gemini.Feed do
   # to even check.
   defp resubscribe(%{socket: socket} = state) when is_pid(socket) do
     if Process.alive?(socket) and not state.link_down? and MapSet.size(state.wanted) > 0 do
-      case Socket.subscribe(socket, MapSet.to_list(state.wanted)) do
+      case subscribe_channels(socket, MapSet.to_list(state.wanted), state) do
         :ok ->
           resubscribe_recovered(state)
 
@@ -553,9 +610,65 @@ defmodule DpExchange.Gemini.Feed do
   defp apply_delta(%{link_down?: true}, _added, _removed), do: :ok
 
   defp apply_delta(state, added, removed) do
-    with :ok <- Socket.unsubscribe(state.socket, removed) do
-      Socket.subscribe(state.socket, added)
+    with :ok <- unsubscribe_channels(state.socket, removed, state) do
+      subscribe_channels(state.socket, added, state)
     end
+  end
+
+  # Every `Socket` channel this feed currently carries — `@bookTicker` always, and
+  # `@trade` too when `:trades` is in `state.channels`. See the moduledoc's "`channels:`"
+  # section: Gemini has no separate channel for `:quotes`/`:top_of_book`, so those two
+  # never change which `Socket` channels get used, only `:trades` does.
+  defp active_socket_channels(state) do
+    if :trades in state.channels, do: [:book_ticker, :trade], else: [:book_ticker]
+  end
+
+  # Issues `symbols` against every active `Socket` channel, in order, stopping at the
+  # first failure — the same fail-fast shape `apply_delta/3` already used for its own
+  # unsubscribe-then-subscribe pair, applied one level down to a call that may now be more
+  # than one frame. A caller sees the first error; `wanted` (and, for unsubscribe,
+  # `delivering_by_kind`) is already updated regardless, so nothing tracked here is lost —
+  # only the wire send may be incomplete, and the next resubscribe tick re-issues
+  # everything unconditionally, exactly as it already does for a single-channel miss.
+  defp subscribe_channels(socket, symbols, state) do
+    send_to_channels(socket, symbols, state, &Socket.subscribe/3)
+  end
+
+  defp unsubscribe_channels(socket, symbols, state) do
+    send_to_channels(socket, symbols, state, &Socket.unsubscribe/3)
+  end
+
+  defp send_to_channels(socket, symbols, state, send) do
+    Enum.reduce_while(active_socket_channels(state), :ok, fn channel, :ok ->
+      case send.(socket, symbols, channel) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  # Fail closed, per this family's own rule: a `:channels` value naming a kind this venue
+  # does not stream starts no feed at all, rather than one that silently never carries
+  # what was asked for. See the moduledoc's "`channels:`" section and
+  # `dp_exchange_coinbase.Feed`'s identically-shaped `validate_channels!/1`, the family
+  # precedent this copies.
+  defp validate_channels!(kinds) when is_list(kinds) and kinds != [] do
+    case Enum.reject(kinds, &(&1 in @known_channels)) do
+      [] ->
+        Enum.uniq(kinds)
+
+      unknown ->
+        raise ArgumentError,
+              "DpExchange.Gemini.Feed :channels must be drawn from #{inspect(@known_channels)} " <>
+                "— the kinds capabilities().streamable declares. Got #{inspect(unknown)}. A " <>
+                "kind this venue does not stream cannot be subscribed to by naming it."
+    end
+  end
+
+  defp validate_channels!(value) do
+    raise ArgumentError,
+          "DpExchange.Gemini.Feed :channels must be a non-empty list drawn from " <>
+            "#{inspect(@known_channels)}. Got #{inspect(value)}."
   end
 
   # A socket that is reconnecting is asleep in its backoff and answers no `send_frame/2`,
@@ -575,10 +688,11 @@ defmodule DpExchange.Gemini.Feed do
 
   # See the moduledoc's "A crashed socket is Feed's crash too" section and `handle_info(
   # {:EXIT, pid, reason}, %{socket: pid} = state)` above. This venue has one socket
-  # carrying both streamable kinds — unlike a sharded venue, there is no partial loss to
-  # compute, the crash costs everything this feed was delivering, so `delivering_by_kind`
-  # resets to the same empty shape `init/1` starts with rather than being narrowed
-  # symbol-by-symbol the way `drop/2` narrows it for an ordinary unsubscribe.
+  # carrying every kind this feed is configured for — unlike a sharded venue, there is no
+  # partial loss to compute, the crash costs everything this feed was delivering, so
+  # `delivering_by_kind` resets to the same empty shape `init/1` starts with rather than
+  # being narrowed symbol-by-symbol the way `drop/2` narrows it for an ordinary
+  # unsubscribe.
   defp isolate_crashed_socket(state, reason) do
     state = %{state | socket: nil, delivering_by_kind: empty_delivery(), link_down?: false}
     notify_socket_crashed(state, reason)
@@ -627,12 +741,18 @@ defmodule DpExchange.Gemini.Feed do
     end)
   end
 
-  # Both of this venue's declared streamable kinds, present with empty maps. One function
-  # rather than the literal repeated at each of its three call sites — `init/1`, a socket
-  # crash and a link drop — because a third streamable kind added to two of the three is a
-  # silent, plausible-looking divergence, which is the shape of defect this family keeps
-  # writing rules against.
-  defp empty_delivery, do: %{quotes: %{}, top_of_book: %{}}
+  # Every kind `capabilities().streamable` declares, present with empty maps — `:trades`
+  # included even for a feed started without it in `:channels`, matching the same
+  # always-present-key convention `coverage_by_kind/1`'s own moduledoc documents for
+  # `:quotes`/`:top_of_book`: an absent key would read as "this feed does not know about
+  # that kind", where an empty map reads as what is actually true — declared, and nothing
+  # of it has arrived (whether because none has, or because this feed was never asked to
+  # carry it). One function rather than the literal repeated at each of its three call
+  # sites — `init/1`, a socket crash and a link drop — because a third streamable kind
+  # added to two of the three is a silent, plausible-looking divergence, which is the
+  # shape of defect this family keeps writing rules against, and exactly what happened
+  # here once already before `:trades` existed to prove the point.
+  defp empty_delivery, do: %{quotes: %{}, top_of_book: %{}, trades: %{}}
 
   # The union of every kind's delivery map — what `coverage/1` reports before the
   # `:stream` atom is stamped on. Deriving this from `delivering_by_kind` rather than
@@ -652,6 +772,8 @@ defmodule DpExchange.Gemini.Feed do
 
   defp track_delivery(state, %TopOfBook{symbol: symbol}),
     do: put_delivery(state, :top_of_book, symbol)
+
+  defp track_delivery(state, %Trade{symbol: symbol}), do: put_delivery(state, :trades, symbol)
 
   defp track_delivery(state, _other), do: state
 

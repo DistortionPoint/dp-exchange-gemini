@@ -17,12 +17,20 @@ defmodule DpExchange.Gemini.Socket do
 
   and the venue acknowledges with `{"id":1,"status":200}`.
 
-  This package subscribes to **`@bookTicker`** and nothing else. That single stream carries
-  best bid, best ask and — where the book has traded — the last trade price, in one message
-  per change. It delivers `Core.Types.TopOfBook` on every frame that parses, and a separate
+  This socket always carries **`@bookTicker`**. That single stream carries best bid, best
+  ask and — where the book has traded — the last trade price, in one message per change.
+  It delivers `Core.Types.TopOfBook` on every frame that parses, and a separate
   `Core.Types.Quote` only on the frames that also carry that last trade: the two are
   independent facts and a bid is never dressed up as a price. See `handle_message/2` for
   the substitution that rule exists to stop.
+
+  It also carries **`@trade`** — every executed print, as `Core.Types.Trade` — whenever
+  `DpExchange.Gemini.Feed` is configured with `:trades` in its `:channels` option; see
+  that module's moduledoc. This socket itself makes no distinction: `subscribe/3` and
+  `unsubscribe/3` already took a `channel` argument (defaulting to `:book_ticker`) before
+  `:trades` existed as a streamable kind, and `handle_message/2` already decoded a `@trade`
+  frame the moment one arrived — the address and the decode were both already correct.
+  What changed was `Feed` choosing to ask for `@trade` at all; nothing here.
 
   ### Which is why there is no order-book machinery here
 

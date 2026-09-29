@@ -76,6 +76,18 @@ defmodule DpExchange.Gemini.Fake do
   # Fixed, not `utc_now/0`.
   @at ~U[2026-08-28 12:00:00Z]
 
+  # `subscribe/2`'s `:channels` default — matches `DpExchange.Gemini.Feed`'s own
+  # `@default_channels` exactly, so a caller of neither sees any change from before
+  # `:trades` existed as a kind.
+  @default_channels [:quotes, :top_of_book]
+
+  # Process-dictionary key for which symbols were subscribed WITH `:trades` in their
+  # `:channels` — kept apart from `__MODULE__` (which `subscribed/0` reads) because a
+  # symbol can be subscribed for quotes without trades, or vice versa across two separate
+  # `subscribe/2` calls, and the two facts must not collapse into one set the way a single
+  # boolean would.
+  @trades_key {__MODULE__, :trades}
+
   # Bars the real venue serves per width, so the fake refuses the same ranges it does.
   @window_bars %{
     "1m" => 1_440,
@@ -678,16 +690,30 @@ defmodule DpExchange.Gemini.Fake do
   # Streaming, in memory. The fake pushes immediately on subscribe, which is what the
   # real venue's first `@bookTicker` frame does from the caller's side — and the caller
   # cannot tell the difference, which is the property the facade exists to hold.
+  #
+  # `opts[:channels]` mirrors `DpExchange.Gemini.Feed`'s own `:channels` option — see its
+  # moduledoc's "`channels:`" section — defaulting to the same `[:quotes, :top_of_book]`.
+  # Unlike `Feed`, where it is a `start_link/1`-time choice for the whole connection, here
+  # it is per `subscribe/2` call: this fake has no persistent connection to configure, so
+  # the option is read where it is given. `:trades` in the list pushes a `Types.Trade` for
+  # each valid symbol alongside the streamed `Quote`, consistent with the real decode
+  # (`WsDecode.to_trade/2`) — a real `id`, a real `side`, `broken: false` because the
+  # socket publishes no bust flag, and a non-nil `timestamp`, never the placeholders a
+  # less careful fake would reach for.
   @impl true
   def subscribe(symbols, opts \\ []) do
     symbols = canonical_case(symbols)
     target = Config.opt(opts, :to, self())
+    channels = Config.opt(opts, :channels, @default_channels)
+    wanted = Enum.filter(symbols, &(&1 in @symbols))
 
-    for symbol <- symbols, symbol in @symbols do
+    for symbol <- wanted do
       case get_price(symbol, []) do
         {:ok, quote_struct} -> send(target, {:dp_exchange, :gemini, streamed(quote_struct)})
         _refused -> :ok
       end
+
+      if :trades in channels, do: send(target, {:dp_exchange, :gemini, trade_for(symbol)})
     end
 
     # **Added to, never replacing.** This was the identical line `update_symbols/2`
@@ -703,10 +729,15 @@ defmodule DpExchange.Gemini.Fake do
     # symbols. Neither has any purpose if `subscribe/2` already replaces — you would
     # just subscribe the new list. Two callbacks the contract distinguishes,
     # implemented as one function, is the tell.
-    Process.put(
-      __MODULE__,
-      MapSet.union(subscribed(), MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
-    )
+    Process.put(__MODULE__, MapSet.union(subscribed(), MapSet.new(wanted)))
+
+    # Unioned the same way, and only for symbols this very call actually pushed a trade
+    # for — a symbol subscribed earlier WITHOUT `:trades` does not retroactively gain
+    # trade coverage just because a later, unrelated call asked for trades on other
+    # symbols.
+    if :trades in channels do
+      Process.put(@trades_key, MapSet.union(subscribed_trades(), MapSet.new(wanted)))
+    end
 
     :ok
   end
@@ -714,14 +745,21 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
-    Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
+    dropped = MapSet.new(symbols)
+    Process.put(__MODULE__, MapSet.difference(subscribed(), dropped))
+    Process.put(@trades_key, MapSet.difference(subscribed_trades(), dropped))
     :ok
   end
 
   @impl true
   def update_symbols(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
-    Process.put(__MODULE__, MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+    wanted = MapSet.new(Enum.filter(symbols, &(&1 in @symbols)))
+    Process.put(__MODULE__, wanted)
+    # Narrowed to the new set, never expanded by it — `update_symbols/2` carries no
+    # `:channels` of its own (the contract's callback takes none), so a symbol it adds
+    # cannot be assumed to want trades; one it keeps can only keep what it already had.
+    Process.put(@trades_key, MapSet.intersection(subscribed_trades(), wanted))
     :ok
   end
 
@@ -732,20 +770,29 @@ defmodule DpExchange.Gemini.Fake do
   @doc """
   See `DpExchange.Gemini.coverage_by_kind/1`.
 
-  `subscribe/2` above only ever pushes a `Types.Quote` (via `get_price/2`) — it never
-  builds a `Types.TopOfBook`, so this fake is honestly `:quotes`-only. `:top_of_book`
-  still appears as a key, empty, rather than being omitted: an omitted key here would
-  read as "this fake does not know about that kind", where an empty map reads as what is
-  actually true — the kind is declared, and nothing of it has been observed. **Less
-  capable than the real adapter is allowed; answering a different shape is not**, so the
-  keys match `capabilities().streamable` exactly, the same two the real adapter reports.
+  `subscribe/2` above always pushes a `Types.Quote` (via `get_price/2`) — it never
+  builds a `Types.TopOfBook`, so this fake is honestly `:quotes`-only for that kind.
+  `:top_of_book` still appears as a key, empty, rather than being omitted: an omitted key
+  here would read as "this fake does not know about that kind", where an empty map reads
+  as what is actually true — the kind is declared, and nothing of it has been observed.
+  `:trades` is real, not empty: a symbol reads here only for a `subscribe/2` call that
+  named it AND asked for `:trades` in `opts[:channels]` — narrowed the same way
+  `subscribed/0` narrows `:quotes` on `unsubscribe/2` and `update_symbols/2`, so a symbol
+  no longer wanted, or one dropped from a later `update_symbols/2` call, stops reading as
+  covered here too. **Less capable than the real adapter is allowed; answering a
+  different shape is not**, so the keys match `capabilities().streamable` exactly, the
+  same three the real adapter reports.
   """
   @impl true
   @spec coverage_by_kind(keyword()) :: %{
           Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
         }
   def coverage_by_kind(_opts \\ []) do
-    %{quotes: Map.new(subscribed(), &{&1, :stream}), top_of_book: %{}}
+    %{
+      quotes: Map.new(subscribed(), &{&1, :stream}),
+      top_of_book: %{},
+      trades: Map.new(subscribed_trades(), &{&1, :stream})
+    }
   end
 
   @impl true
@@ -770,6 +817,8 @@ defmodule DpExchange.Gemini.Fake do
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
 
+  defp subscribed_trades, do: Process.get(@trades_key, MapSet.new())
+
   # `get_price/2`'s `Quote` is the REST shape — `venue_time` is the venue's `Date` header
   # and is genuinely never `nil` there (see `usage-rules.md`'s "Quote.venue_time is the
   # venue's HTTP Date"). The STREAMED `Quote` is a different fact from a different
@@ -783,6 +832,26 @@ defmodule DpExchange.Gemini.Fake do
   # fake and fail against the real venue, the exact defect `CLAUDE.md` names as the family's
   # own fail-closed rule for fakes.
   defp streamed(%Types.Quote{} = quote_struct), do: %{quote_struct | venue_time: nil}
+
+  # A `Types.Trade` consistent with `WsDecode.to_trade/2`'s own shape: a real `id`
+  # (`to_string_or_nil/1` never turns an absent id into `""` there, so this never does
+  # either), a real `side` rather than `nil` (`aggressor/1` only answers `nil` for a frame
+  # missing `m` entirely, which this fake never has to model), `broken: false` because the
+  # socket publishes no bust flag and a venue that says nothing has not said a trade was
+  # busted, and a fixed, non-nil `timestamp` — `Types.Trade` enforces one, and `@at` is
+  # this fake's one clock throughout, never `DateTime.utc_now/0`.
+  defp trade_for(symbol) do
+    %Types.Trade{
+      id: "fake-trade-1",
+      symbol: symbol,
+      side: :buy,
+      price: Decimal.new(@price[symbol]),
+      quantity: Decimal.new("1"),
+      timestamp: @at,
+      broken: false,
+      provider: :gemini
+    }
+  end
 
   defp candle(symbol, timeframe) do
     price = Decimal.new(@price[symbol])

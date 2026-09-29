@@ -177,14 +177,21 @@ defmodule DpExchange.Gemini.FakeTest do
   end
 
   describe "coverage_by_kind/1" do
-    test "reports what it pushed under :quotes, and declares :top_of_book honestly empty" do
-      # `subscribe/2` above only ever pushes a `Types.Quote` — never a `Types.TopOfBook` —
-      # so this fake is honestly quotes-only. `:top_of_book` still appears, empty, rather
-      # than being omitted: an omitted key would read as "this fake doesn't know the
-      # kind", where an empty map reads as what is true here — declared, nothing observed.
+    test "reports what it pushed under :quotes, and declares the rest honestly empty" do
+      # `subscribe/2` above always pushes a `Types.Quote` — never a `Types.TopOfBook` —
+      # so this fake is honestly quotes-only for that kind. Every declared key still
+      # appears, empty where nothing of that kind was observed, rather than being
+      # omitted: an omitted key would read as "this fake doesn't know the kind", where an
+      # empty map reads as what is true here — declared, nothing observed. `:trades`
+      # stays empty here specifically because this call did not ask for it — see the
+      # `:channels` describe block below for the case where it does.
       :ok = Fake.subscribe(["BTC-USD", "NOPE-USD"], to: self())
 
-      assert Fake.coverage_by_kind() == %{quotes: %{"BTC-USD" => :stream}, top_of_book: %{}}
+      assert Fake.coverage_by_kind() == %{
+               quotes: %{"BTC-USD" => :stream},
+               top_of_book: %{},
+               trades: %{}
+             }
     end
 
     test "the union of its symbols across kinds matches coverage/1's keys exactly" do
@@ -213,7 +220,68 @@ defmodule DpExchange.Gemini.FakeTest do
       :ok = Fake.subscribe(["BTC-USD"], to: self())
       :ok = Fake.unsubscribe(["BTC-USD"])
 
-      assert Fake.coverage_by_kind() == %{quotes: %{}, top_of_book: %{}}
+      assert Fake.coverage_by_kind() == %{quotes: %{}, top_of_book: %{}, trades: %{}}
+    end
+  end
+
+  describe "channels: [:trades] — dp-exchange-core issue #39" do
+    alias DpExchange.Core.Types.Trade
+
+    test "without :trades in channels, no Trade is pushed, matching Feed's own default" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
+
+      assert_receive {:dp_exchange, :gemini, %Quote{}}
+      refute_receive {:dp_exchange, :gemini, %Trade{}}, 50
+    end
+
+    test "channels: [:trades] pushes a Trade alongside the streamed Quote" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:quotes, :top_of_book, :trades])
+
+      assert_receive {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}
+      assert_receive {:dp_exchange, :gemini, %Trade{symbol: "BTC-USD"} = trade}
+
+      # Consistent with `WsDecode.to_trade/2`'s own shape: a real id, a real side, no
+      # bust flag, and a real timestamp — never the nils a less careful fake would leave
+      # in place. See `Fake.trade_for/1`'s own comment.
+      assert trade.id != nil
+      assert trade.side in [:buy, :sell]
+      assert trade.broken == false
+      assert trade.timestamp != nil
+      assert Decimal.equal?(trade.price, Decimal.new("77845.79"))
+    end
+
+    test "an unlisted symbol gets no Trade, same as it gets no Quote" do
+      :ok = Fake.subscribe(["NOPE-USD"], to: self(), channels: [:trades])
+
+      refute_receive {:dp_exchange, :gemini, _anything}, 50
+    end
+
+    test "coverage_by_kind/1 tracks trades coverage independently of quotes coverage" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:quotes, :top_of_book, :trades])
+      :ok = Fake.subscribe(["ETH-USD"], to: self(), channels: [:quotes, :top_of_book])
+
+      by_kind = Fake.coverage_by_kind()
+
+      assert by_kind.quotes == %{"BTC-USD" => :stream, "ETH-USD" => :stream}
+      assert by_kind.trades == %{"BTC-USD" => :stream}
+    end
+
+    test "unsubscribing drops the symbol from :trades coverage too" do
+      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:trades])
+      assert Fake.coverage_by_kind().trades == %{"BTC-USD" => :stream}
+
+      :ok = Fake.unsubscribe(["BTC-USD"])
+
+      assert Fake.coverage_by_kind().trades == %{}
+    end
+
+    test "update_symbols/2 narrows :trades coverage to the new set, same as :quotes" do
+      :ok = Fake.subscribe(["BTC-USD", "ETH-USD"], to: self(), channels: [:trades])
+      assert Fake.coverage_by_kind().trades == %{"BTC-USD" => :stream, "ETH-USD" => :stream}
+
+      :ok = Fake.update_symbols(["BTC-USD"])
+
+      assert Fake.coverage_by_kind().trades == %{"BTC-USD" => :stream}
     end
   end
 

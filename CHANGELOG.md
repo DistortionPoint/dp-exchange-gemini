@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **A streamable `:trades` kind** (dp-exchange-core issue #39). Start the feed with
+  `channels: [:quotes, :top_of_book, :trades]` and it also subscribes each symbol's `@trade`
+  stream, delivering every execution as a `Core.Types.Trade`: price, quantity, taker side, the
+  venue's trade id and time. `:quotes` reports only last-trade price changes (since 0.2.85), so
+  a run of trades at one price produced nothing, and thin pairs went near-silent. The default
+  is unchanged (`[:quotes, :top_of_book]`), and an unknown kind or an empty list raises at
+  start. `:trades` is kept across symbol changes, resubscribes, reconnects and socket
+  recovery. `coverage_by_kind/1` now always carries a `:trades` key, as it does for every
+  declared kind. `Fake.subscribe/2` takes the same `channels:`. Declared from the vendor's
+  AsyncAPI, not measured live.
+
 ## [0.2.90] - 2026-09-29
 
 ### Fixed

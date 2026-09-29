@@ -300,7 +300,20 @@ defmodule DpExchange.Gemini do
 
       # `bookTicker` delivers top-of-book; a frame carrying a last trade also delivers a
       # quote. Two kinds from one channel, and each says which it is.
-      streamable: [:quotes, :top_of_book],
+      #
+      # `:trades` (2026-09-29, dp-exchange-core issue #39) is a THIRD, separate channel —
+      # `{symbol}@trade` — carrying every executed print as `Core.Types.Trade`, not the
+      # last-trade-price-CHANGE `:quotes` reports from `bookTicker`. That gap was the
+      # issue: a thin pair trading repeatedly at the same price produced no `:quotes`
+      # event at all once 0.2.85 stopped re-sending an unchanged price, and `:trades` is
+      # the genuine trade tape a consumer routing to a `prices` measurement needs
+      # instead. Declared from the vendor's own AsyncAPI document
+      # (docs/reference/gemini/asyncapi/websocket.yaml, the Trade payload around
+      # lines 1295-1313), read 2026-09-01 — not probed live, and `measured_against`
+      # below says so rather than implying otherwise. Opt-in via `Feed`'s `channels:`
+      # option (`DpExchange.Gemini.Feed`'s own moduledoc); the default leaves every
+      # existing consumer's behaviour exactly as it was before this kind existed.
+      streamable: [:quotes, :top_of_book, :trades],
       historical_timeframes: Rest.timeframes(),
 
       # **`:market` is absent, and that is the declaration doing its job.** The venue
@@ -348,7 +361,10 @@ defmodule DpExchange.Gemini do
           "1M (the venue's own 1mo), found live against api.gemini.com 2026-09-08, not " <>
           "window-checked the way the other seven are — see DpExchange.Gemini.Rest's " <>
           "moduledoc; the bookTicker stream measured live " <>
-          "against ws.gemini.com 2026-08-28; CEILINGS taken from " <>
+          "against ws.gemini.com 2026-08-28; the :trades kind (the {symbol}@trade " <>
+          "channel) is read from the vendor's AsyncAPI document alone, 2026-09-01, and " <>
+          "NOT probed live — no trade tape has been measured against ws.gemini.com yet; " <>
+          "CEILINGS taken from " <>
           "developer.gemini.com/rate-limit as published prose and NOT probed — probing " <>
           "a limit means deliberately exceeding a third party's stated rate limit. " <>
           "has_staking re-measured 2026-09-06: GET /v1/staking/rates against " <>
@@ -703,7 +719,7 @@ defmodule DpExchange.Gemini do
   end
 
   @doc """
-  `coverage/1`, split by which of this venue's two streamable kinds is arriving.
+  `coverage/1`, split by which of this venue's three streamable kinds is arriving.
 
   ## Why this exists — the general failure mode
 
@@ -723,29 +739,35 @@ defmodule DpExchange.Gemini do
 
   ## Why it applies here too, even though this venue's delivery is not Coinbase's
 
-  Gemini has no separate channel per kind — one `@bookTicker` stream carries both of this
-  venue's declared kinds, `:quotes` and `:top_of_book` (see `DpExchange.Gemini.Socket`).
-  But the two are still independent facts about a symbol: a `bookTicker` frame always
-  produces a `TopOfBook` when it parses, and produces an accompanying `Quote` only when
-  that same frame also carries a last-traded price. A symbol can quote continuously —
-  its book updating on every level change — while never trading, so `:top_of_book` stays
-  healthy for it and `:quotes` never appears at all. Under `coverage/1` alone that symbol
-  reads identically to one trading actively: `:stream` either way. Sharing one wire
-  underneath both kinds does not prevent the collapse `coverage_by_kind/1` exists to
-  undo; it just changes which mechanism produces the two independent facts.
+  `:quotes` and `:top_of_book` share a channel where `:trades` does not — one
+  `@bookTicker` stream carries the first two (see `DpExchange.Gemini.Socket`), and
+  `:trades` is a genuinely separate `{symbol}@trade` channel, opt-in via `Feed`'s
+  `channels:` option. All three are still independent facts about a symbol, whether they
+  share a wire or not: a `bookTicker` frame always produces a `TopOfBook` when it parses,
+  and produces an accompanying `Quote` only when that same frame also carries a
+  last-traded PRICE CHANGE — not every print. A symbol can quote continuously — its book
+  updating on every level change — while never trading, so `:top_of_book` stays healthy
+  for it and `:quotes` never appears at all; a thin symbol trading repeatedly at an
+  unchanged price produces real prints on `:trades` while `:quotes` stays silent for the
+  same reason. Under `coverage/1` alone every one of those symbols reads identically to
+  one healthy across the board: `:stream` either way. Two of the three kinds sharing one
+  wire does not prevent the collapse `coverage_by_kind/1` exists to undo; it just changes
+  which mechanism produces the independent facts.
 
   ## What this reports, and what it is not
 
-  Each `DpExchange.Core.Types.Quote` and `DpExchange.Core.Types.TopOfBook` this package
-  has actually delivered, grouped by which struct it was — never by channel name, never
-  by what was subscribed. `:quotes` and `:top_of_book` are the only keys, matching
-  `capabilities().streamable`, and each is present even when nothing of that kind has
-  arrived yet, mapped to an empty map — absence here is `:not_covered`, the same as it is
-  in `coverage/1`.
+  Each `DpExchange.Core.Types.Quote`, `DpExchange.Core.Types.TopOfBook` and
+  `DpExchange.Core.Types.Trade` this package has actually delivered, grouped by which
+  struct it was — never by channel name, never by what was subscribed. `:quotes`,
+  `:top_of_book` and `:trades` are the only keys, matching `capabilities().streamable`,
+  and each is present even when nothing of that kind has arrived yet — including when
+  this feed was never configured to carry it at all — mapped to an empty map; absence
+  here is `:not_covered`, the same as it is in `coverage/1`.
 
   Not a replacement for `coverage/1`: a caller asking "is anything at all arriving for
   this symbol" still gets a straight answer from that. Not a per-channel report: this
-  venue's one WebSocket stream must never leak across this facade, by kind or otherwise.
+  venue's WebSocket connection must never leak across this facade, by kind, by channel,
+  or otherwise.
 
   See `c:DpExchange.Core.Venue.coverage_by_kind/1` for the invariant Core's conformance
   suite checks whenever a venue exports this callback.

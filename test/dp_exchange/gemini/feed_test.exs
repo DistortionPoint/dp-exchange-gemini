@@ -363,7 +363,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, {:dp_exchange, :gemini, Notice.new(:link_down, :gemini)})
       assert Feed.coverage(feed) == %{}
-      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}}
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}, trades: %{}}
 
       # `wanted` is untouched: the host still asked for it, and the next frame after the
       # resubscribe puts it straight back. Only the evidence was scoped to the dead link.
@@ -373,14 +373,17 @@ defmodule DpExchange.Gemini.FeedTest do
   end
 
   describe "coverage_by_kind/1" do
-    test "with nothing delivered, both declared kinds are present and empty" do
-      # Both kind keys always appear, even with no data yet — an absent key would read
+    test "with nothing delivered, every declared kind is present and empty" do
+      # Every kind key always appears, even with no data yet — an absent key would read
       # as "this module does not know about that kind", where an empty map honestly
-      # reads as "nothing of that kind has arrived".
+      # reads as "nothing of that kind has arrived". `:trades` appears here too even
+      # though this feed was started without `:trades` in `:channels` — see the
+      # moduledoc's "empty_delivery/0" comment: the keys match
+      # `capabilities().streamable`, not what this instance happens to be configured for.
       feed = start_feed()
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
 
-      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}}
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}, trades: %{}}
     end
 
     test "a symbol delivering only a top-of-book update appears under :top_of_book and " <>
@@ -398,7 +401,7 @@ defmodule DpExchange.Gemini.FeedTest do
       _settled = Feed.coverage(feed)
 
       by_kind = Feed.coverage_by_kind(feed)
-      assert by_kind == %{quotes: %{}, top_of_book: %{"BTC-USD" => :stream}}
+      assert by_kind == %{quotes: %{}, top_of_book: %{"BTC-USD" => :stream}, trades: %{}}
     end
 
     test "a symbol delivering both kinds appears under both" do
@@ -411,7 +414,8 @@ defmodule DpExchange.Gemini.FeedTest do
 
       assert Feed.coverage_by_kind(feed) == %{
                quotes: %{"BTC-USD" => :stream},
-               top_of_book: %{"BTC-USD" => :stream}
+               top_of_book: %{"BTC-USD" => :stream},
+               trades: %{}
              }
     end
 
@@ -450,7 +454,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       :ok = Feed.unsubscribe(feed, ["BTC-USD"])
 
-      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}}
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}, trades: %{}}
     end
 
     test "update_symbols/2 narrows every kind's bucket to the new set" do
@@ -464,7 +468,8 @@ defmodule DpExchange.Gemini.FeedTest do
 
       assert Feed.coverage_by_kind(feed) == %{
                quotes: %{},
-               top_of_book: %{"BTC-USD" => :stream}
+               top_of_book: %{"BTC-USD" => :stream},
+               trades: %{}
              }
     end
   end
@@ -930,6 +935,197 @@ defmodule DpExchange.Gemini.FeedTest do
       # Proves the call actually queued behind the block rather than being answered before
       # it started — without which this would pass on the unfixed code too.
       assert waited > 5_000
+    end
+  end
+
+  describe "channels: — opting into the trade tape (dp-exchange-core issue #39)" do
+    alias DpExchange.Core.Types.Trade
+
+    defp trade_for(symbol) do
+      %Trade{
+        id: "123",
+        symbol: symbol,
+        side: :sell,
+        price: Decimal.new("77845.79"),
+        quantity: Decimal.new("0.01"),
+        timestamp: ~U[2026-08-28 12:00:00Z],
+        provider: :gemini
+      }
+    end
+
+    test "the default carries no :trades — an existing consumer sees no change at all" do
+      feed = start_feed()
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
+      refute_receive {:frame_sent, _second_frame}, 100
+    end
+
+    test "an explicit channels: [:quotes, :top_of_book] is identical to the default" do
+      feed = start_feed(channels: [:quotes, :top_of_book])
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
+      refute_receive {:frame_sent, _second_frame}, 100
+    end
+
+    test ":trades in channels: subscribes @trade alongside @bookTicker, for every wanted " <>
+           "symbol" do
+      feed = start_feed(channels: [:quotes, :top_of_book, :trades])
+
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], to: self())
+
+      assert_receive {:frame_sent,
+                      %{
+                        "method" => "subscribe",
+                        "params" => ["btcusd@bookTicker", "ethusd@bookTicker"]
+                      }}
+
+      assert_receive {:frame_sent,
+                      %{
+                        "method" => "subscribe",
+                        "params" => ["btcusd@trade", "ethusd@trade"]
+                      }}
+    end
+
+    test "unsubscribe drops both channels when :trades is active" do
+      feed = start_feed(channels: [:quotes, :top_of_book, :trades])
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"params" => ["btcusd@trade"]}}
+
+      :ok = Feed.unsubscribe(feed, ["BTC-USD"])
+
+      assert_receive {:frame_sent,
+                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
+
+      assert_receive {:frame_sent, %{"method" => "unsubscribe", "params" => ["btcusd@trade"]}}
+    end
+
+    test "update_symbols/2 adds and drops @trade the same way it does @bookTicker" do
+      feed = start_feed(channels: [:quotes, :top_of_book, :trades])
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"params" => ["btcusd@trade"]}}
+
+      :ok = Feed.update_symbols(feed, ["ETH-USD"])
+
+      assert_receive {:frame_sent,
+                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
+
+      assert_receive {:frame_sent, %{"method" => "unsubscribe", "params" => ["btcusd@trade"]}}
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["ethusd@bookTicker"]}}
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["ethusd@trade"]}}
+    end
+
+    test "the periodic resubscribe re-issues @trade too, unprompted" do
+      feed = start_feed(channels: [:quotes, :top_of_book, :trades])
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"params" => ["btcusd@trade"]}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@trade"]}}
+    end
+
+    test "a reconnect resubscribes @trade at once, same as @bookTicker" do
+      feed = start_feed(channels: [:quotes, :top_of_book, :trades])
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"params" => ["btcusd@trade"]}}
+
+      socket = :sys.get_state(feed).socket
+      send(feed, {:dp_exchange, :gemini, :reconnected, socket})
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@trade"]}}
+    end
+
+    test "a Trade reaches the subscriber like any other event" do
+      feed = start_feed(channels: [:trades])
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      send(feed, {:dp_exchange, :gemini, trade_for("BTC-USD")})
+
+      assert_receive {:dp_exchange, :gemini, %Trade{symbol: "BTC-USD", side: :sell}}
+    end
+
+    test "a delivered Trade is tracked under :trades, never under :quotes or :top_of_book" do
+      feed = start_feed(channels: [:trades])
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      send(feed, {:dp_exchange, :gemini, trade_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert Feed.coverage_by_kind(feed) == %{
+               quotes: %{},
+               top_of_book: %{},
+               trades: %{"BTC-USD" => :stream}
+             }
+
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+    end
+
+    test "a socket crash resets :trades coverage the same way it resets the others" do
+      # `fake_socket/1` is injected via `socket:` and is not itself linked to `feed` —
+      # see the "a crashed socket is isolated, not fatal" describe block's own
+      # `link_socket_into_feed/2`, reused here for the same reason. `url:` points the
+      # replacement dial `isolate_crashed_socket/2` attempts at a local address that
+      # refuses fast, matching that describe block's own reconnect test — without it
+      # this would try a real network connect.
+      feed =
+        start_feed(channels: [:quotes, :top_of_book, :trades], url: "ws://127.0.0.1:1/nowhere")
+
+      socket = :sys.get_state(feed).socket
+      Process.unlink(socket)
+      link_socket_into_feed(feed, socket)
+
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      send(feed, {:dp_exchange, :gemini, trade_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+      assert Feed.coverage_by_kind(feed).trades == %{"BTC-USD" => :stream}
+
+      Process.exit(socket, :kill)
+      # Synchronise on the feed having processed the linked EXIT.
+      _settled = Feed.coverage(feed)
+
+      assert Feed.coverage_by_kind(feed).trades == %{}
+    end
+
+    test "an unknown kind in :channels raises at start_link, loudly, rather than starting " <>
+           "a feed that silently never carries it" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(
+                 name: :"bad_channels_#{System.unique_integer([:positive])}",
+                 socket: fake_socket(self()),
+                 channels: [:quotes, :depth]
+               )
+
+      assert message =~ ":channels"
+      assert message =~ ":depth"
+    end
+
+    test "an empty :channels list raises at start_link" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(
+                 name: :"empty_channels_#{System.unique_integer([:positive])}",
+                 socket: fake_socket(self()),
+                 channels: []
+               )
+
+      assert message =~ ":channels"
     end
   end
 end

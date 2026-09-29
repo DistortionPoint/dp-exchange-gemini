@@ -153,8 +153,9 @@ error rather than connecting unverified. Pass your own `:ssl_options` to overrid
 The one socket this venue uses is a **linked** child of `Feed` — not a supervised
 sibling you can restart independently. As of this version `Feed` traps exits, so the
 socket dying abnormally no longer takes `Feed` down with it: `coverage/1` and
-`coverage_by_kind/1` clear (this venue has one socket carrying both streamable kinds, so
-a crash costs both, not a partial set), you get a `:link_down` `Core.Notice`, and this
+`coverage_by_kind/1` clear (this venue has one socket carrying every kind you configured
+via `:channels` — see below — so a crash costs all of them at once, not a partial set),
+you get a `:link_down` `Core.Notice`, and this
 package reconnects and resends your `wanted` symbols on its own, immediately, without
 you calling `subscribe/3` again.
 
@@ -167,6 +168,46 @@ reads empty until you call `subscribe/3` again. Nothing inside this package can 
 those calls — it never held onto the functions or the process that made them. If your
 consumer needs to survive a `Feed` restart unattended, monitor the `Feed` pid (or the
 `DpExchange.Gemini` pid it sits under) yourself and re-issue `subscribe/3` on `:DOWN`.
+
+## `channels: [:quotes, :top_of_book, :trades]` — opt into the trade tape
+
+`DpExchange.Gemini.Supervisor.start_link/1` — so `{DpExchange.Gemini, opts}` in your own
+supervision tree, since its `opts` pass straight through to `Feed` — takes `:channels`, a
+non-empty list drawn from `capabilities().streamable`. The default — what you get if you
+never pass it — is `[:quotes, :top_of_book]`: exactly this package's behaviour before
+`:trades` existed, so an existing consumer that says nothing sees no change at all.
+
+**`:quotes` is the last-trade PRICE CHANGING, not every trade.** It comes off the same
+`@bookTicker` frame as `:top_of_book`, and since 0.2.85 it is sent only when that price
+actually moves — a run of prints at an unchanged price produces one `Quote`, not one per
+print. That is correct for what it is, and it is also why a thin pair can go quiet for
+minutes even while it is trading (dp-exchange-core issue #39).
+
+**`:trades` is the real tape — every executed print**, delivered as
+`Core.Types.Trade`, from Gemini's own `{symbol}@trade` channel. Add it and this package
+also subscribes `@trade` for every symbol you subscribe, alongside `@bookTicker`, kept
+current through every path that already keeps `@bookTicker` current — `subscribe/2`,
+`unsubscribe/2`, `update_symbols/2`, the periodic resubscribe, and a reconnect.
+**`:channels` is a supervision-tree option, not a `subscribe/2` option** — it configures
+the one connection this venue's `Feed` holds, so it is passed where you start the tree:
+
+```elixir
+children = [
+  {DpExchange.Gemini, channels: [:quotes, :top_of_book, :trades]}
+]
+
+:ok = DpExchange.Gemini.subscribe(["BTC-USD"], to: self())
+```
+
+An unrecognised kind in `:channels` — anything outside `[:quotes, :top_of_book,
+:trades]` — raises `ArgumentError` at start, not a feed that silently never carries what
+you asked for. An empty list raises too.
+
+`coverage_by_kind/1`'s keys always include `:trades`, even for a feed started without it
+in `:channels` — absence there reads as `:not_covered`, not "this feed doesn't know the
+kind". No per-connection stream limit is documented for `wss://ws.gemini.com`; adding
+`:trades` doubles the streams this one socket carries per symbol, not the number of
+sockets — this package still shards nothing.
 
 ## Seven candle widths, and the venue's own documentation names three of them wrong
 
