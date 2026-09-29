@@ -707,4 +707,21 @@ defmodule DpExchange.Gemini.FakeTest do
       assert Map.has_key?(DpExchange.Gemini.Fake.coverage(opts), "BTC-USD")
     end
   end
+
+  describe "a master-scoped key must name the account (dp-exchange-core issue #38)" do
+    @master Map.put(@credentials, :key_scope, :master)
+
+    test "an account-level call without :account is refused as the venue refuses it" do
+      assert {:refused, {:unknown_reason, "MissingAccounts"}} = Fake.get_balances(@master)
+      assert {:ok, _balances} = Fake.get_balances(@master, account: "primary")
+    end
+
+    test "group-level calls need no account" do
+      assert {:ok, _roles} = Fake.get_roles(credentials: @master)
+    end
+
+    test "an account-scoped key is unaffected" do
+      assert {:ok, _balances} = Fake.get_balances(@credentials)
+    end
+  end
 end

@@ -560,6 +560,13 @@ defmodule DpExchange.Gemini.Fake do
   # 2026-09-06 real/fake parity sweep — every one of `auth_test.exs`'s cases now has a
   # pinned equivalent against this fake in `fake_parity_test.exs`.
   defp authenticated(credentials, opts) do
+    with :ok <- authenticated_group(credentials, opts),
+         do: account_named(credentials, opts)
+  end
+
+  # For the calls that act on the key or the whole group (`create_account/1`, `get_roles/1`),
+  # which a master key makes without naming an account; see `Private`'s `@group_level_paths`.
+  defp authenticated_group(credentials, opts) do
     if FakeInjection.credentials_bypassed?(:gemini) do
       :ok
     else
@@ -567,6 +574,21 @@ defmodule DpExchange.Gemini.Fake do
       authenticated_venue_faithful(scheme, credentials)
     end
   end
+
+  # dp-exchange-core issue #38. A master-scoped key must name the subaccount on every
+  # account-level call, and the venue answers `MissingAccounts` when it does not. A fake
+  # credential declares itself master-scoped with `key_scope: :master` (the real package
+  # ignores the field; the venue documents no way to read a key's scope from the key), and
+  # then an account-level call without `opts[:account]` is refused with the exact shape the
+  # real path returns, so a consumer's test catches the omission before production does.
+  defp account_named(%{key_scope: :master}, opts) do
+    case Keyword.get(opts, :account) do
+      account when is_binary(account) and account != "" -> :ok
+      _absent -> {:refused, {:unknown_reason, "MissingAccounts"}}
+    end
+  end
+
+  defp account_named(_credentials, _opts), do: :ok
 
   # The same auto-detection `Private`'s private `auth_scheme/2` runs when the caller
   # named no scheme explicitly. Both fields present is the venue's own
@@ -1459,7 +1481,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       case Keyword.get(opts, :name) do
         name when is_binary(name) ->
-          with :ok <- authenticated(fake_credentials(opts), opts) do
+          with :ok <- authenticated_group(fake_credentials(opts), opts) do
             # The venue answers with a kebab-cased shortname, not the name that was sent —
             # a fake that echoed the name would let a consumer address the wrong thing.
             {:ok,
@@ -1488,7 +1510,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_roles(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts), opts) do
+      with :ok <- authenticated_group(fake_credentials(opts), opts) do
         # Trader and Fund Manager combined, and Auditor false — the combination the venue
         # allows. One role field would not be able to say this.
         {:ok, %{"isAuditor" => false, "isFundManager" => true, "isTrader" => true}}

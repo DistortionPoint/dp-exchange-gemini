@@ -1868,4 +1868,48 @@ defmodule DpExchange.Gemini.PrivateTest do
       end
     end
   end
+
+  describe "opts[:account] reaches every account-level payload (dp-exchange-core issue #38)" do
+    # A master-scoped key must name the subaccount on each account-level call, and without it
+    # the venue answers `MissingAccounts`. Only `place_order/3` read the option.
+    test "balances, trades, orders and staking carry the account when given" do
+      calls = [
+        fn opts -> Private.get_balances(@credentials, opts) end,
+        fn opts -> Private.get_trade_history(@credentials, opts) end,
+        fn opts -> Private.get_orders(@credentials, opts) end,
+        fn opts -> Private.get_staking_balances(@credentials, opts) end
+      ]
+
+      for call <- calls do
+        call.(plug: capturing([], self()), retry_attempts: 0, account: "primary")
+        assert_receive {:payload, %{"account" => "primary"}}
+      end
+    end
+
+    test "absent option, absent field: an account-scoped key is unaffected" do
+      Private.get_balances(@credentials, plug: capturing([], self()), retry_attempts: 0)
+      assert_receive {:payload, payload}
+      refute Map.has_key?(payload, "account")
+    end
+
+    test "the calls that act on the key or the group never get it" do
+      Private.get_roles(@credentials,
+        plug: capturing(%{}, self()),
+        retry_attempts: 0,
+        account: "primary"
+      )
+
+      assert_receive {:payload, payload}
+      refute Map.has_key?(payload, "account")
+
+      Private.list_accounts(@credentials,
+        plug: capturing([], self()),
+        retry_attempts: 0,
+        account: "primary"
+      )
+
+      assert_receive {:payload, payload}
+      refute Map.has_key?(payload, "account")
+    end
+  end
 end

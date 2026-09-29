@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`opts[:account]` now reaches every account-level private call**, not only
+  `place_order/3` and `rename_account/2` (dp-exchange-core issue #38). A master-scoped API
+  key must name the subaccount on each account-level request, and without it the venue
+  answers `MissingAccounts`. On a master key, balances, trades, transfers, orders, staking
+  and the rest had no way to send it. It is added where every private request is signed, so a
+  later endpoint cannot miss it. An explicit `"account"` a function already sends wins, and
+  the group-level calls (`/v1/account/create`, `/v1/account/list`, `/v1/roles`) never get it.
+- `Fake`: a credential with `key_scope: :master` refuses an account-level call without
+  `account:` as `{:refused, {:unknown_reason, "MissingAccounts"}}`, the shape the real path
+  returns.
+
 ## [0.2.89] - 2026-09-29
 
 ### Added

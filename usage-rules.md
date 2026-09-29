@@ -460,6 +460,16 @@ new key. `request_approved_address/4` is retried too:
 the address is its own key. If one of the once-only calls times out, re-issue it
 deliberately rather than assuming it did not land — and check first.
 
+**A master-scoped API key names its subaccount with `account:` on every private call.** The
+venue requires the account name on account-level endpoints for a master key and answers
+`MissingAccounts` without it (dp-exchange-core issue #38). Pass `account: "primary"`, or the
+subaccount's name from `list_accounts/1`, and it is added to every account-level payload.
+Calls that act on the key or the group (`create_account/1`, `list_accounts/1`, `get_roles/1`)
+never carry it. An account-scoped key needs nothing. In tests, a `Fake` credential with
+`key_scope: :master` refuses an account-level call without `account:` exactly as the venue
+does.
+
+
 **An incremental key whose mark is above epoch milliseconds: use `nonce_mode:
 :incremental_us`.** Both older nonce modes emit numbers below such a mark — `:time_based`
 seconds, `:incremental` milliseconds — so every request comes back `InvalidNonce` and

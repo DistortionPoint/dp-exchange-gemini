@@ -504,8 +504,33 @@ defmodule DpExchange.Gemini.Private do
   # with the key. Passing a function makes the client sign each attempt afresh. A write
   # that must not take effect twice is still sent once (`post_once/4`), so a fresh nonce
   # never repeats a transfer or an order.
-  defp signer(scheme, path, params, credentials, opts),
-    do: fn -> Auth.headers(scheme, path, params, credentials, opts) end
+  defp signer(scheme, path, params, credentials, opts) do
+    params = with_account(params, path, opts)
+    fn -> Auth.headers(scheme, path, params, credentials, opts) end
+  end
+
+  # **`opts[:account]` reaches every account-level payload, here, once.** A master-scoped API
+  # key must name the subaccount on each account-level call ("Required for Master API keys",
+  # rest.yaml, e.g. `/v1/account`'s `account` property), and without it the venue answers
+  # `MissingAccounts`. Only `place_order/3` and `rename_account/2` read the option, so on a
+  # master key every other private call (balances, trades, transfers, orders, staking) was
+  # refused with no way to name the account (dp-exchange-core issue #38). Added in the one
+  # place every private request is signed, so an endpoint added later cannot miss it.
+  #
+  # An explicit `"account"` a function put in its own params wins. The three endpoints that
+  # act on the key or the group rather than on one account (`@group_level_paths`) never get
+  # it. Absent option, absent field: an account-scoped key is unaffected.
+  @group_level_paths ["/v1/account/create", "/v1/account/list", "/v1/roles"]
+
+  defp with_account(params, path, opts) do
+    case Keyword.get(opts, :account) do
+      account when is_binary(account) and account != "" ->
+        if path in @group_level_paths, do: params, else: Map.put_new(params, "account", account)
+
+      _absent ->
+        params
+    end
+  end
 
   defp auth_scheme(credentials, opts) do
     Keyword.get_lazy(opts, :auth_scheme, fn ->
