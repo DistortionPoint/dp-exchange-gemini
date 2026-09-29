@@ -20,6 +20,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- `nonce_mode: :incremental_us` for an incremental API key whose stored mark is above epoch
+  milliseconds, which neither `:time_based` nor `:incremental` can reach (dp-exchange-core
+  issue #34). It sends `max(now_us, previous + 1)` from its own node-wide counter: above
+  any millisecond-scale mark, re-anchored on every boot, so a host needs no seed and nothing
+  persisted. It is a separate mode because moving a key onto it is one-way: once the venue
+  accepts a microsecond nonce, a millisecond client of that key is locked out.
+- Under `:incremental_us`, a venue "has not increased" refusal is
+  `{:refused, {:nonce_mark_out_of_reach, message}}` instead of `{:invalid_nonce, message}`.
+  This package cannot send a larger nonce, so the key must be rotated by a person; the
+  distinct shape lets a host stop retrying and alert. Other modes keep the existing shape.
+
+### Fixed
+
+- An unrecognised `:nonce_mode` is refused with `{:error, {:unsupported_nonce_mode, mode}}`
+  before anything is signed. It raised `FunctionClauseError` in the caller's process.
+
 ## [0.2.86] - 2026-09-29
 
 ### Fixed

@@ -460,15 +460,27 @@ new key. `request_approved_address/4` is retried too:
 the address is its own key. If one of the once-only calls times out, re-issue it
 deliberately rather than assuming it did not land — and check first.
 
-**An incremental key whose mark is above epoch milliseconds is stuck, and `seed_nonce/1` is
-the way out.** Both nonce modes emit numbers below such a mark — `:time_based` seconds,
-`:incremental` milliseconds — so every request comes back `InvalidNonce` and switching modes
-does not help. The venue's own sentence tells you which case you are in: "has not increased
-since your last call" is the incremental validator, and a bad key or signature would answer
-`InvalidApiKey` / `InvalidSignature` instead. Call `DpExchange.Gemini.seed_nonce/1` once with
-a value above the mark; the sequence then advances by one per call as normal. It refuses to
-lower the counter, and a mark beyond `2^64 - 1` cannot be reached at all — that key must be
-rotated.
+**An incremental key whose mark is above epoch milliseconds: use `nonce_mode:
+:incremental_us`.** Both older nonce modes emit numbers below such a mark — `:time_based`
+seconds, `:incremental` milliseconds — so every request comes back `InvalidNonce` and
+switching between those two does not help. The venue's own sentence tells you which case you
+are in: "has not increased since your last call" is the incremental validator, and a bad key
+or signature would answer `InvalidApiKey` / `InvalidSignature` instead.
+
+`:incremental_us` sends `max(now_us, previous + 1)`: microseconds, above any
+millisecond-scale mark, re-anchored on every boot, so nothing has to be persisted or seeded
+by you. It is a separate mode rather than a change to `:incremental` because moving a key
+onto it is one-way: once the venue accepts a microsecond nonce, anything still counting in
+milliseconds against that key is locked out. Choose it per key.
+
+If the venue still answers "has not increased" to `:incremental_us`, the key's mark is above
+anything this package will ever send, and the call refuses with
+`{:nonce_mark_out_of_reach, message}` rather than `{:invalid_nonce, message}`. **That key must
+be rotated**; stop retrying and have a person do it.
+
+`seed_nonce/1` remains for the millisecond counter: call it once with a value above the mark
+and the sequence advances by one per call from there. It refuses to lower the counter, a mark
+beyond `2^64 - 1` cannot be reached at all, and a seed does not survive a restart.
 
 **Fee promotions moved off the public path.** `GET /v1/feepromos`, which
 `Rest.list_fee_promos/1` calls, is no longer in the vendor's specification as of 2026-09-21;

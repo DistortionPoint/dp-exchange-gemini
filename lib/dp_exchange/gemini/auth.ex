@@ -61,7 +61,9 @@ defmodule DpExchange.Gemini.Auth do
   requirement), a strictly increasing value for incremental. **No single value satisfies
   both**, and the venue exposes no way to ask how a key was made.
 
-  It is the host's key, so it is the host's answer: `nonce_mode: :time_based | :incremental`.
+  It is the host's key, so it is the host's answer: `nonce_mode: :time_based | :incremental |
+  :incremental_us` (the last for a key whose mark a millisecond counter cannot reach; see
+  below).
   The default is `:time_based`, matching the venue's own recommendation, and a mismatch
   fails loudly with `InvalidNonce` on the first request rather than producing a wrong
   result.
@@ -119,9 +121,42 @@ defmodule DpExchange.Gemini.Auth do
   and `seed_nonce/1` says so with `{:error, :above_counter_range}` rather than raising or
   truncating. **That key must be rotated, which is a human action**, and no option here
   changes it.
+
+  ## An incremental key the millisecond counter cannot reach: `:incremental_us`
+
+  `seed_nonce/1` works, and it asks a host to own nonce arithmetic: pick a value, learn a
+  mark the venue never reports, and seed again after every restart, because the counter
+  re-anchors to the wall clock on boot and the key breaks again with it. dp-exchange-core
+  issue #34 is a production key failing on every call for weeks for exactly that reason, and
+  a host that rightly declined to take nonce generation over from the package built to own it.
+
+  `nonce_mode: :incremental_us` is the answer that needs nothing from the host but the mode.
+  It is `max(now_us, previous + 1)`, the same wall-clock-anchored shape as `:incremental`,
+  one unit finer, so:
+
+    * it is above any mark a millisecond-scale sequence left behind (~`1.79e15` against
+      ~`1.79e12`), which is the key #34 describes;
+    * it survives a restart with nothing persisted: it re-anchors to `now_us`, which is
+      already past every value sent before, unless this node signed more than one request per
+      microsecond for a sustained stretch;
+    * it still cannot run a key's space away. It advances with the clock, not by a scale
+      factor, and stays inside 64 bits for about 580,000 years.
+
+  It is a third mode rather than a change to `:incremental`, because moving an existing
+  millisecond key onto it is itself a one-way door: the first microsecond nonce the venue
+  accepts becomes the key's mark, and any other client of that key still counting in
+  milliseconds is locked out from then on. That is the host's call to make per key, so it is
+  the host's option. It has its own counter for the same reason.
+
+  **When even this cannot reach the mark**, a private call refuses with
+  `{:nonce_mark_out_of_reach, message}` instead of the generic `{:invalid_nonce, message}`:
+  the venue said "has not increased" to a nonce this package cannot raise further, so the key
+  must be rotated, which is a human action. The distinct shape is what lets a host stop
+  retrying and page someone.
   """
 
   @nonce_counter {__MODULE__, :nonce_counter}
+  @nonce_counter_us {__MODULE__, :nonce_counter_us}
 
   # The counter is `:atomics.new(1, signed: false)` — one 64-bit unsigned cell. A seed above
   # this cannot be stored at all, and `:atomics.put/3` raises rather than saturating, so
@@ -141,7 +176,9 @@ defmodule DpExchange.Gemini.Auth do
   @type scheme :: :api_key | :oauth
 
   @typedoc "Which validation mode the host's API key was provisioned with."
-  @type nonce_mode :: :time_based | :incremental
+  @type nonce_mode :: :time_based | :incremental | :incremental_us
+
+  @nonce_modes [:time_based, :incremental, :incremental_us]
 
   @doc """
   Headers for a private request, for the scheme the host named.
@@ -152,7 +189,8 @@ defmodule DpExchange.Gemini.Auth do
 
   ## Options
 
-    * `:nonce_mode` — `:time_based` (default) or `:incremental`. `:api_key` only.
+    * `:nonce_mode` — `:time_based` (default), `:incremental` or `:incremental_us`. `:api_key`
+      only. See the moduledoc's "An incremental key the millisecond counter cannot reach".
 
   Returns `{:error, {:unsupported_auth_scheme, scheme}}` when `scheme` names something
   this module does not implement — a caller-supplied `:auth_scheme` this venue has no
@@ -182,24 +220,20 @@ defmodule DpExchange.Gemini.Auth do
 
   def headers(:api_key, path, params, %{api_key: key, api_secret: secret}, opts)
       when is_binary(path) and is_map(params) and is_binary(key) and is_binary(secret) do
-    if blank?(key) or blank?(secret) do
-      {:error, {:missing_credentials, :api_key}}
-    else
-      payload =
-        params
-        |> Map.merge(%{"request" => path, "nonce" => nonce(Keyword.get(opts, :nonce_mode))})
-        |> Jason.encode!()
-        |> Base.encode64()
+    mode = Keyword.get(opts, :nonce_mode)
 
-      {:ok,
-       [
-         {"Content-Length", "0"},
-         {"Content-Type", "text/plain"},
-         {"Cache-Control", "no-cache"},
-         {"X-GEMINI-APIKEY", key},
-         {"X-GEMINI-PAYLOAD", payload},
-         {"X-GEMINI-SIGNATURE", sign(payload, secret)}
-       ]}
+    cond do
+      blank?(key) or blank?(secret) ->
+        {:error, {:missing_credentials, :api_key}}
+
+      # An unrecognised mode — a typo, or `:incremental_ms` for `:incremental` — reached
+      # `nonce/1`, which has no clause for it, and raised in the caller's process. It is
+      # refused by name before anything is signed.
+      mode not in [nil | @nonce_modes] ->
+        {:error, {:unsupported_nonce_mode, mode}}
+
+      true ->
+        signed_headers(path, params, key, secret, mode)
     end
   end
 
@@ -227,6 +261,24 @@ defmodule DpExchange.Gemini.Auth do
     {:error, {:unsupported_auth_scheme, scheme}}
   end
 
+  defp signed_headers(path, params, key, secret, mode) do
+    payload =
+      params
+      |> Map.merge(%{"request" => path, "nonce" => nonce(mode)})
+      |> Jason.encode!()
+      |> Base.encode64()
+
+    {:ok,
+     [
+       {"Content-Length", "0"},
+       {"Content-Type", "text/plain"},
+       {"Cache-Control", "no-cache"},
+       {"X-GEMINI-APIKEY", key},
+       {"X-GEMINI-PAYLOAD", payload},
+       {"X-GEMINI-SIGNATURE", sign(payload, secret)}
+     ]}
+  end
+
   @doc """
   A nonce for the given validation mode.
 
@@ -238,20 +290,29 @@ defmodule DpExchange.Gemini.Auth do
   @spec nonce(nonce_mode() | nil) :: pos_integer()
   def nonce(mode \\ :time_based)
 
-  def nonce(:incremental) do
-    counter = ensure_counter()
-    now = System.system_time(:millisecond)
+  def nonce(:incremental), do: next_nonce(@nonce_counter, :millisecond)
+
+  # See the moduledoc's "An incremental key the millisecond counter cannot reach". Its own
+  # counter, so a node signing for both kinds of key never lifts a millisecond key's mark to
+  # microsecond magnitude by sharing a sequence with one.
+  def nonce(:incremental_us), do: next_nonce(@nonce_counter_us, :microsecond)
+
+  def nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
+
+  # `max(now, previous + 1)`: anchored to the wall clock, ahead of it by one only when calls
+  # land inside the same unit. The compare-and-exchange makes it monotonic node-wide.
+  defp next_nonce(key, unit) do
+    counter = ensure_counter(key)
+    now = System.system_time(unit)
 
     previous = :atomics.get(counter, 1)
     next = max(now, previous + 1)
 
     case :atomics.compare_exchange(counter, 1, previous, next) do
       :ok -> next
-      _lost_the_race -> nonce(:incremental)
+      _lost_the_race -> next_nonce(key, unit)
     end
   end
-
-  def nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
 
   @doc """
   Establishes the shared nonce counter. Called once by this venue's supervisor, and
@@ -295,13 +356,18 @@ defmodule DpExchange.Gemini.Auth do
   """
   @spec ensure_counter() :: :atomics.atomics_ref()
   def ensure_counter do
-    case :persistent_term.get(@nonce_counter, nil) do
-      nil -> create_counter()
+    ensure_counter(@nonce_counter_us)
+    ensure_counter(@nonce_counter)
+  end
+
+  defp ensure_counter(key) do
+    case :persistent_term.get(key, nil) do
+      nil -> create_counter(key)
       ref -> ref
     end
   end
 
-  defp create_counter do
+  defp create_counter(key) do
     # Re-checked INSIDE the lock: every caller that queued behind the winner arrives here
     # with its own `nil` reading from before the lock, and creating a second ref at this
     # point is the original bug with extra steps.
@@ -314,12 +380,12 @@ defmodule DpExchange.Gemini.Auth do
     # restricted to this node because the counter is per-node. Every other caller gives up
     # at once and polls the key, which the winner fills within one `put`.
     case :global.trans(
-           {@nonce_counter, self()},
+           {key, self()},
            fn ->
-             case :persistent_term.get(@nonce_counter, nil) do
+             case :persistent_term.get(key, nil) do
                nil ->
                  ref = :atomics.new(1, signed: false)
-                 :persistent_term.put(@nonce_counter, ref)
+                 :persistent_term.put(key, ref)
                  ref
 
                ref ->
@@ -330,7 +396,7 @@ defmodule DpExchange.Gemini.Auth do
            0
          ) do
       :aborted ->
-        await_counter(0)
+        await_counter(key, 0)
 
       ref ->
         ref
@@ -343,14 +409,14 @@ defmodule DpExchange.Gemini.Auth do
   # caller tries to create the counter itself.
   @counter_wait_ms 5_000
 
-  defp await_counter(waited) do
-    case :persistent_term.get(@nonce_counter, nil) do
+  defp await_counter(key, waited) do
+    case :persistent_term.get(key, nil) do
       nil when waited < @counter_wait_ms ->
         Process.sleep(1)
-        await_counter(waited + 1)
+        await_counter(key, waited + 1)
 
       nil ->
-        create_counter()
+        create_counter(key)
 
       ref ->
         ref
@@ -407,15 +473,11 @@ defmodule DpExchange.Gemini.Auth do
     if value > @max_counter_value do
       {:error, :above_counter_range}
     else
-      value |> ensure_counter() |> raise_counter(value)
+      @nonce_counter |> ensure_counter() |> raise_counter(value)
     end
   end
 
   def seed_nonce(_not_a_positive_integer), do: {:error, :invalid_seed}
-
-  # `ensure_counter/0` takes no argument; this is the pipe's discard so the counter is
-  # established exactly the way every other caller establishes it.
-  defp ensure_counter(_value), do: ensure_counter()
 
   # The same compare-and-exchange loop `nonce(:incremental)` uses, for the same reason: two
   # processes may be doing this at once, and the loser must re-read rather than overwrite.

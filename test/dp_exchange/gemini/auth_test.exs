@@ -176,6 +176,44 @@ defmodule DpExchange.Gemini.AuthTest do
     end
   end
 
+  describe "nonce(:incremental_us) — a key whose mark a millisecond counter cannot reach" do
+    # dp-exchange-core issue #34: a production incremental key whose stored mark sits above
+    # epoch milliseconds, which neither older mode can reach, and which `seed_nonce/1` only
+    # reaches until the next restart.
+    test "is microseconds, above any millisecond-scale mark" do
+      nonce = Auth.nonce(:incremental_us)
+      assert nonce > System.system_time(:millisecond) * 100
+      assert abs(nonce - System.system_time(:microsecond)) < 60_000_000
+    end
+
+    test "is strictly increasing across processes" do
+      task = Task.async(fn -> for _index <- 1..300, do: Auth.nonce(:incremental_us) end)
+      mine = for _index <- 1..300, do: Auth.nonce(:incremental_us)
+      theirs = Task.await(task)
+
+      assert length(Enum.uniq(mine ++ theirs)) == 600
+      assert mine == Enum.sort(mine)
+      assert theirs == Enum.sort(theirs)
+    end
+
+    test "has its own counter: it never lifts the millisecond sequence to its magnitude" do
+      for _index <- 1..50, do: Auth.nonce(:incremental_us)
+      assert Auth.nonce(:incremental) < System.system_time(:millisecond) + 60_000
+    end
+
+    test "reaches the signed payload" do
+      assert {:ok, headers} =
+               Auth.headers(:api_key, "/v1/balances", %{}, @api_key, nonce_mode: :incremental_us)
+
+      assert nonce_from(headers) > System.system_time(:millisecond) * 100
+    end
+
+    test "an unrecognised mode is refused by name, not raised on" do
+      assert {:error, {:unsupported_nonce_mode, :incremental_ms}} =
+               Auth.headers(:api_key, "/v1/balances", %{}, @api_key, nonce_mode: :incremental_ms)
+    end
+  end
+
   defp nonce_from(headers) do
     headers
     |> header("X-GEMINI-PAYLOAD")

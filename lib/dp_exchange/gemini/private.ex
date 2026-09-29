@@ -482,7 +482,7 @@ defmodule DpExchange.Gemini.Private do
       # Permanent for the request as sent. A caller refreshes a token and calls again —
       # that is a different request, not a retry of this one.
       {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-        {:refused, refusal(body)}
+        {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
         {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
@@ -557,7 +557,7 @@ defmodule DpExchange.Gemini.Private do
         with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
       {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-        {:refused, refusal(body)}
+        {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
         {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
@@ -586,7 +586,7 @@ defmodule DpExchange.Gemini.Private do
         {:ok, body}
 
       {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-        {:refused, refusal(body)}
+        {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
         {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
@@ -3641,7 +3641,23 @@ defmodule DpExchange.Gemini.Private do
   # `Rest.refusal_reason/1`'s moduledoc. That decoder's old fallback collapsed unparseable JSON
   # to `%{}`, which would discard a plain-text refusal body before `refusal_reason/1` gets
   # a chance to keep it; `refusal_reason/1` now decodes a raw body itself.
-  defp refusal(body), do: Rest.refusal_reason(body)
+  defp refusal(body, opts),
+    do: body |> Rest.refusal_reason() |> nonce_reach(Keyword.get(opts, :nonce_mode))
+
+  # dp-exchange-core issue #34. Under `nonce_mode: :incremental_us` this package is already
+  # sending the largest nonce it will ever send, so "has not increased" — the incremental
+  # validator's own sentence — can no longer mean "switch modes" or "wait". It means the key's
+  # mark is above anything reachable, and the only remedy is a person rotating the key. A
+  # distinct shape lets a host stop retrying every cycle and alert; the venue's sentence
+  # travels with it. Other modes keep `{:invalid_nonce, message}`, since there the same words
+  # still have a remedy this package can name (see `Auth`'s moduledoc).
+  defp nonce_reach({:invalid_nonce, message} = reason, :incremental_us) when is_binary(message) do
+    if message |> String.downcase() |> String.contains?("has not increased"),
+      do: {:nonce_mark_out_of_reach, message},
+      else: reason
+  end
+
+  defp nonce_reach(reason, _mode), do: reason
 
   # A 2xx body this package cannot decode is NOT an empty object. See
   # `DpExchange.Gemini.Rest.decoded_body/1` for the full note; the short version is that

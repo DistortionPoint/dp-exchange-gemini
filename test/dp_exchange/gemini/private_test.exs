@@ -1822,4 +1822,35 @@ defmodule DpExchange.Gemini.PrivateTest do
                )
     end
   end
+
+  describe "a key whose mark even :incremental_us cannot reach (dp-exchange-core issue #34)" do
+    @stuck %{
+      "result" => "error",
+      "reason" => "InvalidNonce",
+      "message" =>
+        "Nonce '1790688000000000' has not increased since your last call to the Gemini API."
+    }
+
+    test "is refused as :nonce_mark_out_of_reach, so a host can stop retrying and page" do
+      assert {:refused, {:nonce_mark_out_of_reach, message}} =
+               Private.get_balances(@credentials,
+                 plug: responding(@stuck, status: 400),
+                 retry_attempts: 0,
+                 nonce_mode: :incremental_us
+               )
+
+      assert message =~ "has not increased"
+    end
+
+    test "under the other modes the same words keep their existing shape" do
+      for mode <- [nil, :time_based, :incremental] do
+        assert {:refused, {:invalid_nonce, _message}} =
+                 Private.get_balances(@credentials,
+                   plug: responding(@stuck, status: 400),
+                   retry_attempts: 0,
+                   nonce_mode: mode
+                 )
+      end
+    end
+  end
 end

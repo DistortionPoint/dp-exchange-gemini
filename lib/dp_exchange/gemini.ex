@@ -101,7 +101,9 @@ defmodule DpExchange.Gemini do
   either time-based or incremental mode, and the two need differently-shaped nonces —
   seconds versus a strictly increasing value, with no single value satisfying both. The
   default is `:time_based`, the venue's own recommendation; pass
-  `nonce_mode: :incremental` if that is how your key was made. A mismatch fails loudly on
+  `nonce_mode: :incremental` if that is how your key was made, or `nonce_mode: :incremental_us`
+  for an incremental key whose stored mark is already above epoch milliseconds (see
+  `DpExchange.Gemini.Auth`). A mismatch fails loudly on
   the first request.
 
   ## Supervision
@@ -1270,6 +1272,10 @@ defmodule DpExchange.Gemini do
   @doc """
   Raises the incremental nonce counter to `value`, once — for a key whose stored mark is
   already out of reach.
+
+  **Try `nonce_mode: :incremental_us` first.** It reaches any millisecond-scale mark with no
+  seed, and keeps doing so across restarts, which a seed does not (dp-exchange-core issue #34).
+  This remains for a host that must stay on the millisecond counter.
 
   Venue-specific, and on the facade because `DpExchange.Gemini.Auth` is internal: a host has
   no other way in. See `DpExchange.Gemini.Auth.seed_nonce/1` for the full argument, and that
