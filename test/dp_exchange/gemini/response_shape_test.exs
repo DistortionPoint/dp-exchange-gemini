@@ -286,4 +286,64 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
       assert DateTime.compare(at, ~U[2026-08-28 17:01:01Z]) == :eq
     end
   end
+
+  describe "a reply whose list cannot be found is unreadable, not empty" do
+    # Each of these used to answer `{:ok, []}` for a wrapper holding a non-list, or a body
+    # that was not the shape at all: no positions, no payment methods, no approved
+    # addresses, no margin rates, nothing cancelled, no fee promotions. Each is a statement
+    # the venue did not make.
+    alias DpExchange.Gemini.{Private, Rest}
+
+    @unreadable [%{"openPositions" => "x"}, %{"openPositions" => %{}}]
+
+    test "get_positions/2" do
+      for body <- @unreadable do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_positions(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.get_positions(@credentials, base(%{"openPositions" => nil}))
+    end
+
+    test "list_payment_methods/2" do
+      for body <- [%{"methods" => "x"}, %{"methods" => %{}}] do
+        assert {:error, :unexpected_response_shape} =
+                 Private.list_payment_methods(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.list_payment_methods(@credentials, base(%{"methods" => nil}))
+    end
+
+    test "list_approved_addresses/2" do
+      for body <- [%{"approvedAddresses" => "x"}, %{}] do
+        assert {:error, :unexpected_response_shape} =
+                 Private.list_approved_addresses(
+                   @credentials,
+                   [network: "ethereum"] ++ base(body)
+                 )
+      end
+    end
+
+    test "get_margin_rates/2" do
+      for body <- [%{"rates" => "x"}, %{}] do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_margin_rates(@credentials, base(body))
+      end
+    end
+
+    test "cancel_all_orders/2" do
+      body = %{"result" => "ok", "details" => %{"cancelledOrders" => "x", "cancelRejects" => []}}
+
+      assert {:error, :unexpected_response_shape} =
+               Private.cancel_all_orders(@credentials, [scope: :account] ++ base(body))
+    end
+
+    test "list_fee_promos/1" do
+      for body <- [%{"symbols" => "x"}, %{"symbols" => 1}] do
+        assert {:error, :unexpected_response_shape} = Rest.list_fee_promos(base(body))
+      end
+
+      assert {:ok, []} = Rest.list_fee_promos(base(%{"symbols" => nil}))
+    end
+  end
 end

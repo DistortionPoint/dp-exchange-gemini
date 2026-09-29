@@ -20,6 +20,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A reply whose list cannot be found is now `{:error, :unexpected_response_shape}`, not an
+  empty list. `get_positions/2` answered `{:ok, []}`, "no positions", for a reply whose
+  `openPositions` was not a list, and `list_payment_methods/2`, `list_approved_addresses/2`,
+  `get_margin_rates/2`, `list_fee_promos/1` and `cancel_all_orders/2`'s id lists did the
+  same. A wrapper holding `null` is still empty.
+- `get_staking_rates/1` refuses a reply in which the body, a provider's entry or an asset's
+  row is not an object. Such a provider was skipped and such a row became a rate with every
+  number `nil`, so a caller chose among what could be read, believing it was everything.
+- A WebSocket depth snapshot whose `bids` or `asks` is missing or not a list is no longer
+  delivered as a book with an empty side. `WsDecode.to_order_book/3` now returns
+  `{:error, :unexpected_response_shape}` for it.
+- A depth diff that cannot be decoded now raises a `:degraded` notice, as a sequence gap
+  does. It was dropped in silence while the sequence advanced past it, so the next frame
+  showed no gap and the subscriber's book was wrong from then on.
+- Locked `dp_exchange_core` 0.3.48.
+
 ## [0.2.81] - 2026-09-29
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

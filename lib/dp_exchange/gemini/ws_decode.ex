@@ -158,13 +158,15 @@ defmodule DpExchange.Gemini.WsDecode do
   The frame carries **no timestamp of its own**, so `observed_at` is passed in and used;
   that is when the snapshot was seen, and the type has nowhere to claim otherwise.
   """
-  @spec to_order_book(map(), String.t(), DateTime.t()) :: {:ok, OrderBook.t()}
-  def to_order_book(frame, symbol, observed_at) do
+  @spec to_order_book(map(), String.t(), DateTime.t()) ::
+          {:ok, OrderBook.t()} | {:error, :unexpected_response_shape}
+  def to_order_book(%{"bids" => bids, "asks" => asks} = frame, symbol, observed_at)
+      when is_list(bids) and is_list(asks) do
     {:ok,
      %OrderBook{
        symbol: symbol,
-       bids: levels(frame["bids"], :desc),
-       asks: levels(frame["asks"], :asc),
+       bids: levels(bids, :desc),
+       asks: levels(asks, :asc),
        # **`nil`, and that is the fix.** The venue publishes no time for this frame — its own
        # AsyncAPI requires `[lastUpdateId, bids, asks]` for `OrderBookSnapshot`, where
        # `BookTicker` requires an `E` event time — so there is nothing venue-stamped to put
@@ -183,6 +185,12 @@ defmodule DpExchange.Gemini.WsDecode do
        provider: :gemini
      }}
   end
+
+  # **Both sides are required.** The venue's AsyncAPI requires `bids` and `asks` on
+  # `OrderBookSnapshot`, so a side that is `null` or not a list is not an empty side. It used
+  # to become one: `levels/2` answered `[]` for it, and the frame was delivered as a whole
+  # book in which nobody was bidding, with every other value real.
+  def to_order_book(_frame, _symbol, _observed_at), do: {:error, :unexpected_response_shape}
 
   @doc """
   Whether applying `frame` to a book last updated at `last_applied` would skip updates.
@@ -233,7 +241,9 @@ defmodule DpExchange.Gemini.WsDecode do
   @spec to_order_book_delta(map(), String.t()) ::
           {:ok, OrderBookDelta.t()} | {:error, term()}
   def to_order_book_delta(frame, symbol) do
-    with {:ok, timestamp} <- nanosecond_time(frame["E"]) do
+    with {:ok, timestamp} <- nanosecond_time(frame["E"]),
+         :ok <- readable_side(frame["b"]),
+         :ok <- readable_side(frame["a"]) do
       %{bids: bids, asks: asks} = depth_changes(frame)
 
       levels =
@@ -284,14 +294,20 @@ defmodule DpExchange.Gemini.WsDecode do
     do:
       rows |> parsed_levels() |> Enum.sort_by(fn {price, _qty} -> price end, {direction, Decimal})
 
-  defp levels(_absent, _direction), do: []
-
   # A DELTA side: read, and left in the venue's order. `Core.Types.OrderBookDelta` requires
   # exactly that — its entries "arrive in the venue's own order", and sorting them "would
   # either drop the venue's ordering or invent one that was never sent". The two types want
   # opposite things here and the contract says so, which is why these are separate.
   defp levels(rows) when is_list(rows), do: parsed_levels(rows)
   defp levels(_absent), do: []
+
+  # A diff side that is absent changed nothing, and reads as `[]`. One that is present and not
+  # a list is unreadable, and applying the rest of that frame would advance the book's
+  # sequence past changes this package could not read — the silent version of a gap, which
+  # `depth_gap?/2` exists to make loud.
+  defp readable_side(nil), do: :ok
+  defp readable_side(side) when is_list(side), do: :ok
+  defp readable_side(_unreadable), do: {:error, :unexpected_response_shape}
 
   # A level whose PRICE cannot be read is dropped rather than carried as `{nil, _}`:
   # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, `hd(bids)` landing on one

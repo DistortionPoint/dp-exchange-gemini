@@ -259,10 +259,23 @@ defmodule DpExchange.Gemini.WsChannelsTest do
              "the venue's row order, not a sorted one"
     end
 
-    test "an absent side is an empty book side, not a crash" do
-      assert {:ok, book} = WsDecode.to_order_book(%{}, "BTC-USD", @observed)
-      assert book.bids == []
-      assert book.asks == []
+    test "an absent or unreadable side is refused, not a crash and not an empty side" do
+      # This used to answer a book with `[]` on both sides: a whole book in which nobody bids,
+      # from a frame the venue's AsyncAPI says must carry both. Refused now, still without
+      # raising.
+      assert {:error, :unexpected_response_shape} =
+               WsDecode.to_order_book(%{}, "BTC-USD", @observed)
+
+      assert {:error, :unexpected_response_shape} =
+               WsDecode.to_order_book(%{"bids" => nil, "asks" => []}, "BTC-USD", @observed)
+
+      assert {:error, :unexpected_response_shape} =
+               WsDecode.to_order_book(%{"bids" => [], "asks" => "x"}, "BTC-USD", @observed)
+    end
+
+    test "a diff side that is present and not a list is refused" do
+      frame = %{"E" => 1_787_936_147_000_000_000, "U" => 1, "u" => 2, "b" => "x", "a" => []}
+      assert {:error, :unexpected_response_shape} = WsDecode.to_order_book_delta(frame, "BTC-USD")
     end
   end
 

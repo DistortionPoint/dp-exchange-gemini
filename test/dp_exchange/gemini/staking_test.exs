@@ -149,8 +149,14 @@ defmodule DpExchange.Gemini.StakingTest do
       assert Enum.all?(rates, &(&1.provider_id == "provider-a"))
     end
 
-    test "a shape the venue never sends is an empty list, not a crash" do
-      assert {:ok, []} = Rest.get_staking_rates(plug: responding([]), retry_attempts: 0)
+    test "a shape the venue never sends is refused, not a crash and not an empty list" do
+      # `{:ok, []}` here said no provider stakes anything, from a reply that was not the
+      # provider map at all. The same for a provider entry, or an asset row, that is not an
+      # object: it used to be skipped, or built into a rate with every number `nil`.
+      for body <- [[], %{"p-1" => "x"}, %{"p-1" => %{"ETH" => "x"}}] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_staking_rates(plug: responding(body), retry_attempts: 0)
+      end
     end
   end
 

@@ -198,6 +198,16 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
 
       refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
       assert new_state.last_depth_update == 15
+      # The book is now missing this frame's changes and the next frame will show no gap,
+      # so the subscriber is told, as it is for a gap. It used to be silence.
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
+      assert details.reason == "undecodable depth update"
+    end
+
+    test "a snapshot with an unreadable side is not delivered as a book" do
+      snapshot = %{"lastUpdateId" => 7, "s" => "BTCUSD", "bids" => nil, "asks" => []}
+      assert {:ok, _state} = Socket.handle_frame(frame(snapshot), state())
+      refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
     end
   end
 

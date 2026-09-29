@@ -358,7 +358,10 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp ids(_absent), do: {:ok, []}
+  # Absent is none. Present and not a list is unreadable: `{:ok, []}` for it said nothing was
+  # cancelled, and a caller reconciling would keep treating cancelled orders as working.
+  defp ids(nil), do: {:ok, []}
+  defp ids(_unreadable), do: {:error, :unexpected_response_shape}
 
   @doc """
   Past fills for a symbol.
@@ -1299,17 +1302,20 @@ defmodule DpExchange.Gemini.Private do
 
       network ->
         with {:ok, body, _headers} <-
-               post("/v1/approvedAddresses/account/#{network}", %{}, credentials, opts) do
-          body
-          |> approved_rows()
-          |> to_approved_addresses(network)
+               post("/v1/approvedAddresses/account/#{network}", %{}, credentials, opts),
+             {:ok, rows} <- approved_rows(body) do
+          to_approved_addresses(rows, network)
         end
     end
   end
 
-  defp approved_rows(%{"approvedAddresses" => rows}) when is_list(rows), do: rows
-  defp approved_rows(rows) when is_list(rows), do: rows
-  defp approved_rows(_other), do: []
+  # A reply this package cannot find the list in is unreadable, not empty. It used to answer
+  # `{:ok, []}`, "no approved addresses", and a caller withdrawing only to an approved
+  # address was told it had none — or, reconciling, that one it had approved was gone.
+  defp approved_rows(%{"approvedAddresses" => rows}) when is_list(rows), do: {:ok, rows}
+  defp approved_rows(%{"approvedAddresses" => nil}), do: {:ok, []}
+  defp approved_rows(rows) when is_list(rows), do: {:ok, rows}
+  defp approved_rows(_other), do: {:error, :unexpected_response_shape}
 
   # One unreadable entry refuses the whole page rather than leaving a gap in it, the rule
   # `to_fills/2` above already states: a list with an entry silently missing reconciles to a
@@ -1584,20 +1590,25 @@ defmodule DpExchange.Gemini.Private do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_payment_methods(credentials, opts) do
     with {:ok, body, _headers} <- post("/v1/payments/methods", %{}, credentials, opts) do
-      {:ok, body |> payment_rows() |> List.wrap()}
+      payment_rows(body)
     end
   end
 
-  defp payment_rows(%{"methods" => rows}) when is_list(rows), do: rows
+  defp payment_rows(%{"methods" => rows}) when is_list(rows), do: {:ok, rows}
   # **The wrapper is never a row.** When `"methods"` is present it decides the shape whatever
   # it holds; only a response with no `"methods"` key at all is treated as one bare object.
   # The catch-all used to take the wrapper too: `{"methods": null}` came back as
   # `{:ok, [%{"methods" => nil}]}`. The same defect
   # `dp_exchange_webull`'s `rows/1` had, found the same day.
-  defp payment_rows(%{"methods" => _not_a_list}), do: []
-  defp payment_rows(rows) when is_list(rows), do: rows
-  defp payment_rows(%{} = row), do: [row]
-  defp payment_rows(_other), do: []
+  #
+  # `null` is no methods; any other non-list, or a body that is not an object or a list, is
+  # unreadable. It used to answer `{:ok, []}`, no payment methods, from a reply that said
+  # nothing about them.
+  defp payment_rows(%{"methods" => nil}), do: {:ok, []}
+  defp payment_rows(%{"methods" => _unreadable}), do: {:error, :unexpected_response_shape}
+  defp payment_rows(rows) when is_list(rows), do: {:ok, rows}
+  defp payment_rows(%{} = row), do: {:ok, [row]}
+  defp payment_rows(_other), do: {:error, :unexpected_response_shape}
 
   @doc """
   Registers a bank account — `/v1/payments/addbank`, or `/v1/payments/addbank/cad` for a
@@ -2129,13 +2140,17 @@ defmodule DpExchange.Gemini.Private do
   def get_positions(credentials, opts) do
     with {:ok, body, headers} <- post("/v1/positions", %{}, credentials, opts) do
       at = venue_time_or_nil(headers)
-      body |> position_rows() |> to_positions(at)
+      with {:ok, rows} <- position_rows(body), do: to_positions(rows, at)
     end
   end
 
-  defp position_rows(%{"openPositions" => rows}) when is_list(rows), do: rows
-  defp position_rows(rows) when is_list(rows), do: rows
-  defp position_rows(_other), do: []
+  # A reply without its position list is unreadable, not flat. `[]` for it said the account
+  # holds no positions — the most dangerous empty in this module, because a caller sizes
+  # risk and hedges from it.
+  defp position_rows(%{"openPositions" => rows}) when is_list(rows), do: {:ok, rows}
+  defp position_rows(%{"openPositions" => nil}), do: {:ok, []}
+  defp position_rows(rows) when is_list(rows), do: {:ok, rows}
+  defp position_rows(_other), do: {:error, :unexpected_response_shape}
 
   # Refuses a position row this package cannot read, rather than reporting one that says
   # nothing about what is held.
@@ -2452,13 +2467,15 @@ defmodule DpExchange.Gemini.Private do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_margin_rates(credentials, opts) do
     with {:ok, body, _headers} <- post("/v1/margin/rates", %{}, credentials, opts) do
-      {:ok, body |> margin_rate_rows() |> List.wrap()}
+      margin_rate_rows(body)
     end
   end
 
-  defp margin_rate_rows(%{"rates" => rates}) when is_list(rates), do: rates
-  defp margin_rate_rows(rates) when is_list(rates), do: rates
-  defp margin_rate_rows(_other), do: []
+  # Unreadable is not empty: `{:ok, []}` for a reply without its list said no rates.
+  defp margin_rate_rows(%{"rates" => rates}) when is_list(rates), do: {:ok, rates}
+  defp margin_rate_rows(%{"rates" => nil}), do: {:ok, []}
+  defp margin_rate_rows(rates) when is_list(rates), do: {:ok, rates}
+  defp margin_rate_rows(_other), do: {:error, :unexpected_response_shape}
 
   @doc """
   What a spot order would do to this account's margin — `POST /v1/margin/order/preview`.

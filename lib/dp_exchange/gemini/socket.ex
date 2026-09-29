@@ -526,8 +526,18 @@ defmodule DpExchange.Gemini.Socket do
       send(state.subscriber, {:dp_exchange, :gemini, delta})
     else
       # An undated diff cannot be ordered against anything, and one naming no symbol cannot
-      # be applied to any book. Silence beats a delta that cannot be placed.
-      _unplaceable -> :ok
+      # be applied to any book, so no delta is sent. **But the book is now missing this
+      # frame's changes**, and `last_depth_update` advances past it below, so the next frame
+      # shows no gap. It used to be dropped in silence, leaving a subscriber applying later
+      # diffs to a book that is wrong from here on with every price real. It is the same
+      # outcome as a sequence gap, and it gets the same notice: discard and resubscribe.
+      _unplaceable ->
+        notify(
+          state,
+          Notice.new(:degraded, :gemini,
+            details: %{reason: "undecodable depth update", symbol: message["s"]}
+          )
+        )
     end
 
     {:ok, Map.put(state, :last_depth_update, message["u"])}
@@ -535,8 +545,11 @@ defmodule DpExchange.Gemini.Socket do
 
   # A partial-depth snapshot: absolute levels and a `lastUpdateId`, which is a book.
   defp handle_message(%{"lastUpdateId" => _id, "bids" => _b, "asks" => _a} = message, state) do
-    with {:ok, symbol} <- symbol_of(message) do
-      {:ok, book} = WsDecode.to_order_book(message, symbol, DateTime.utc_now())
+    # A snapshot whose side is not a list is not delivered: a book in which nobody bids,
+    # built from a side this package could not read, is the substitution `to_order_book/3`
+    # now refuses. The next snapshot replaces it whole, so nothing is left to repair.
+    with {:ok, symbol} <- symbol_of(message),
+         {:ok, book} <- WsDecode.to_order_book(message, symbol, DateTime.utc_now()) do
       send(state.subscriber, {:dp_exchange, :gemini, book})
     end
 

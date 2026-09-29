@@ -706,22 +706,27 @@ defmodule DpExchange.Gemini.Rest do
   @spec list_fee_promos(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_fee_promos(opts) do
     with {:ok, body} <- get_body("/v1/feepromos", opts) do
-      {:ok, body |> promo_rows() |> List.wrap()}
+      promo_rows(body)
     end
   end
 
   defp promo_rows(%{"symbols" => symbols}) when is_list(symbols),
-    do: Enum.map(symbols, &%{"symbol" => &1})
+    do: {:ok, Enum.map(symbols, &%{"symbol" => &1})}
 
   # **The wrapper is never a row.** When `"symbols"` is present it decides the shape whatever
   # it holds; only a response with no `"symbols"` key at all is treated as one bare object.
   # The catch-all used to take the wrapper too: `{"symbols": null}` came back as
   # `{:ok, [%{"symbols" => nil}]}`. The same defect
   # `dp_exchange_webull`'s `rows/1` had, found the same day.
-  defp promo_rows(%{"symbols" => _not_a_list}), do: []
-  defp promo_rows(rows) when is_list(rows), do: rows
-  defp promo_rows(%{} = row), do: [row]
-  defp promo_rows(_other), do: []
+  #
+  # `null` is no promotions. Any other non-list, or a body that is neither an object nor a
+  # list, is unreadable rather than empty: it used to answer `{:ok, []}`, "no promotions",
+  # from a response that said nothing about them.
+  defp promo_rows(%{"symbols" => nil}), do: {:ok, []}
+  defp promo_rows(%{"symbols" => _unreadable}), do: {:error, :unexpected_response_shape}
+  defp promo_rows(rows) when is_list(rows), do: {:ok, rows}
+  defp promo_rows(%{} = row), do: {:ok, [row]}
+  defp promo_rows(_other), do: {:error, :unexpected_response_shape}
 
   @doc """
   What each provider pays for staking each asset — `GET /v1/staking/rates`.
@@ -764,23 +769,40 @@ defmodule DpExchange.Gemini.Rest do
           {:ok, [StakingRate.t()]} | {:error, term()} | {:refused, term()}
   def get_staking_rates(opts) do
     with {:ok, body} <- get_body("/v1/staking/rates", opts) do
-      {:ok, staking_rates(body)}
+      staking_rates(body)
     end
   end
 
+  # **Every level must be an object, or the reply is refused.** A body, a provider's entry or
+  # an asset's row that was not one used to be skipped or filled: the body read as no rates,
+  # a provider as offering nothing, and a row as a `StakingRate` with every number `nil`,
+  # asserting the provider stakes that asset. A caller choosing where to stake then chose
+  # among what this package could read, believing it was everything the venue offered.
   defp staking_rates(%{} = body) do
-    Enum.flat_map(body, fn {provider_id, assets} -> rates_for_provider(provider_id, assets) end)
+    body
+    |> Enum.reduce_while({:ok, []}, fn {provider_id, assets}, {:ok, acc} ->
+      case rates_for_provider(provider_id, assets) do
+        {:ok, rates} -> {:cont, {:ok, [rates | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, groups} -> {:ok, groups |> Enum.reverse() |> List.flatten()}
+      error -> error
+    end
   end
 
-  defp staking_rates(_other), do: []
+  defp staking_rates(_other), do: {:error, :unexpected_response_shape}
 
   defp rates_for_provider(provider_id, %{} = assets) do
-    Enum.map(assets, fn {asset, row} -> staking_rate(asset, provider_id, row) end)
+    if Enum.all?(assets, fn {_asset, row} -> is_map(row) end),
+      do: {:ok, Enum.map(assets, fn {asset, row} -> staking_rate(asset, provider_id, row) end)},
+      else: {:error, :unexpected_response_shape}
   end
 
-  defp rates_for_provider(_provider_id, _other), do: []
+  defp rates_for_provider(_provider_id, _other), do: {:error, :unexpected_response_shape}
 
-  defp staking_rate(asset, provider_id, row) when is_map(row) do
+  defp staking_rate(asset, provider_id, row) do
     %StakingRate{
       asset: String.upcase(asset),
       provider_id: provider_id,
@@ -790,10 +812,6 @@ defmodule DpExchange.Gemini.Rest do
       venue_time: nil,
       provider: :gemini
     }
-  end
-
-  defp staking_rate(asset, provider_id, _other) do
-    %StakingRate{asset: String.upcase(asset), provider_id: provider_id, provider: :gemini}
   end
 
   # `ratePct` where the venue publishes it; otherwise `rate`, which is basis points, divided
