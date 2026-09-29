@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.89] - 2026-09-29
+
 ### Added
 
 - `nonce_mode: {:incremental_ns, scale: k}`, `k` from 1 to 12, for an incremental key whose
