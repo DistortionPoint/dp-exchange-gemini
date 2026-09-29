@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.85] - 2026-09-29
+
 ### Fixed
 
 Checked against the vendor's WebSocket AsyncAPI (`websocket.yaml` 0.10.7), fetched 2026-09-29
