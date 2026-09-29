@@ -472,9 +472,14 @@ defmodule DpExchange.Gemini.Rest do
       |> put_param(:limit_trades, Keyword.get(opts, :limit))
       |> put_param(:include_breaks, include_breaks(opts))
 
-    with {:ok, rows} <- get_body("/v1/trades/#{native}", Keyword.put(opts, :params, params)) do
+    # `List.wrap/1` used to stand where `list/1` does now: `List.wrap(nil)` answered `{:ok, []}`
+    # for an unreadable body, no different from the venue truthfully reporting no trades, and
+    # `List.wrap(%{...})` turned an object this package could not parse into a one-row list
+    # holding that object whole. The vendor's OpenAPI gives this 200 as a bare array, never
+    # either.
+    with {:ok, rows} <- get_body("/v1/trades/#{native}", Keyword.put(opts, :params, params)),
+         {:ok, rows} <- list(rows) do
       rows
-      |> List.wrap()
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
         case to_trade(row, symbol) do
           {:ok, trade} -> {:cont, {:ok, [trade | acc]}}

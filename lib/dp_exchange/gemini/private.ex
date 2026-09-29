@@ -258,9 +258,9 @@ defmodule DpExchange.Gemini.Private do
         {"/v1/orders", %{}}
       end
 
-    with {:ok, rows, _headers} <- post(path, params, credentials, opts) do
+    with {:ok, rows, _headers} <- post(path, params, credentials, opts),
+         {:ok, rows} <- list_rows(rows) do
       rows
-      |> List.wrap()
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
         case to_order(row) do
           {:ok, order} -> {:cont, {:ok, [order | acc]}}
@@ -391,8 +391,9 @@ defmodule DpExchange.Gemini.Private do
           |> put_present("limit_trades", Keyword.get(opts, :limit))
           |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
 
-        with {:ok, rows, _headers} <- post("/v1/mytrades", params, credentials, opts) do
-          rows |> List.wrap() |> to_fills(symbol)
+        with {:ok, rows, _headers} <- post("/v1/mytrades", params, credentials, opts),
+             {:ok, rows} <- list_rows(rows) do
+          to_fills(rows, symbol)
         end
     end
   end
@@ -1174,7 +1175,7 @@ defmodule DpExchange.Gemini.Private do
   def get_trade_volume(credentials, opts) do
     with {:ok, rows, _headers} <- post("/v1/tradevolume", %{}, credentials, opts) do
       # The venue nests one list per symbol inside the outer list.
-      {:ok, rows |> List.wrap() |> List.flatten()}
+      flattened_rows(rows)
     end
   end
 
@@ -1742,18 +1743,84 @@ defmodule DpExchange.Gemini.Private do
 
   **Summing this is not a balance.** `get_balances/2` is the authority; this explains it.
   """
+  @transactions_page 300
+  @transactions_max_pages 50
+
   @spec get_transactions(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transactions(credentials, opts) do
-    params =
-      %{}
-      |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
-      |> put_present("limit_transactions", Keyword.get(opts, :limit))
+    params = put_present(%{}, "timestamp_nanos", nanos_param(Keyword.get(opts, :since)))
 
-    with {:ok, body, _headers} <- post("/v1/transactions", params, credentials, opts) do
-      {:ok, body |> List.wrap() |> List.flatten()}
+    case Keyword.get(opts, :limit) do
+      nil ->
+        walk_transactions(Map.put(params, "limit", @transactions_page), credentials, opts, [], 0)
+
+      limit ->
+        with {:ok, rows, _token} <-
+               transactions_page(Map.put(params, "limit", limit), credentials, opts),
+             do: {:ok, rows}
     end
   end
+
+  # **The request and the response were both read from the wrong shape.** Measured against
+  # the vendor's `rest.yaml`, 2026-09-29:
+  #
+  #   * the window parameter is `timestamp_nanos`, in nanoseconds. This sent `timestamp` in
+  #     milliseconds, a field the endpoint does not name, so `:since` was not a filter at all;
+  #   * the page size is `limit`. This sent `limit_transactions`, so `:limit` was ignored and
+  #     every call got the venue's default of 100;
+  #   * the reply is `{"results": [...], "continuationToken": ...}`, not a bare array. The
+  #     wrapper was flattened as if it were a row list.
+  #
+  # And the token is the reason the reply is not the whole answer. Returned alone, the first
+  # page of 100 read as the account's complete history. `Core.Venue` types this call `[map()]`,
+  # so there is nowhere to hand a cursor back: without `:limit` this follows the token to the
+  # end, at the documented maximum page of 300, and refuses rather than truncates if it runs
+  # past `@transactions_max_pages` (above). With `:limit` the caller asked for at most that
+  # many, and gets one page.
+
+  defp walk_transactions(_params, _credentials, _opts, _acc, page)
+       when page >= @transactions_max_pages,
+       do: {:error, {:too_many_pages, @transactions_max_pages}}
+
+  defp walk_transactions(params, credentials, opts, acc, page) do
+    case transactions_page(params, credentials, opts) do
+      {:ok, rows, nil} ->
+        {:ok, acc |> Enum.reverse([rows]) |> Enum.concat()}
+
+      # A token the venue echoes back unchanged would page forever.
+      {:ok, _rows, token} when token == :erlang.map_get("continuation_token", params) ->
+        {:error, :repeated_continuation_token}
+
+      {:ok, rows, token} ->
+        # The spec says the token and `timestamp_nanos` are not sent together.
+        next = params |> Map.delete("timestamp_nanos") |> Map.put("continuation_token", token)
+        walk_transactions(next, credentials, opts, [rows | acc], page + 1)
+
+      error ->
+        error
+    end
+  end
+
+  defp transactions_page(params, credentials, opts) do
+    with {:ok, body, _headers} <- post("/v1/transactions", params, credentials, opts),
+         do: transactions_body(body)
+  end
+
+  defp transactions_body(%{"results" => rows} = body) when is_list(rows) do
+    case body["continuationToken"] do
+      token when is_binary(token) and token != "" -> {:ok, rows, token}
+      nil -> {:ok, rows, nil}
+      "" -> {:ok, rows, nil}
+      _unreadable -> {:error, :unexpected_response_shape}
+    end
+  end
+
+  defp transactions_body(_other), do: {:error, :unexpected_response_shape}
+
+  defp nanos_param(nil), do: nil
+  defp nanos_param(%DateTime{} = at), do: DateTime.to_unix(at, :nanosecond)
+  defp nanos_param(other), do: other
 
   @doc """
   Every balance, each also valued in one notional currency — `/v1/notionalbalances/{currency}`.
@@ -1773,7 +1840,7 @@ defmodule DpExchange.Gemini.Private do
     path = "/v1/notionalbalances/" <> String.downcase(currency)
 
     with {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
-      {:ok, body |> List.wrap() |> List.flatten()}
+      flattened_rows(body)
     end
   end
 
@@ -1798,7 +1865,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("limit_transfers", Keyword.get(opts, :limit))
 
     with {:ok, body, _headers} <- post("/v1/custodyaccountfees", params, credentials, opts) do
-      {:ok, body |> List.wrap() |> List.flatten()}
+      flattened_rows(body)
     end
   end
 
@@ -1820,9 +1887,10 @@ defmodule DpExchange.Gemini.Private do
   @spec get_staking_balances(map(), keyword()) ::
           {:ok, [StakingBalance.t()]} | {:error, term()} | {:refused, term()}
   def get_staking_balances(credentials, opts) do
-    with {:ok, rows, headers} <- post("/v1/balances/staking", %{}, credentials, opts) do
+    with {:ok, rows, headers} <- post("/v1/balances/staking", %{}, credentials, opts),
+         {:ok, rows} <- list_rows(rows) do
       at = venue_time_or_nil(headers)
-      rows |> List.wrap() |> to_staking_balances(at)
+      to_staking_balances(rows, at)
     end
   end
 
@@ -1900,34 +1968,78 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("until", timestamp_param(Keyword.get(opts, :until)))
       |> put_present("providerId", Keyword.get(opts, :provider_id))
 
-    with {:ok, rows, _headers} <- post("/v1/staking/rewards", params, credentials, opts) do
-      rows |> List.wrap() |> reduce_rows(&to_staking_reward/1)
+    with {:ok, body, _headers} <- post("/v1/staking/rewards", params, credentials, opts),
+         {:ok, periods} <- reward_periods(body) do
+      reduce_rows(periods, &to_staking_reward/1)
     end
   end
+
+  # **The reply is a map of maps, and this read it as a list.** Measured against the vendor's
+  # `rest.yaml`, 2026-09-29: `StakingRewardsResponse` is keyed by provider UUID, then by
+  # currency, and each entry carries `ratePeriods`, one per rate the position earned at, each
+  # with its own `apyPct`, `accrualTotal`, `numberOfAccruals`, `firstAccrualAt` and
+  # `lastAccrualAt`. This decoded a flat array of rows with `amount`, `accrualCount`, `since`
+  # and `until`, fields the endpoint does not send, against a fixture written the same way.
+  # Given the documented reply it could not produce a single reward.
+  #
+  # One `StakingReward` per rate period, because that is what the type is for: its `apy_pct`
+  # is "the rate at accrual", which only a period has, and its window is the period's first
+  # and last accrual. The provider and currency come from the keys the venue nested them
+  # under. Anything that is not the documented nesting is refused.
+  defp reward_periods(%{} = body) do
+    body
+    |> Enum.reduce_while({:ok, []}, fn {provider_id, currencies}, {:ok, acc} ->
+      case provider_periods(provider_id, currencies) do
+        {:ok, periods} -> {:cont, {:ok, [periods | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, groups} -> {:ok, groups |> Enum.reverse() |> Enum.concat()}
+      error -> error
+    end
+  end
+
+  defp reward_periods(_other), do: {:error, :unexpected_response_shape}
+
+  defp provider_periods(provider_id, %{} = currencies) do
+    currencies
+    |> Enum.reduce_while({:ok, []}, fn
+      {currency, %{"ratePeriods" => periods}}, {:ok, acc} when is_list(periods) ->
+        tagged = Enum.map(periods, &{provider_id, currency, &1})
+        {:cont, {:ok, [tagged | acc]}}
+
+      _unreadable, _acc ->
+        {:halt, {:error, :unexpected_response_shape}}
+    end)
+    |> case do
+      {:ok, groups} -> {:ok, groups |> Enum.reverse() |> Enum.concat()}
+      error -> error
+    end
+  end
+
+  defp provider_periods(_provider_id, _other), do: {:error, :unexpected_response_shape}
 
   # `:asset` and `:amount` are both in `StakingReward`'s `@enforce_keys`. Same `""` asset
   # substitution as `to_staking_balance/2` and `to_staking_transaction/1`; same answer.
-  defp to_staking_reward(row) when is_map(row) do
-    with {:ok, asset} <- required_id(row["currency"], :asset),
-         {:ok, amount} <- required_decimal(row["amount"], :amount) do
-      {:ok, build_staking_reward(row, asset, amount)}
+  defp to_staking_reward({provider_id, currency, period}) when is_map(period) do
+    with {:ok, asset} <- required_id(currency, :asset),
+         {:ok, amount} <- required_decimal(period["accrualTotal"], :amount) do
+      {:ok,
+       %StakingReward{
+         asset: String.upcase(asset),
+         amount: amount,
+         provider_id: provider_id,
+         apy_pct: decimal(period["apyPct"]),
+         accrual_count: period["numberOfAccruals"],
+         period_start: staking_time(period["firstAccrualAt"]),
+         period_end: staking_time(period["lastAccrualAt"]),
+         provider: :gemini
+       }}
     end
   end
 
-  defp to_staking_reward(_row), do: {:error, :unexpected_response_shape}
-
-  defp build_staking_reward(row, asset, amount) do
-    %StakingReward{
-      asset: String.upcase(asset),
-      amount: amount,
-      provider_id: row["providerId"],
-      apy_pct: decimal(row["apyPct"]),
-      accrual_count: row["accrualCount"],
-      period_start: staking_time(row["since"]),
-      period_end: staking_time(row["until"]),
-      provider: :gemini
-    }
-  end
+  defp to_staking_reward(_unreadable), do: {:error, :unexpected_response_shape}
 
   @doc """
   Movements in and out of staked positions — `POST /v1/staking/history`.
@@ -1952,8 +2064,9 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("limit", Keyword.get(opts, :limit))
       |> put_present("providerId", Keyword.get(opts, :provider_id))
 
-    with {:ok, rows, _headers} <- post("/v1/staking/history", params, credentials, opts) do
-      rows |> List.wrap() |> to_staking_transactions()
+    with {:ok, rows, _headers} <- post("/v1/staking/history", params, credentials, opts),
+         {:ok, rows} <- list_rows(rows) do
+      to_staking_transactions(rows)
     end
   end
 
@@ -2093,6 +2206,19 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp staking_time(value) when is_float(value), do: staking_time(trunc(value))
+
+  # `/v1/staking/rewards` names its window in this shape — `firstAccrualAt`/`lastAccrualAt`
+  # are ISO 8601 strings (`rest.yaml`'s own example: `"2022-08-23T20:00:00.000Z"`), not the
+  # epoch number every other staking endpoint sends. Reusing the epoch-only clauses above for
+  # a period whose bounds this venue names would have silently read every reward's window as
+  # unreported, since `staking_time/1` fell to its own `nil` catch-all.
+  defp staking_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, at, _offset} -> at
+      {:error, _reason} -> nil
+    end
+  end
+
   defp staking_time(_other), do: nil
 
   defp venue_time_or_nil(headers) do
@@ -2324,7 +2450,7 @@ defmodule DpExchange.Gemini.Private do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_funding_payments(credentials, opts) do
     with {:ok, body, _headers} <- post("/v1/perpetuals/fundingPayment", %{}, credentials, opts) do
-      {:ok, body |> List.wrap() |> List.flatten()}
+      flattened_rows(body)
     end
   end
 
@@ -2348,7 +2474,7 @@ defmodule DpExchange.Gemini.Private do
     path = report_path("/v1/perpetuals/fundingpaymentreport/records.json", opts)
 
     with {:ok, body, _headers} <- signed_get(path, credentials, opts) do
-      {:ok, body |> List.wrap() |> List.flatten()}
+      flattened_rows(body)
     end
   end
 
@@ -2651,7 +2777,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
 
     with {:ok, body, _headers} <- post("/v1/account/list", params, credentials, opts) do
-      {:ok, body |> List.wrap() |> List.flatten()}
+      flattened_rows(body)
     end
   end
 
@@ -2898,7 +3024,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("submission_end", timestamp_param(Keyword.get(opts, :submission_end)))
 
     with {:ok, body, _headers} <- post("/v1/clearing/list", params, credentials, opts) do
-      {:ok, body |> clearing_rows("orders") |> List.wrap()}
+      clearing_rows(body, "orders")
     end
   end
 
@@ -2920,7 +3046,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("expiration_end", timestamp_param(Keyword.get(opts, :expiration_end)))
 
     with {:ok, body, _headers} <- post("/v1/clearing/broker/list", params, credentials, opts) do
-      {:ok, body |> clearing_rows("orders") |> List.wrap()}
+      clearing_rows(body, "orders")
     end
   end
 
@@ -2945,7 +3071,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("limit_per_account", Keyword.get(opts, :limit))
 
     with {:ok, body, _headers} <- post("/v1/clearing/trades", params, credentials, opts) do
-      {:ok, body |> clearing_rows("results") |> List.wrap()}
+      clearing_rows(body, "results")
     end
   end
 
@@ -2969,15 +3095,42 @@ defmodule DpExchange.Gemini.Private do
   defp clearing_side(nil), do: nil
   defp clearing_side(side), do: to_string(side)
 
+  # **A key absent is not a key present and empty.** `Map.get/2` answered `[]` for both — a
+  # body with `"orders": null` AND a body with no `"orders"` key at all, the second of which
+  # the vendor's own OpenAPI never documents (`/v1/clearing/list`, `/v1/clearing/broker/list`
+  # and `/v1/clearing/trades` all shape their 200 as `{orders: [...]}` / `{results: [...]}`,
+  # never a bare object without it). A reply missing the list entirely is unreadable, and a
+  # caller polling for outstanding clearing orders on a malformed reply saw "nothing
+  # outstanding" — the one shape it cannot tell apart from the truth — instead of an error it
+  # could retry.
   defp clearing_rows(%{} = body, key) do
-    case Map.get(body, key) do
-      rows when is_list(rows) -> rows
-      _other -> []
+    case Map.fetch(body, key) do
+      {:ok, rows} when is_list(rows) -> {:ok, rows}
+      {:ok, nil} -> {:ok, []}
+      {:ok, _unreadable} -> {:error, :unexpected_response_shape}
+      :error -> {:error, :unexpected_response_shape}
     end
   end
 
-  defp clearing_rows(rows, _key) when is_list(rows), do: rows
-  defp clearing_rows(_body, _key), do: []
+  defp clearing_rows(rows, _key) when is_list(rows), do: {:ok, rows}
+  defp clearing_rows(_body, _key), do: {:error, :unexpected_response_shape}
+
+  # **A reply that is a genuine JSON array decodes as sent; anything else is unreadable.**
+  # `List.wrap/1` used to sit at each of these call sites: `List.wrap(nil) == []` turned an
+  # unreadable body into a silent "nothing here", and `List.wrap(%{...})` turned an object
+  # this package could not parse into a one-row list holding that whole object — the wrapper
+  # treated as a row. Both looked like a plausible answer; neither was one the venue gave.
+  defp list_rows(rows) when is_list(rows), do: {:ok, rows}
+  defp list_rows(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # `/v1/tradevolume` nests one list per symbol inside the outer list — `get_trade_volume/2`'s
+  # own doc. Flattening only makes sense once the outer shape is confirmed to be a list;
+  # flattening a wrapped scalar would still be `list_rows/1`'s substitution, just delayed a
+  # step.
+  defp flattened_rows(rows) do
+    with {:ok, rows} <- list_rows(rows), do: {:ok, List.flatten(rows)}
+  end
+
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do

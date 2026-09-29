@@ -20,6 +20,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_transactions/2` sent its filters under names the endpoint does not use and read its
+  reply in the wrong shape, checked against the vendor's `rest.yaml` on 2026-09-29. `:since`
+  went out as `timestamp` in milliseconds and is now `timestamp_nanos` in nanoseconds;
+  `:limit` went out as `limit_transactions` and is now `limit`. The reply is `{"results":
+  [...], "continuationToken": ...}`, not a bare array. Without `:limit` the call now follows
+  `continuationToken` to the end, at up to 300 rows a page and at most 50 pages
+  (`{:error, {:too_many_pages, 50}}`), instead of returning the first 100 rows as the whole
+  history. A token the venue echoes back is `{:error, :repeated_continuation_token}`. With
+  `:limit` it returns one page.
+- `get_staking_rewards/2` decodes the documented reply, an object keyed by provider and then
+  currency whose `ratePeriods` each carry their own `apyPct`, `accrualTotal`,
+  `numberOfAccruals` and accrual window. It read a flat array with fields the endpoint does
+  not send, so it could not produce a reward from the real reply. It now returns one
+  `StakingReward` per rate period. ISO 8601 accrual times are parsed; they read as `nil`
+  before.
+- Every endpoint documented as a bare JSON array (orders, order history, trades, staking
+  balances and history, notional balances, custody fees, funding payments and their report,
+  account list, trade volume, public trades) refuses a body that is not an array. `List.wrap/1`
+  turned `null` into `{:ok, []}` and an object into a one-row list of the wrong thing. The
+  three clearing list calls refuse a reply missing their `orders`/`results` key, which read
+  as empty.
+
 ## [0.2.82] - 2026-09-29
 
 ### Fixed

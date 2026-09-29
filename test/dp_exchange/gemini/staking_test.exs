@@ -261,59 +261,91 @@ defmodule DpExchange.Gemini.StakingTest do
   end
 
   describe "get_staking_rewards/2 — the window is part of the value" do
+    # Every fixture in this describe block was corrected to the vendor's documented reply
+    # shape (`rest.yaml`, 2026-09-29): `StakingRewardsResponse` is an object keyed by
+    # provider UUID, then by currency, each holding `ratePeriods` — not the flat array of
+    # rows these fixtures used to build. Matching the spec's own example provider id and
+    # asset (`"62b21e17-2534-4b9f-afcf-b7edb609dd8d"`, `MATIC`) is not required for what
+    # these tests prove, so the plainer stand-ins already used here ("provider-a", "ETH")
+    # are kept, except where a test is specifically about a rate period's own fields, where
+    # `MATIC` is used to mirror the documented example.
+    defp rewards_body(provider_id, currency, periods) do
+      %{provider_id => %{currency => %{"ratePeriods" => periods}}}
+    end
+
     test "the bounds the venue reports travel with the number" do
-      rows = [
-        %{
-          "currency" => "ETH",
-          "amount" => "0.0031",
-          "providerId" => "provider-a",
-          "apyPct" => "4.07",
-          "accrualCount" => 7,
-          "since" => 1_787_500_000_000,
-          "until" => 1_787_936_401_000
-        }
-      ]
+      period = %{
+        "apyPct" => "4.07",
+        "numberOfAccruals" => 7,
+        "accrualTotal" => "0.0031",
+        "firstAccrualAt" => "2026-08-25T00:00:00.000Z",
+        "lastAccrualAt" => "2026-09-01T00:00:00.000Z"
+      }
+
+      body = rewards_body("provider-a", "ETH", [period])
 
       assert {:ok, [reward]} =
                Private.get_staking_rewards(@credentials,
-                 plug: responding(rows),
+                 plug: responding(body),
                  retry_attempts: 0
                )
 
+      assert reward.asset == "ETH"
+      assert reward.provider_id == "provider-a"
       assert reward.accrual_count == 7
-      assert reward.period_start == DateTime.from_unix!(1_787_500_000_000, :millisecond)
-      assert reward.period_end == DateTime.from_unix!(1_787_936_401_000, :millisecond)
+      assert reward.period_start == ~U[2026-08-25 00:00:00.000Z]
+      assert reward.period_end == ~U[2026-09-01 00:00:00.000Z]
     end
 
-    test "a reward row naming no asset or no amount is refused" do
+    test "one currency with two rate periods is two rewards, each with its own apy" do
+      periods = [
+        %{"apyPct" => "5.75", "accrualTotal" => "0.0065678", "numberOfAccruals" => 1},
+        %{"apyPct" => "5.20", "accrualTotal" => "0.0031", "numberOfAccruals" => 1}
+      ]
+
+      body = rewards_body("provider-a", "MATIC", periods)
+
+      assert {:ok, [first, second]} =
+               Private.get_staking_rewards(@credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map([first, second], & &1.asset) == ["MATIC", "MATIC"]
+      assert Decimal.equal?(first.apy_pct, Decimal.new("5.75"))
+      assert Decimal.equal?(second.apy_pct, Decimal.new("5.20"))
+    end
+
+    test "a reward period naming no asset or no amount is refused" do
       # The third function that carried `String.upcase(row["currency"] || "")`. Same
       # reasoning as `get_staking_balances/2` and `get_staking_history/2`: `""` names no
-      # asset while passing every `nil` check a consumer might write.
-      for {field, expected} <- [
-            {"currency", {:missing_required_field, :asset}},
-            {"amount", {:missing_required_field, :amount}}
+      # asset while passing every `nil` check a consumer might write. The asset now comes
+      # from the currency KEY, so "no asset" is an empty-string key rather than a missing
+      # field; "no amount" is a period with no `accrualTotal`.
+      for {body, expected} <- [
+            {rewards_body("provider-a", "", [%{"accrualTotal" => "0.1"}]),
+             {:missing_required_field, :asset}},
+            {rewards_body("provider-a", "ETH", [%{}]), {:missing_required_field, :amount}}
           ] do
-        rows = [Map.delete(%{"currency" => "ETH", "amount" => "0.1"}, field)]
-
         assert {:error, ^expected} =
                  Private.get_staking_rewards(@credentials,
-                   plug: responding(rows),
+                   plug: responding(body),
                    retry_attempts: 0
                  ),
-               "a reward row missing #{field} must be refused"
+               "a reward period producing #{inspect(expected)} must be refused"
       end
     end
 
     test "a window the venue does not report is nil, not the window that was asked for" do
       # The venue is free to clamp a window. Echoing the ask would report a period that was
-      # never served.
-      rows = [%{"currency" => "ETH", "amount" => "0.1"}]
+      # never served. A period with no `firstAccrualAt`/`lastAccrualAt` is exactly that.
+      body = rewards_body("provider-a", "ETH", [%{"accrualTotal" => "0.1"}])
 
       assert {:ok, [reward]} =
                Private.get_staking_rewards(@credentials,
                  since: ~U[2026-08-25 00:00:00Z],
                  until: ~U[2026-09-01 00:00:00Z],
-                 plug: responding(rows),
+                 plug: responding(body),
                  retry_attempts: 0
                )
 
@@ -324,11 +356,11 @@ defmodule DpExchange.Gemini.StakingTest do
     test "the window is sent to the venue in milliseconds" do
       me = self()
 
-      assert {:ok, _rewards} =
+      assert {:ok, []} =
                Private.get_staking_rewards(@credentials,
                  since: ~U[2026-08-28 17:00:01Z],
                  provider_id: "provider-a",
-                 plug: capturing([], me),
+                 plug: capturing(%{}, me),
                  retry_attempts: 0
                )
 

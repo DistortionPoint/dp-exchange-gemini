@@ -317,8 +317,13 @@ defmodule DpExchange.Gemini.ClearingTest do
       assert payload["symbol"] == "btcusd"
     end
 
-    test "a body without the expected key is an empty list, not a crash" do
-      assert {:ok, []} =
+    # This used to answer `{:ok, []}` — "a body without the expected key is an empty list,
+    # not a crash" was this test's own name. `clearing_rows/2` treated an absent `"orders"`
+    # key the same as `"orders": []`, when the vendor's OpenAPI never documents a 200 for
+    # `/v1/clearing/list` without that key: the reply is unreadable, not empty, and a caller
+    # polling for outstanding orders on a malformed response was told there were none.
+    test "a body without the expected key is refused, not read as empty" do
+      assert {:error, :unexpected_response_shape} =
                Private.list_clearing_orders(@credentials,
                  plug: responding(%{"result" => "ok"}),
                  retry_attempts: 0
@@ -361,14 +366,24 @@ defmodule DpExchange.Gemini.ClearingTest do
                  creds ++ [plug: responding(%{})]
                )
 
+      # `%{}` used to stand here too and still return `{:ok, []}` for all three — the same
+      # "absent key reads as empty" substitution the dedicated test above now refuses. A
+      # present key with an empty list is what this test means to exercise: delegation, not
+      # response-shape refusal.
       assert {:ok, []} =
-               DpExchange.Gemini.list_clearing_orders(creds ++ [plug: responding(%{})])
+               DpExchange.Gemini.list_clearing_orders(
+                 creds ++ [plug: responding(%{"orders" => []})]
+               )
 
       assert {:ok, []} =
-               DpExchange.Gemini.list_clearing_brokers(creds ++ [plug: responding(%{})])
+               DpExchange.Gemini.list_clearing_brokers(
+                 creds ++ [plug: responding(%{"orders" => []})]
+               )
 
       assert {:ok, []} =
-               DpExchange.Gemini.list_clearing_trades(creds ++ [plug: responding(%{})])
+               DpExchange.Gemini.list_clearing_trades(
+                 creds ++ [plug: responding(%{"results" => []})]
+               )
     end
 
     test "the short arities refuse without credentials, reaching no network" do

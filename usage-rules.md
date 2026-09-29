@@ -544,18 +544,27 @@ perpetuals surface has its own endpoints (`get_positions/1`, `get_contract_stats
 
 ## `:since` narrows a window as a `DateTime`, everywhere it appears
 
-`get_orders/2` (with `history: true`), `get_trade_history/2`, `get_transactions/1`,
-`list_custody_fees/1`, `list_accounts/1` and the staking history/reward reads all accept
-`since: ~U[...]` and convert it to the venue's own unit (milliseconds) before it goes on
-the wire — pass a `DateTime`, not a raw integer. `get_trade_history/2`'s `:limit` and
-`:since` used to reach the venue as `to_string(value)` instead — a `DateTime` became a
-string like `"2026-08-28 17:00:01Z"`, a shape `/v1/mytrades`'s `timestamp` field does not
-parse, so the filter silently failed to narrow anything. Fixed to match every other
+`get_orders/2` (with `history: true`), `get_trade_history/2`, `list_custody_fees/1`,
+`list_accounts/1` and the staking history/reward reads all accept `since: ~U[...]` and
+convert it to the venue's own unit (milliseconds) before it goes on the wire — pass a
+`DateTime`, not a raw integer. `get_trade_history/2`'s `:limit` and `:since` used to reach
+the venue as `to_string(value)` instead — a `DateTime` became a string like
+`"2026-08-28 17:00:01Z"`, a shape `/v1/mytrades`'s `timestamp` field does not parse, so
+the filter silently failed to narrow anything. Fixed to match every other
 `:since`-accepting call in this module.
 
-`get_transfers/2` is the one exception: its filters (`currency:`, `timestamp:`,
+`get_transfers/2` is one exception: its filters (`currency:`, `timestamp:`,
 `limit_transfers:`) are the venue's own field names and units unchanged, not translated —
 see `Private.get_transfers/2`'s moduledoc.
+
+`get_transactions/1` is the other. `POST /v1/transactions` names its window parameter
+`timestamp_nanos` and takes **nanoseconds**, not the millisecond unit every other
+`:since`-accepting call above converts to. Without `opts[:limit]` this call also follows
+the venue's own `continuationToken` across pages itself, at the documented maximum page of
+300, and refuses (`{:error, {:too_many_pages, 50}}` or `{:error, :repeated_continuation_token}`)
+rather than truncate or loop forever — `Core.Venue` types the result `[map()]`, so there is
+nowhere to hand a page cursor back to the caller. Passing `opts[:limit]` returns exactly one
+page of at most that many rows.
 
 ## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
 
@@ -770,6 +779,14 @@ yet.
 
 `provider_id` is **required** on `stake/3` and `unstake/3`. The same asset stakes with
 several providers at different rates, and this package will not pick one for you.
+
+**`get_staking_rewards/1` returns one `StakingReward` per rate period, not per currency.**
+`POST /v1/staking/rewards` answers an object keyed by provider, then by currency, each
+holding a `ratePeriods` list — the asset earned at more than one rate over the window, if
+the rate changed, and each period gets its own row with its own `apy_pct`. `period_start`
+and `period_end` are that period's own `firstAccrualAt`/`lastAccrualAt`; where the venue
+reports neither, both stay `nil` rather than the window that was asked for, which the
+venue is free to clamp.
 
 ## Clearing is not the order book
 

@@ -473,12 +473,19 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
   end
 
   describe "transactions are wider than fills and transfers" do
+    # Both fixtures here were corrected to the vendor's documented reply and request shape
+    # (`rest.yaml`, 2026-09-29): the reply wraps its rows under `"results"` rather than being
+    # a bare array, the page size parameter is `limit` rather than `limit_transactions`, and
+    # the window parameter is `timestamp_nanos`, in nanoseconds, rather than `timestamp` in
+    # milliseconds.
     test "every kind the venue sends comes back" do
-      body = [
-        %{"type" => "Trade", "amount" => "1"},
-        %{"type" => "Deposit", "amount" => "100"},
-        %{"type" => "Fee", "amount" => "-0.5"}
-      ]
+      body = %{
+        "results" => [
+          %{"type" => "Trade", "amount" => "1"},
+          %{"type" => "Deposit", "amount" => "100"},
+          %{"type" => "Fee", "amount" => "-0.5"}
+        ]
+      }
 
       assert {:ok, rows} =
                Private.get_transactions(@credentials, plug: responding(body), retry_attempts: 0)
@@ -490,19 +497,103 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
 
     test "the filters go to the venue in its own names" do
       me = self()
+      since = ~U[2026-08-28 17:00:01Z]
 
       assert {:ok, _rows} =
                Private.get_transactions(@credentials,
-                 since: ~U[2026-08-28 17:00:01Z],
+                 since: since,
                  limit: 50,
-                 plug: capturing([], me),
+                 plug: capturing(%{"results" => []}, me),
                  retry_attempts: 0
                )
 
       assert_receive {:payload, payload, path}
       assert path == "/v1/transactions"
-      assert payload["limit_transactions"] == 50
-      assert payload["timestamp"] == 1_787_936_401_000
+      assert payload["limit"] == 50
+      assert payload["timestamp_nanos"] == DateTime.to_unix(since, :nanosecond)
+    end
+  end
+
+  describe "get_transactions/2 follows the venue's continuationToken" do
+    # `Core.Venue` types this call `{:ok, [map()]}`, with no cursor to hand back, so without
+    # `opts[:limit]` this walks every page itself. Each test below is one shape that walk
+    # must get right: two real pages concatenate in order, a caller-given `:limit` takes
+    # exactly one page (the caller asked for a bounded amount, not the whole history), and a
+    # token the venue echoes back unchanged is refused rather than followed forever.
+    defp paging_plug(test_pid, responses) do
+      counter = :counters.new(1, [])
+
+      fn conn ->
+        payload =
+          conn
+          |> Plug.Conn.get_req_header("x-gemini-payload")
+          |> List.first()
+          |> Base.decode64!()
+          |> Jason.decode!()
+
+        send(test_pid, {:payload, payload})
+        :counters.add(counter, 1, 1)
+        body = Enum.at(responses, :counters.get(counter, 1) - 1, List.last(responses))
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(body)
+      end
+    end
+
+    test "two pages' rows concatenate; the second request carries the token and no timestamp_nanos" do
+      me = self()
+
+      responses = [
+        %{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"},
+        %{"results" => [%{"type" => "Fee"}]}
+      ]
+
+      assert {:ok, rows} =
+               Private.get_transactions(@credentials,
+                 since: ~U[2026-08-28 17:00:01Z],
+                 plug: paging_plug(me, responses),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(rows, & &1["type"]) == ["Trade", "Fee"]
+
+      assert_receive {:payload, first}
+      assert_receive {:payload, second}
+      refute Map.has_key?(first, "continuation_token")
+      assert Map.has_key?(first, "timestamp_nanos")
+      assert second["continuation_token"] == "tok-1"
+      refute Map.has_key?(second, "timestamp_nanos")
+    end
+
+    test "opts[:limit] returns exactly one page" do
+      me = self()
+
+      responses = [%{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"}]
+
+      assert {:ok, rows} =
+               Private.get_transactions(@credentials,
+                 limit: 10,
+                 plug: paging_plug(me, responses),
+                 retry_attempts: 0
+               )
+
+      assert length(rows) == 1
+      assert_receive {:payload, payload}
+      assert payload["limit"] == 10
+      refute_receive {:payload, _second_request}
+    end
+
+    test "a token the venue echoes back unchanged is refused, never followed forever" do
+      me = self()
+
+      responses = [%{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"}]
+
+      assert {:error, :repeated_continuation_token} =
+               Private.get_transactions(@credentials,
+                 plug: paging_plug(me, responses),
+                 retry_attempts: 0
+               )
     end
   end
 

@@ -555,8 +555,11 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "get_transactions/2", %{opts: sup} do
-      assert {:ok, [_row]} =
-               Gemini.get_transactions(@money_creds, money_opts(sup, [%{"type" => "Trade"}]))
+      # The reply wraps its rows under `"results"` — `rest.yaml`, 2026-09-29 — rather than
+      # being the bare array this fixture used to send.
+      body = %{"results" => [%{"type" => "Trade"}]}
+
+      assert {:ok, [_row]} = Gemini.get_transactions(@money_creds, money_opts(sup, body))
     end
 
     test "list_networks/2 and list_fee_promos/1", %{opts: sup} do
@@ -617,8 +620,11 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "get_staking_rewards/1", %{opts: sup} do
-      rows = [%{"currency" => "ETH", "amount" => "0.1"}]
-      assert {:ok, [_reward]} = Gemini.get_staking_rewards(money_opts(sup, rows))
+      # `StakingRewardsResponse` is an object keyed by provider UUID, then by currency, each
+      # holding `ratePeriods` — `rest.yaml`, 2026-09-29 — not the flat array this fixture
+      # used to send.
+      body = %{"provider-a" => %{"ETH" => %{"ratePeriods" => [%{"accrualTotal" => "0.1"}]}}}
+      assert {:ok, [_reward]} = Gemini.get_staking_rewards(money_opts(sup, body))
     end
 
     test "get_staking_history/1", %{opts: sup} do

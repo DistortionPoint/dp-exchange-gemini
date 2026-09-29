@@ -485,7 +485,15 @@ defmodule DpExchange.Gemini.SocketTest do
       # `send_frame/3`'s exit carries the frame; it must not reach a log or the caller.
       dead = spawn(fn -> :ok end)
       ref = Process.monitor(dead)
-      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+
+      # ExUnit's default `assert_receive` window is 100ms. This process is trivial and its
+      # `:DOWN` normally lands in well under that, but this file is `async: true` alongside
+      # up to 20 other cases — the same "the default window holds when quiet, not when the
+      # scheduler is loaded" shape `handle_disconnect/2 reconnects immediately`'s own comment
+      # above records, and observed the same way: one failure in a full, loaded run. Widening
+      # the window costs nothing when the message is already there; a `sleep` would not,
+      # since the whole point is not knowing in advance how long a loaded scheduler needs.
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 2_000
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->

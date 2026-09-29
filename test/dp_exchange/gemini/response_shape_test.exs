@@ -346,4 +346,160 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
       assert {:ok, []} = Rest.list_fee_promos(base(%{"symbols" => nil}))
     end
   end
+
+  describe "a bare-array endpoint refuses a body that is not an array" do
+    # `List.wrap/1` stood at every one of these call sites. `List.wrap(nil)` and
+    # `List.wrap(%{...})` both answer a one-element or zero-element list for a body that is
+    # not a list at all — `{:ok, []}`, "nothing here", for an unreadable reply, or worse, a
+    # malformed object carried through as if it were one row. The vendor's OpenAPI gives every
+    # one of these 200s as a bare JSON array (`list_clearing_orders/2` and its two siblings
+    # are covered separately in `clearing_test.exs`, because their wrapper key differs).
+    #
+    # `nil`, a string, an object and a boolean stand in for "not a list" here; a real venue
+    # reply that is empty is `[]`, which every case below still decodes.
+    alias DpExchange.Gemini.{Private, Rest}
+
+    # A plain JSON string is left out here: this transport (like the rest of the family) has
+    # no way to tell an already-decoded string response apart from a raw undecoded body, so
+    # one is refused as `{:undecodable_response, :gemini}` upstream of every function below
+    # rather than reaching `list_rows/1` — a separate, pre-existing ambiguity, not the
+    # `List.wrap/1` defect this describe block is about.
+    @unreadable_bodies [nil, 123, %{"a" => 1}, true]
+
+    test "get_orders/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} = Private.get_orders(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.get_orders(@credentials, base([]))
+    end
+
+    test "get_trade_history/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_trade_history(@credentials, [symbol: "BTC-USD"] ++ base(body))
+      end
+
+      assert {:ok, []} =
+               Private.get_trade_history(@credentials, [symbol: "BTC-USD"] ++ base([]))
+    end
+
+    test "get_trade_volume/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_trade_volume(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.get_trade_volume(@credentials, base([]))
+      # The venue nests one list per symbol; a nested body still flattens.
+      assert {:ok, [%{"a" => 1}]} = Private.get_trade_volume(@credentials, base([[%{"a" => 1}]]))
+    end
+
+    test "get_notional_balances/3" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_notional_balances(@credentials, "usd", base(body))
+      end
+
+      assert {:ok, []} = Private.get_notional_balances(@credentials, "usd", base([]))
+    end
+
+    test "list_custody_fees/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.list_custody_fees(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.list_custody_fees(@credentials, base([]))
+    end
+
+    test "get_staking_balances/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_staking_balances(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.get_staking_balances(@credentials, base([]))
+    end
+
+    test "get_staking_history/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_staking_history(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.get_staking_history(@credentials, base([]))
+    end
+
+    test "list_funding_payments/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.list_funding_payments(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.list_funding_payments(@credentials, base([]))
+    end
+
+    test "funding_payment_report/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.funding_payment_report(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.funding_payment_report(@credentials, base([]))
+    end
+
+    test "list_accounts/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} =
+                 Private.list_accounts(@credentials, base(body))
+      end
+
+      assert {:ok, []} = Private.list_accounts(@credentials, base([]))
+    end
+
+    test "Rest.get_trades/2" do
+      for body <- @unreadable_bodies do
+        assert {:error, :unexpected_response_shape} = Rest.get_trades("BTC-USD", base(body))
+      end
+
+      assert {:ok, []} = Rest.get_trades("BTC-USD", base([]))
+    end
+  end
+
+  # `get_transactions/2` and `get_staking_rewards/2` moved out of the bare-array block above:
+  # neither one's 200 is a bare array. `/v1/transactions` wraps its rows under `"results"`
+  # (plus a `continuationToken`); `/v1/staking/rewards` is an object keyed by provider then
+  # currency. A bare array — the shape both used to assume — is unreadable for both now,
+  # not empty.
+  describe "a wrapped-object endpoint refuses the wrong shape" do
+    alias DpExchange.Gemini.Private
+
+    test "get_transactions/2 refuses a bare array and a results that is not a list" do
+      for body <- [[], [%{"type" => "Trade"}], %{"results" => "x"}, %{"results" => nil}] do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_transactions(@credentials, base(body)),
+               inspect(body)
+      end
+
+      assert {:ok, []} = Private.get_transactions(@credentials, base(%{"results" => []}))
+    end
+
+    test "get_staking_rewards/2 refuses a list body and a currency entry without ratePeriods" do
+      for body <- [
+            [],
+            [%{"currency" => "ETH", "amount" => "0.1"}],
+            %{"provider-a" => %{"ETH" => %{}}},
+            %{"provider-a" => %{"ETH" => %{"ratePeriods" => "x"}}},
+            %{"provider-a" => "not-a-map"}
+          ] do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_staking_rewards(@credentials, base(body)),
+               inspect(body)
+      end
+
+      assert {:ok, []} =
+               Private.get_staking_rewards(@credentials, base(%{"provider-a" => %{}}))
+    end
+  end
 end
