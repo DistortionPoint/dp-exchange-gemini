@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.88] - 2026-09-29
+
 ### Added
 
 - `nonce_mode: :incremental_ns` for an incremental key whose stored mark is above epoch
