@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.87] - 2026-09-29
+
 ### Added
 
 - `nonce_mode: :incremental_us` for an incremental API key whose stored mark is above epoch
