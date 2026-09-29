@@ -3644,26 +3644,31 @@ defmodule DpExchange.Gemini.Private do
   defp refusal(body, opts),
     do: body |> Rest.refusal_reason() |> nonce_reach(Keyword.get(opts, :nonce_mode))
 
-  # dp-exchange-core issues #34 and #36. Under the two clock-anchored modes finer than
+  # dp-exchange-core issues #34, #36 and #37. Under the clock-anchored modes finer than
   # milliseconds, "has not increased" (the incremental validator's own sentence) means the
   # key's mark is above what that mode can send, and a host should stop retrying:
   #
-  #   * under `:incremental_us` the next and last step is `:incremental_ns`;
-  #   * under `:incremental_ns` it is conclusive. No nonce inside 64 bits reaches the mark,
-  #     and the only remedy is a person rotating the key.
+  #   * under `:incremental_us`, the next step is `:incremental_ns`;
+  #   * under `:incremental_ns`, no 64-bit nonce reaches the mark. That is NOT proof the key
+  #     must be rotated: a client before this package may have set it with larger integers
+  #     (#37), and `{:incremental_ns, scale: k}` reaches above 64 bits;
+  #   * under `{:incremental_ns, scale: k}`, the next step is a larger declared scale.
   #
-  # One shape for both, so a host that already handles it for `:incremental_us` needs no new
-  # clause; which of the two it means is the mode the host chose. The venue's sentence travels
-  # with it. Other modes keep `{:invalid_nonce, message}`, since there the same words still
-  # have a remedy this package can name (see `Auth`'s moduledoc).
-  defp nonce_reach({:invalid_nonce, message} = reason, mode)
-       when mode in [:incremental_us, :incremental_ns] and is_binary(message) do
-    if message |> String.downcase() |> String.contains?("has not increased"),
-      do: {:nonce_mark_out_of_reach, message},
-      else: reason
+  # One shape for all three, so a host already handling it needs no new clause; which step
+  # it means is the mode the host chose. The venue's sentence travels with it. Other modes keep
+  # `{:invalid_nonce, message}` (see `Auth`'s moduledoc).
+  defp nonce_reach({:invalid_nonce, message} = reason, mode) when is_binary(message) do
+    if sub_millisecond_mode?(mode) and
+         message |> String.downcase() |> String.contains?("has not increased"),
+       do: {:nonce_mark_out_of_reach, message},
+       else: reason
   end
 
   defp nonce_reach(reason, _mode), do: reason
+
+  defp sub_millisecond_mode?(mode) when mode in [:incremental_us, :incremental_ns], do: true
+  defp sub_millisecond_mode?({:incremental_ns, _scale}), do: true
+  defp sub_millisecond_mode?(_mode), do: false
 
   # A 2xx body this package cannot decode is NOT an empty object. See
   # `DpExchange.Gemini.Rest.decoded_body/1` for the full note; the short version is that

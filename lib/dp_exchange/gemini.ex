@@ -102,7 +102,8 @@ defmodule DpExchange.Gemini do
   seconds versus a strictly increasing value, with no single value satisfying both. The
   default is `:time_based`, the venue's own recommendation; pass
   `nonce_mode: :incremental` if that is how your key was made, or `nonce_mode: :incremental_us`
-  (or `:incremental_ns`) for an incremental key whose stored mark is already above epoch
+  (or `:incremental_ns`, or `{:incremental_ns, scale: k}` for a mark set above 64 bits) for an
+  incremental key whose stored mark is already above epoch
   milliseconds (see
   `DpExchange.Gemini.Auth`). A mismatch fails loudly on
   the first request.

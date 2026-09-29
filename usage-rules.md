@@ -479,9 +479,25 @@ is above epoch microseconds. Try **`nonce_mode: :incremental_ns`**, `max(now_ns,
 from its own counter, which reaches any mark below `2^64` (it stays below that until about
 2554). Like `:incremental_us` it needs no seed and is one-way per key.
 
-Under `:incremental_ns` the same `{:nonce_mark_out_of_reach, message}` is **conclusive**: no
-nonce that fits in 64 bits is above the mark. **That key must be rotated**; stop retrying and
-have a person do it.
+Under `:incremental_ns` the same `{:nonce_mark_out_of_reach, message}` means no nonce that
+fits in 64 bits is above the mark. That is **not** proof the key is dead. If anything signed
+for this key before this package did (your own earlier client, a script), and it sent larger
+integers, the venue accepted them: it compares nonces as arbitrary-precision integers. The
+mark is then above 64 bits, and the key is still valid (dp-exchange-core issue #37).
+
+For that key, declare a scale: **`nonce_mode: {:incremental_ns, scale: k}`**, with `k` from 1
+to 12, sends `max(now_ns, previous + 1) * 10^k` as a decimal string. It is fixed, it advances
+with the clock, it needs no seed, and a restart keeps it working.
+
+**Start at the smallest `k` that could work and go up one at a time.** A refused nonce does
+not move the key's mark, so trying `k = 4`, then `5`, then `6` costs nothing. An accepted
+nonce does: the first one accepted at `k = 9` sets the mark near `1e27`, and every smaller
+scale is locked out of that key permanently. Record the `k` that works as part of that key's
+configuration.
+
+Under a scaled mode, `{:nonce_mark_out_of_reach, message}` means "declare the next scale".
+Refused at `k = 12`, the mark is above ~`1.8e30`: **that key must be rotated**, so stop
+retrying and have a person do it.
 
 `seed_nonce/1` remains for the millisecond counter: call it once with a value above the mark
 and the sequence advances by one per call from there. It refuses to lower the counter, a mark

@@ -243,6 +243,52 @@ defmodule DpExchange.Gemini.AuthTest do
     end
   end
 
+  describe "{:incremental_ns, scale: k} — a key whose mark was set above 64 bits (issue #37)" do
+    test "is the nanosecond counter times 10^k, as a decimal string" do
+      nonce = Auth.nonce({:incremental_ns, [scale: 5]})
+      assert is_binary(nonce)
+      value = String.to_integer(nonce)
+
+      assert value > System.system_time(:nanosecond) * 10_000
+      assert rem(value, 100_000) == 0
+      # Above anything 64 bits can hold, which is the point.
+      assert value > 0xFFFF_FFFF_FFFF_FFFF
+    end
+
+    test "is strictly increasing across processes" do
+      mode = {:incremental_ns, [scale: 6]}
+      task = Task.async(fn -> for _index <- 1..300, do: String.to_integer(Auth.nonce(mode)) end)
+      mine = for _index <- 1..300, do: String.to_integer(Auth.nonce(mode))
+      theirs = Task.await(task)
+
+      assert length(Enum.uniq(mine ++ theirs)) == 600
+      assert mine == Enum.sort(mine)
+    end
+
+    test "reaches the signed payload as a string, never a JSON number" do
+      assert {:ok, headers} =
+               Auth.headers(:api_key, "/v1/balances", %{}, @api_key,
+                 nonce_mode: {:incremental_ns, scale: 5}
+               )
+
+      nonce = nonce_from(headers)
+      assert is_binary(nonce)
+      assert String.to_integer(nonce) > 0xFFFF_FFFF_FFFF_FFFF
+    end
+
+    test "a scale outside 1..12, or not an integer, is refused by name" do
+      for mode <- [
+            {:incremental_ns, scale: 0},
+            {:incremental_ns, scale: 13},
+            {:incremental_ns, scale: "5"},
+            {:incremental_us, scale: 5}
+          ] do
+        assert {:error, {:unsupported_nonce_mode, ^mode}} =
+                 Auth.headers(:api_key, "/v1/balances", %{}, @api_key, nonce_mode: mode)
+      end
+    end
+  end
+
   defp nonce_from(headers) do
     headers
     |> header("X-GEMINI-PAYLOAD")

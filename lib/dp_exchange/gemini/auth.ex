@@ -75,10 +75,11 @@ defmodule DpExchange.Gemini.Auth do
   Every nonce the venue **accepts** becomes that key's stored high-water mark, and Gemini
   compares nonces as arbitrary-precision integers. So a caller who clears a stuck mark by
   emitting something enormous — a real consumer used `counter × 1_000` ≈ `1.78e21` — does
-  clear it, and permanently sets the mark to `1.78e21`. Nothing lowers it again, and no mode
-  here can ever satisfy that key afterwards: `:incremental` is anchored to epoch
-  milliseconds (~`1.789e12`), and even nanosecond magnitudes reach only ~`1.789e18`, below
-  `2^64` ≈ `1.844e19` let alone `1.78e21`. The key must be rotated, which is a human action.
+  clear it, and permanently sets the mark to `1.78e21`. Nothing lowers it again. No clock
+  unit reaches it: `:incremental` is anchored to epoch milliseconds (~`1.789e12`), and even
+  nanoseconds reach only ~`1.789e18`, below `2^64` ≈ `1.844e19`. Only a declared scale does
+  (`{:incremental_ns, scale: k}`, below), and every such key is then held at that scale for
+  good. Past the largest scale this module will send, the key must be rotated by a person.
 
   **`nonce(:incremental)` is structurally incapable of that escalation**, and that is the
   property to preserve if this function is ever changed: `max(now_ms, previous + 1)` is
@@ -162,11 +163,39 @@ defmodule DpExchange.Gemini.Auth do
   Everything said of `:incremental_us` holds (its own counter, re-anchored at boot, nothing
   persisted, no escalation, one-way per key).
 
-  **Under `:incremental_ns`, `{:nonce_mark_out_of_reach, message}` is conclusive.** No nonce
-  that fits in 64 bits is above the key's mark, so no mode here or elsewhere reaches it, and
-  **the key must be rotated, which is a human action**. The same shape as under
-  `:incremental_us`, so a host already handling it needs no new clause; the mode it chose says
-  which of the two it means.
+  **Under `:incremental_ns`, `{:nonce_mark_out_of_reach, message}` means no 64-bit nonce is
+  above the key's mark.** An earlier version of this section called that conclusive, and it is
+  not: dp-exchange-core issue #37 is a valid key whose mark was set before this package, by
+  the host's own client sending 22-28 digit nonces. The venue compares nonces as
+  arbitrary-precision integers, so those were accepted, and the mark sits above every 64-bit
+  value. Such a key is still reachable with a declared scale, below.
+
+  ## A mark set above 64 bits: `{:incremental_ns, scale: k}`
+
+  `nonce_mode: {:incremental_ns, scale: k}` sends `max(now_ns, previous + 1) * 10^k`, as a
+  decimal string. The counter is `:incremental_ns`'s, unchanged and still 64-bit; only the
+  value on the wire is multiplied, by a power of ten the host declares for that key, `k` in
+  1 to 12.
+
+  **This is the host stating the scale its key is already at, not this package escalating.**
+  The section on the one-way door refuses escalation, meaning a scale that grows at runtime
+  every time the venue says no. That consumes a key's space. A declared `k` is fixed, recorded
+  in the host's configuration, and advances with the clock exactly as `:incremental_ns` does,
+  so it cannot run away. It needs nothing persisted: a restart re-anchors to the clock at the
+  same scale.
+
+  **Declare the smallest `k` that works, and go up one at a time.** A refused nonce does not
+  move the mark, so trying `k = 5`, then `6`, costs nothing. An accepted one does: the first
+  nonce the venue accepts at `k = 9` makes the mark ~`1e27`, and every smaller scale is locked
+  out of that key from then on. Skipping ahead is the same one-way door this module was
+  written to keep hosts from walking through.
+
+  It is sent as a string because that is the form the host's pre-package client sent, and the
+  venue accepted it for weeks. A JSON number past 64 bits is exactly the value a parser may
+  read as a float, and a float drops the low digits that make one nonce larger than the last.
+
+  Under a scaled mode, `{:nonce_mark_out_of_reach, message}` means "declare a larger scale".
+  With `k = 12` refused, the mark is above ~`1.8e30`, and the key must be rotated by a person.
   """
 
   @nonce_counter {__MODULE__, :nonce_counter}
@@ -191,9 +220,23 @@ defmodule DpExchange.Gemini.Auth do
   @type scheme :: :api_key | :oauth
 
   @typedoc "Which validation mode the host's API key was provisioned with."
-  @type nonce_mode :: :time_based | :incremental | :incremental_us | :incremental_ns
+  @type nonce_mode ::
+          :time_based
+          | :incremental
+          | :incremental_us
+          | :incremental_ns
+          | {:incremental_ns, [scale: pos_integer()]}
 
   @nonce_modes [:time_based, :incremental, :incremental_us, :incremental_ns]
+
+  # A declared scale, 1 to 12. The bound is not the venue's; it is what makes a typo (`100`)
+  # a refusal instead of a nonce that raises the key's mark past any value a host meant. 12
+  # already covers the 1.8e27 issue #37 records, with three orders of magnitude to spare.
+  @nonce_scales 1..12
+
+  defp known_mode?(nil), do: true
+  defp known_mode?({:incremental_ns, [scale: scale]}), do: scale in @nonce_scales
+  defp known_mode?(mode), do: mode in @nonce_modes
 
   @doc """
   Headers for a private request, for the scheme the host named.
@@ -204,8 +247,8 @@ defmodule DpExchange.Gemini.Auth do
 
   ## Options
 
-    * `:nonce_mode` — `:time_based` (default), `:incremental`, `:incremental_us` or
-      `:incremental_ns`. `:api_key`
+    * `:nonce_mode` — `:time_based` (default), `:incremental`, `:incremental_us`,
+      `:incremental_ns` or `{:incremental_ns, scale: k}`. `:api_key`
       only. See the moduledoc's "An incremental key the millisecond counter cannot reach".
 
   Returns `{:error, {:unsupported_auth_scheme, scheme}}` when `scheme` names something
@@ -245,7 +288,7 @@ defmodule DpExchange.Gemini.Auth do
       # An unrecognised mode — a typo, or `:incremental_ms` for `:incremental` — reached
       # `nonce/1`, which has no clause for it, and raised in the caller's process. It is
       # refused by name before anything is signed.
-      mode not in [nil | @nonce_modes] ->
+      not known_mode?(mode) ->
         {:error, {:unsupported_nonce_mode, mode}}
 
       true ->
@@ -303,7 +346,7 @@ defmodule DpExchange.Gemini.Auth do
   two processes calling in the same millisecond get different, ordered values, because a
   repeated nonce is rejected outright by an incremental key.
   """
-  @spec nonce(nonce_mode() | nil) :: pos_integer()
+  @spec nonce(nonce_mode() | nil) :: pos_integer() | String.t()
   def nonce(mode \\ :time_based)
 
   def nonce(:incremental), do: next_nonce(@nonce_counter, :millisecond)
@@ -319,6 +362,16 @@ defmodule DpExchange.Gemini.Auth do
   def nonce(:incremental_ns), do: next_nonce(@nonce_counter_ns, :nanosecond)
 
   def nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
+
+  # dp-exchange-core issue #37. A key whose mark was set by a client before this package, with
+  # 22-28 digit nonces, is above every 64-bit value. The counter stays the nanosecond one; only
+  # the value on the wire is multiplied, by a power of ten the HOST declared for that key.
+  # Sent as a decimal STRING: that is the form the host's own client sent for weeks and the
+  # venue accepted, while a JSON number past 64 bits invites a parser that reads it as a
+  # float and silently drops its low digits, which would make it "not increased".
+  def nonce({:incremental_ns, [scale: scale]}) when scale in @nonce_scales do
+    Integer.to_string(next_nonce(@nonce_counter_ns, :nanosecond) * Integer.pow(10, scale))
+  end
 
   # `max(now, previous + 1)`: anchored to the wall clock, ahead of it by one only when calls
   # land inside the same unit. The compare-and-exchange makes it monotonic node-wide.

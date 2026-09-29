@@ -20,6 +20,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- `nonce_mode: {:incremental_ns, scale: k}`, `k` from 1 to 12, for an incremental key whose
+  mark was set above 64 bits, typically by a client used before this package
+  (dp-exchange-core issue #37). It sends `max(now_ns, previous + 1) * 10^k` as a decimal
+  string. It is the nanosecond counter unchanged, times a power of ten the host declares for
+  that key. It advances with the clock, needs no seed and survives restarts, so it is not the
+  runtime escalation this package refuses. A refused nonce leaves the key's mark where it
+  was, so declare the smallest `k` that works and go up one at a time. An accepted nonce
+  holds the key at that scale permanently. Under it, `{:nonce_mark_out_of_reach, message}`
+  means "declare a larger scale".
+
+### Changed
+
+- `{:nonce_mark_out_of_reach, _}` under `:incremental_ns` is no longer documented as proof
+  that a key must be rotated. It means no 64-bit nonce reaches the mark, which a key whose
+  mark was set by larger integers can still pass with a declared scale.
+
 ## [0.2.88] - 2026-09-29
 
 ### Added

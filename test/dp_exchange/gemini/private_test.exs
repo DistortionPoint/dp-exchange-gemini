@@ -1832,7 +1832,14 @@ defmodule DpExchange.Gemini.PrivateTest do
     }
 
     test "is refused as :nonce_mark_out_of_reach, so a host can stop retrying and page" do
-      # The same shape under :incremental_ns, where it is conclusive (issue #36).
+      # The same shape under :incremental_ns (issue #36) and a declared scale (issue #37).
+      assert {:refused, {:nonce_mark_out_of_reach, _message}} =
+               Private.get_balances(@credentials,
+                 plug: responding(@stuck, status: 400),
+                 retry_attempts: 0,
+                 nonce_mode: {:incremental_ns, scale: 5}
+               )
+
       assert {:refused, {:nonce_mark_out_of_reach, _message}} =
                Private.get_balances(@credentials,
                  plug: responding(@stuck, status: 400),
