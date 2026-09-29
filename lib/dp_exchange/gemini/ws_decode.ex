@@ -212,6 +212,46 @@ defmodule DpExchange.Gemini.WsDecode do
   def depth_gap?(_frame, _last_applied), do: true
 
   @doc """
+  An anchor `OrderBook` from the FIRST `{symbol}@depth`/`@depthFast` frame after
+  (re)subscribing on a connection that requested the `snapshot` connection parameter
+  (websocket.yaml:1263-1270).
+
+  That frame carries the same envelope as every other `depthUpdate` — `e`, `E`, `s`, `U`,
+  `u`, `b`, `a` — but `b`/`a` hold **absolute levels**, not a diff, and there is "no separate
+  snapshot message and no lastUpdateId field": `u` is this book's sequence instead, the same
+  value the next real diff's `U` is checked against. Every frame after this one, for the same
+  symbol, is an ordinary diff — see `to_order_book_delta/2`.
+
+  Sorted the same way `to_order_book/3` sorts a partial-depth snapshot — best price first,
+  per `Core.Types.OrderBook`'s own contract — because this is the same shape of value
+  (absolute levels), arriving on a different channel.
+
+  `venue_time` is read from `E` when readable and `nil` otherwise, matching
+  `to_top_of_book/3`'s own split: `depthUpdate` requires `E`, but a value this package
+  cannot read is not one it invents a replacement for.
+  """
+  @spec to_order_book_from_depth_update(map(), String.t(), DateTime.t()) ::
+          {:ok, OrderBook.t()} | {:error, :unexpected_response_shape}
+  def to_order_book_from_depth_update(%{"b" => bids, "a" => asks} = frame, symbol, observed_at)
+      when is_list(bids) and is_list(asks) do
+    {:ok,
+     %OrderBook{
+       symbol: symbol,
+       bids: levels(bids, :desc),
+       asks: levels(asks, :asc),
+       venue_time: venue_time_or_nil(frame["E"]),
+       observed_at: observed_at,
+       sequence: frame["u"],
+       provider: :gemini
+     }}
+  end
+
+  # Same rule as `to_order_book/3`: both sides are required, and one that is `null` or not a
+  # list is not an empty side.
+  def to_order_book_from_depth_update(_frame, _symbol, _observed_at),
+    do: {:error, :unexpected_response_shape}
+
+  @doc """
   The bid and ask changes in a differential depth frame, as `{price, quantity}` levels.
 
   **A quantity of zero removes the level** — the vendor says so — and is returned as-is

@@ -63,10 +63,18 @@ defmodule DpExchange.Gemini.SocketTest do
     test "event time is read as NANOseconds" do
       # A factor of a million. Read as milliseconds this timestamp lands in the year
       # 58,000 and every staleness check passes forever.
+      #
+      # This used to assert the same thing of the `Quote`'s `venue_time` — read from the
+      # frame's own `E`, the book UPDATE time. `c` (websocket.yaml:1254-1256) is "Last
+      # trade price, present once the book has traded", with no trade time documented, so a
+      # `Quote`'s `venue_time` is `nil` now (see `deliver_last_trade/3`) and this assertion
+      # belongs to `TopOfBook`, which genuinely is dated from `E`.
       assert {:ok, _state} = deliver(@book_ticker)
 
-      assert_receive {:dp_exchange, :gemini, %Quote{venue_time: timestamp}}
+      assert_receive {:dp_exchange, :gemini, %TopOfBook{venue_time: timestamp}}
       assert timestamp.year == 2026
+
+      assert_receive {:dp_exchange, :gemini, %Quote{venue_time: nil}}
     end
 
     test "an empty-string bid/ask does not crash the socket — reproduced live 2026-09-04" do
@@ -173,6 +181,55 @@ defmodule DpExchange.Gemini.SocketTest do
       assert {:ok, _state} = deliver(%{@book_ticker | "s" => "aavegusd"})
 
       assert_receive {:dp_exchange, :gemini, %Quote{symbol: "AAVE-GUSD"}}
+    end
+
+    test "a Quote's venue_time is nil even when the frame carries a real E" do
+      # `c` (websocket.yaml:1254-1256) is "Last trade price, present once the book has
+      # traded" — no trade time is documented. The frame's `E` is the book UPDATE time, not
+      # the trade's, and stamping it onto the trade attaches a real timestamp to the wrong
+      # event.
+      assert {:ok, _state} = deliver(@book_ticker)
+      assert_receive {:dp_exchange, :gemini, %Quote{venue_time: nil}}
+    end
+
+    test "the SAME last trade price is reported only once per connection" do
+      # `bookTicker` re-sends the same `c` on every top-of-book change until the NEXT trade
+      # — this channel is not itself trade-triggered. Delivering a `Quote` on every re-send
+      # would report one execution as a fresh trade each time the bid or ask merely moved.
+      assert {:ok, state_after_first} = deliver(@book_ticker)
+      assert_receive {:dp_exchange, :gemini, %Quote{}}
+
+      assert {:ok, _state} =
+               Socket.handle_frame({:text, Jason.encode!(@book_ticker)}, state_after_first)
+
+      refute_receive {:dp_exchange, :gemini, %Quote{}}, 50
+    end
+
+    test "a CHANGED last trade price delivers a new Quote" do
+      assert {:ok, state_after_first} = deliver(@book_ticker)
+      assert_receive {:dp_exchange, :gemini, %Quote{}}
+
+      changed = %{@book_ticker | "c" => "77900.00000"}
+
+      assert {:ok, _state} =
+               Socket.handle_frame({:text, Jason.encode!(changed)}, state_after_first)
+
+      assert_receive {:dp_exchange, :gemini, %Quote{price: price}}
+      assert Decimal.equal?(price, Decimal.new("77900.00000"))
+    end
+
+    test "a reconnect resets the dedupe, so the same price is reported again" do
+      # A reconnected socket has forgotten what it last reported, the same way it has
+      # forgotten what it last subscribed — see `handle_connect/2`.
+      assert {:ok, state_after_first} = deliver(@book_ticker)
+      assert_receive {:dp_exchange, :gemini, %Quote{}}
+
+      assert {:ok, reconnected_state} = Socket.handle_connect(:conn, state_after_first)
+
+      assert {:ok, _state} =
+               Socket.handle_frame({:text, Jason.encode!(@book_ticker)}, reconnected_state)
+
+      assert_receive {:dp_exchange, :gemini, %Quote{}}
     end
   end
 

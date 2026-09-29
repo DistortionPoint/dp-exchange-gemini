@@ -32,13 +32,45 @@ defmodule DpExchange.Gemini.Socket do
   moduledoc of the file that is not ported records why it existed — a mid computed from a
   single delta rather than the maintained book, which is the incident that created it.
 
-  A caller wanting depth calls `get_order_book/2`, which is a REST snapshot with the
-  venue's own per-level timestamps. Where a differential depth frame arrives instead — a
-  future `@depth`/`@depthFast` subscription, not one this socket requests today — it is
-  decoded into `Core.Types.OrderBookDelta` by `WsDecode.to_order_book_delta/2` and forwarded
-  once, per frame. Never accumulated into a book here: see `OrderBookDelta`'s own moduledoc
-  for why a distinct, non-snapshot-shaped type is what keeps that from happening by
-  construction rather than by discipline.
+  A caller wanting depth calls `get_order_book/2`, a REST snapshot that carries no venue time
+  (its per-level `timestamp` is a documented dummy value, rest.yaml:8065) and no `u`, so it cannot anchor a
+  `@depth`/`@depthFast` diff stream: the vendor's own sequence check (`WsDecode.depth_gap?/2`)
+  compares one `u` against the next frame's `U`, and a REST call has neither.
+
+  ## A depth diff stream needs its own anchor
+
+  The vendor's rule (websocket.yaml:1263-1270): with the `snapshot` **connection** parameter
+  set, the FIRST `depthUpdate` frame per symbol after (re)subscribing carries absolute levels
+  — "there is no separate snapshot message and no lastUpdateId field" — and every frame after
+  it is an ordinary diff. The parameter is set once, at the WebSocket upgrade
+  (`Environment.websocket_url/2`), so a caller declares its intent to carry
+  `:depth`/`:depth_fast` through `start_link/1`'s `:channels` option, before this socket ever
+  dials the venue — there is no way to add it after connecting.
+
+  A connection started that way delivers the first post-(re)subscribe `depthUpdate` per
+  symbol as `Core.Types.OrderBook` (`WsDecode.to_order_book_from_depth_update/3`) and every
+  one after it as `Core.Types.OrderBookDelta` (`WsDecode.to_order_book_delta/2`), tracked per
+  symbol in `depth_anchored` and reset on every connect — a reconnected socket carries no
+  subscriptions, so the next frame for any symbol is an anchor again, exactly as a fresh
+  subscribe would produce one.
+
+  A connection started WITHOUT `:depth`/`:depth_fast` in `:channels` never sets the
+  parameter, and every `depthUpdate` on it is delivered as a diff — the behaviour this socket
+  had before the parameter existed, and still the right one for a connection the venue was
+  never told to anchor.
+
+  ## A partial-depth snapshot cannot name its own symbol
+
+  `@depth5`/`@depth10`/`@depth20` (and their `…@100ms` siblings) answer with
+  `OrderBookSnapshot` (websocket.yaml:1217-1233): `required: [lastUpdateId, bids, asks]`,
+  no `s`, and no combined-stream wrapper names one either — read the whole document and
+  nothing attributes one of these frames to a stream. The only attribution this socket can
+  make without guessing is "this connection carries exactly one such channel, for exactly one
+  symbol", so `subscribe/3` refuses a second, distinct symbol against any of
+  `WsChannels.partial_depth/0` on the same connection with `{:error,
+  {:partial_depth_symbol_conflict, existing_symbol}}`, and a frame that arrives while none — or
+  more than one, which should not be reachable through `subscribe/3` but is not assumed
+  impossible — is claimed raises a `:degraded` notice rather than vanishing.
 
   ## Event time is nanoseconds
 
@@ -194,6 +226,15 @@ defmodule DpExchange.Gemini.Socket do
     ]
   end
 
+  @doc """
+  `opts` also accepts `:channels` — the channels this connection is DECLARED to carry, used
+  only to decide whether to request the venue's `snapshot` connection parameter (see the
+  moduledoc's "A depth diff stream needs its own anchor"). It changes nothing about which
+  channels can actually be subscribed later; `subscribe/3` still takes a `channel` argument
+  of its own, and this is a one-time hint made before the socket ever connects, because the
+  parameter cannot be added after the WebSocket upgrade. Omit it, or leave `:depth` and
+  `:depth_fast` out of it, and this socket behaves exactly as it always has.
+  """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     url =
@@ -208,7 +249,13 @@ defmodule DpExchange.Gemini.Socket do
       # When anything, a frame or a pong, last arrived, and this connection's liveness
       # check. See the moduledoc's "A dead connection is found by pinging it".
       last_heard_at: nil,
-      liveness: nil
+      liveness: nil,
+      # Whether THIS connection asked the venue for the `snapshot` parameter — decided once,
+      # from `opts`, because the parameter is set at the WebSocket upgrade and there is no
+      # way to add it once connected. Read via `state[:depth_snapshot?]` elsewhere, so a bare
+      # test-built state map that omits this key still reads the same default (falsy) this
+      # field starts at.
+      depth_snapshot?: depth_snapshot?(opts)
     }
 
     VendoredWebSockex.start_link(url, __MODULE__, state, connect_opts(opts))
@@ -222,7 +269,18 @@ defmodule DpExchange.Gemini.Socket do
   # use it for a proxy. `config/` does not ship, so a consumer's default is still the venue.
   defp default_url(opts) do
     Config.get(:dp_exchange_gemini, :websocket_url, nil) ||
-      opts |> Environment.resolve() |> Environment.websocket_url()
+      opts |> Environment.resolve() |> Environment.websocket_url(snapshot_url_opts(opts))
+  end
+
+  defp depth_snapshot?(opts), do: Enum.any?(Keyword.get(opts, :channels, []), &depth_channel?/1)
+
+  defp depth_channel?(channel), do: channel in [:depth, :depth_fast]
+
+  defp snapshot_url_opts(opts) do
+    # `-1`: the full book, not a guessed top-N. The vendor's own words for the alternative —
+    # "a positive N for the top N levels" — describe a DIFFERENT, narrower anchor this
+    # package has no basis to pick a value for; `-1` is the one option that is not a guess.
+    if depth_snapshot?(opts), do: [snapshot: -1], else: []
   end
 
   @doc """
@@ -253,7 +311,8 @@ defmodule DpExchange.Gemini.Socket do
   """
   @spec subscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
   def subscribe(socket, symbols, channel \\ :book_ticker) do
-    with :ok <- validate_channel(symbols, channel) do
+    with :ok <- validate_channel(symbols, channel),
+         :ok <- claim_partial_depth(socket, symbols, channel) do
       send_rpc(socket, "subscribe", streams(symbols, channel))
     end
   end
@@ -261,11 +320,15 @@ defmodule DpExchange.Gemini.Socket do
   @doc """
   Unsubscribes the connection from `channel` for each symbol.
 
-  Refuses the same two shapes `subscribe/3` does, for the same reasons — see its doc.
+  Refuses the same two shapes `subscribe/3` does, for the same reasons — see its doc. Also
+  releases any `WsChannels.partial_depth/0` claim `subscribe/3` made for these symbols on
+  this channel, so a different symbol can be claimed afterward — see the moduledoc's "A
+  partial-depth snapshot cannot name its own symbol".
   """
   @spec unsubscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
   def unsubscribe(socket, symbols, channel \\ :book_ticker) do
     with :ok <- validate_channel(symbols, channel) do
+      release_partial_depth(socket, symbols, channel)
       send_rpc(socket, "unsubscribe", streams(symbols, channel))
     end
   end
@@ -298,6 +361,118 @@ defmodule DpExchange.Gemini.Socket do
     else
       :ok
     end
+  end
+
+  # See the moduledoc's "A partial-depth snapshot cannot name its own symbol". A channel
+  # outside `WsChannels.partial_depth/0`, or an empty symbol list, needs no claim.
+  defp claim_partial_depth(_socket, [], _channel), do: :ok
+
+  defp claim_partial_depth(socket, symbols, channel) do
+    if channel in WsChannels.partial_depth() do
+      claim_partial_depth_symbol(socket, symbols, channel)
+    else
+      :ok
+    end
+  end
+
+  # A single call naming more than one DISTINCT symbol against a partial-depth channel is
+  # unattributable on its own terms — no history to check, and refusing it costs nothing
+  # this venue's frame ordering depends on.
+  defp claim_partial_depth_symbol(socket, symbols, channel) do
+    case Enum.uniq(symbols) do
+      [symbol] ->
+        do_claim_partial_depth_symbol(socket, symbol, channel)
+
+      _more_than_one ->
+        {:error, {:partial_depth_symbol_conflict, symbols}}
+    end
+  end
+
+  # **Check and claim in ONE `:sys.replace_state/3`**, whose function runs inside the socket
+  # process, so two concurrent `subscribe/3` calls cannot both see "no claim yet" and both
+  # claim different symbols. A read with `:sys.get_state/2` followed by a separate write was
+  # exactly that race. The outcome is read back from the state the function returned: the
+  # claim is there if it was allowed, and absent if another symbol already held it.
+  defp do_claim_partial_depth_symbol(socket, symbol, channel) do
+    claim = fn state ->
+      case partial_depth_symbols(state) do
+        # No claim yet, or the same symbol already claimed on a sibling partial-depth
+        # channel (e.g. `@depth5` and `@depth10` for the same symbol both attribute
+        # cleanly) — both are fine.
+        existing when existing == [] or existing == [symbol] ->
+          add_partial_depth_claim(state, channel, symbol)
+
+        _other_symbol ->
+          state
+      end
+    end
+
+    case sys_replace_state_returning(socket, claim) do
+      {:ok, state} ->
+        claims = Map.get(state, :partial_depth_claims, MapSet.new())
+
+        if MapSet.member?(claims, {channel, symbol}),
+          do: :ok,
+          else: {:error, {:partial_depth_symbol_conflict, hd(partial_depth_symbols(state))}}
+
+      # A socket this package cannot introspect — not a real process, or one that has
+      # already exited. `send_rpc/3` still reports a dead socket on its own; this guard is a
+      # best-effort refusal of an AMBIGUOUS frame later, not the boundary that decides
+      # whether the frame goes out at all.
+      :error ->
+        :ok
+    end
+  end
+
+  defp sys_replace_state_returning(socket, fun) do
+    {:ok, :sys.replace_state(socket, fun, 2_000)}
+  catch
+    :exit, _reason -> :error
+  end
+
+  defp release_partial_depth(socket, symbols, channel) do
+    if channel in WsChannels.partial_depth() do
+      sys_replace_state(socket, fn state ->
+        Enum.reduce(symbols, state, &remove_partial_depth_claim(&2, channel, &1))
+      end)
+    else
+      :ok
+    end
+  end
+
+  defp partial_depth_symbols(state) do
+    state
+    |> Map.get(:partial_depth_claims, MapSet.new())
+    |> Enum.map(fn {_channel, symbol} -> symbol end)
+    |> Enum.uniq()
+  end
+
+  defp add_partial_depth_claim(state, channel, symbol) do
+    Map.update(
+      state,
+      :partial_depth_claims,
+      MapSet.new([{channel, symbol}]),
+      &MapSet.put(&1, {channel, symbol})
+    )
+  end
+
+  defp remove_partial_depth_claim(state, channel, symbol) do
+    Map.update(state, :partial_depth_claims, MapSet.new(), &MapSet.delete(&1, {channel, symbol}))
+  end
+
+  # `:sys.get_state/2` and `:sys.replace_state/2` are the generic OTP "peek/poke a special
+  # process's own state" primitives — the same mechanism this package's own tests already use
+  # on `Feed` (`:sys.replace_state(feed, fn state -> ... end)`, `feed_test.exs`) and that this
+  # socket's own vendored loop implements for `:sys.handle_system_msg/6` at every `receive`
+  # (see `lib/vendor/websockex.ex`). They work on THIS socket the same way, because the
+  # underlying protocol is `:sys`'s, not `GenServer`'s. A bounded timeout, not the 5s default:
+  # a caller here is `subscribe/3`, already budgeted against `Feed.@call_timeout`, and this
+  # check must not itself become the slow part of that budget.
+  defp sys_replace_state(socket, fun) do
+    :sys.replace_state(socket, fun, 2_000)
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 
   @doc """
@@ -393,7 +568,43 @@ defmodule DpExchange.Gemini.Socket do
     if state.connected_once?, do: report_reconnected(state)
     liveness = make_ref()
     schedule_liveness(liveness)
-    {:ok, %{state | connected_once?: true, last_heard_at: now_ms(), liveness: liveness}}
+
+    # `Map.merge/2`, not `%{state | ...}` — the four keys below are self-initialising
+    # (`Map.get(state, :key, default)` everywhere they are read) rather than required at
+    # `start_link/1`, the same idiom the original `last_depth_update` already used before
+    # this fix. A bare test-built state map that has never seen a frame legitimately lacks
+    # them, and `%{state | ...}` raises `KeyError` on a key it does not already have; a
+    # reset must not itself require the thing it is resetting to already exist.
+    {:ok,
+     Map.merge(state, %{
+       connected_once?: true,
+       last_heard_at: now_ms(),
+       liveness: liveness,
+       # A reconnected socket carries no subscriptions (`Feed`'s own moduledoc), so
+       # everything below describes a subscription state that no longer exists on the
+       # connection that just replaced it:
+       #
+       # * `last_depth_update` — the vendor's gap rule is PER BOOK (websocket.yaml:
+       #   1269-1270); this was one node-wide counter until this fix, which meant a gap
+       #   on one symbol's book could be masked, or a healthy one falsely flagged, by
+       #   whatever OTHER symbol's frame happened to arrive most recently. Per-symbol now,
+       #   and cleared here so a symbol's first frame after a reconnect is never treated
+       #   as a gap against an update id from a connection the venue has already forgotten.
+       # * `depth_anchored` — which symbols have already had their post-(re)subscribe
+       #   anchor frame (see the moduledoc's "A depth diff stream needs its own anchor").
+       #   The venue owes a fresh one to each symbol on this new connection.
+       # * `partial_depth_claims` — which `WsChannels.partial_depth/0` channel/symbol
+       #   pairs this connection has claimed (see "A partial-depth snapshot cannot name
+       #   its own symbol"). Nothing is actually subscribed yet on the new connection.
+       # * `last_trade_price` — the last `c` this connection reported as a `Quote`, per
+       #   symbol (see `deliver_last_trade/3`). A fresh connection has reported nothing,
+       #   so its first bookTicker frame for a symbol must deliver a `Quote` again even if
+       #   `c` is unchanged from what the OLD connection last said.
+       last_depth_update: %{},
+       depth_anchored: MapSet.new(),
+       partial_depth_claims: MapSet.new(),
+       last_trade_price: %{}
+     })}
   end
 
   # See the moduledoc's "A dead connection is found by pinging it". A check whose ref is not
@@ -501,7 +712,12 @@ defmodule DpExchange.Gemini.Socket do
   defp handle_message(%{"t" => _tid, "p" => _p, "q" => _q} = message, state),
     do: deliver_trade(message, state)
 
-  # A differential depth frame. **Not delivered as an OrderBook**: a diff is not a book, and
+  # A differential depth frame — or, on a connection that asked for the `snapshot`
+  # connection parameter, the FIRST such frame per symbol since (re)subscribing, which
+  # carries absolute levels instead of a diff. See the moduledoc's "A depth diff stream
+  # needs its own anchor" and `WsDecode.to_order_book_from_depth_update/3`.
+  #
+  # **The ordinary case is not delivered as an OrderBook**: a diff is not a book, and
   # handing a subscriber the changed levels under a type that means "the whole book" is the
   # substitution this family refuses. Delivered as `Core.Types.OrderBookDelta` instead — the
   # contract's own shape for "changed levels, not accumulated" — via `WsDecode`'s decoder,
@@ -510,47 +726,62 @@ defmodule DpExchange.Gemini.Socket do
   # "internal wiring" conformance check exists to catch: a decoder built, documented, and
   # never called, while its caller forwarded venue JSON directly instead.
   defp handle_message(%{"e" => "depthUpdate", "U" => _first} = message, state) do
-    if WsDecode.depth_gap?(message, state[:last_depth_update]) do
-      # The vendor's rule: discard the book and resubscribe. A consumer that keeps applying
-      # after a gap holds a book that is silently wrong from here on, with every price real.
-      notify(
-        state,
-        Notice.new(:degraded, :gemini,
-          details: %{reason: "depth sequence gap", symbol: message["s"]}
-        )
-      )
-    end
+    case symbol_of(message) do
+      {:ok, symbol} ->
+        deliver_depth_update(message, symbol, state)
 
-    with {:ok, symbol} <- symbol_of(message),
-         {:ok, delta} <- WsDecode.to_order_book_delta(message, symbol) do
-      send(state.subscriber, {:dp_exchange, :gemini, delta})
-    else
-      # An undated diff cannot be ordered against anything, and one naming no symbol cannot
-      # be applied to any book, so no delta is sent. **But the book is now missing this
-      # frame's changes**, and `last_depth_update` advances past it below, so the next frame
-      # shows no gap. It used to be dropped in silence, leaving a subscriber applying later
-      # diffs to a book that is wrong from here on with every price real. It is the same
-      # outcome as a sequence gap, and it gets the same notice: discard and resubscribe.
-      _unplaceable ->
+      # A diff naming no symbol cannot be applied to any book, so nothing is sent. The
+      # sequence bookkeeping this frame would have advanced is per-symbol now (see the
+      # moduledoc's "handle_connect/2" reset comment) and there is no symbol to key it
+      # under, so nothing there advances either — there is nothing left to make consistent
+      # for a symbol this package was never told.
+      :error ->
         notify(
           state,
           Notice.new(:degraded, :gemini,
             details: %{reason: "undecodable depth update", symbol: message["s"]}
           )
         )
-    end
 
-    {:ok, Map.put(state, :last_depth_update, message["u"])}
+        {:ok, state}
+    end
   end
 
-  # A partial-depth snapshot: absolute levels and a `lastUpdateId`, which is a book.
+  # A partial-depth snapshot: absolute levels and a `lastUpdateId`, which is a book — but
+  # `OrderBookSnapshot` (websocket.yaml:1217-1233) carries no `s`, so this frame cannot name
+  # its own symbol. Attributed only from `partial_depth_claims`, which `subscribe/3` builds:
+  # see the moduledoc's "A partial-depth snapshot cannot name its own symbol".
   defp handle_message(%{"lastUpdateId" => _id, "bids" => _b, "asks" => _a} = message, state) do
-    # A snapshot whose side is not a list is not delivered: a book in which nobody bids,
-    # built from a side this package could not read, is the substitution `to_order_book/3`
-    # now refuses. The next snapshot replaces it whole, so nothing is left to repair.
-    with {:ok, symbol} <- symbol_of(message),
-         {:ok, book} <- WsDecode.to_order_book(message, symbol, DateTime.utc_now()) do
-      send(state.subscriber, {:dp_exchange, :gemini, book})
+    case partial_depth_symbols(state) do
+      [symbol] ->
+        # A snapshot whose side is not a list is not delivered: a book in which nobody
+        # bids, built from a side this package could not read, is the substitution
+        # `to_order_book/3` now refuses. The next snapshot replaces it whole, so nothing is
+        # left to repair.
+        case WsDecode.to_order_book(message, symbol, DateTime.utc_now()) do
+          {:ok, book} ->
+            send(state.subscriber, {:dp_exchange, :gemini, book})
+
+          {:error, _reason} ->
+            notify(
+              state,
+              Notice.new(:degraded, :gemini,
+                details: %{reason: "unreadable partial-depth snapshot", symbol: symbol}
+              )
+            )
+        end
+
+      # Zero claims (nothing this package asked `subscribe/3` for), or more than one (should
+      # not be reachable through `subscribe/3`'s own refusal, but is not assumed impossible
+      # here) — either way there is no single symbol to attribute this frame to, and a
+      # snapshot that cannot be attributed must raise a notice, not vanish silently.
+      _zero_or_ambiguous ->
+        notify(
+          state,
+          Notice.new(:degraded, :gemini,
+            details: %{reason: "unattributable partial-depth snapshot"}
+          )
+        )
     end
 
     {:ok, state}
@@ -590,7 +821,7 @@ defmodule DpExchange.Gemini.Socket do
     {:ok, top} = WsDecode.to_top_of_book(message, symbol, DateTime.utc_now())
 
     send(state.subscriber, {:dp_exchange, :gemini, top})
-    deliver_last_trade(message["c"], symbol, top.venue_time, state)
+    state = deliver_last_trade(message["c"], symbol, state)
 
     {:ok, state}
   end
@@ -619,6 +850,66 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   defp handle_message(_other, state), do: {:ok, state}
+
+  defp deliver_depth_update(message, symbol, state) do
+    last_by_symbol = Map.get(state, :last_depth_update, %{})
+    last_applied = Map.get(last_by_symbol, symbol)
+
+    if WsDecode.depth_gap?(message, last_applied) do
+      # The vendor's rule: discard the book and resubscribe. A consumer that keeps applying
+      # after a gap holds a book that is silently wrong from here on, with every price real.
+      # Per symbol — websocket.yaml:1269-1270 states the rule per book, and a single
+      # node-wide counter (this package's own defect until now) could mask a real gap on
+      # one symbol behind unrelated traffic on another, or flag one that never happened.
+      notify(
+        state,
+        Notice.new(:degraded, :gemini, details: %{reason: "depth sequence gap", symbol: symbol})
+      )
+    end
+
+    {decoded, state} = decode_depth_frame(message, symbol, state)
+
+    case decoded do
+      {:ok, payload} ->
+        send(state.subscriber, {:dp_exchange, :gemini, payload})
+
+      # **The book is now missing this frame's changes**, and `last_depth_update` advances
+      # past it below, so the next frame shows no gap. It used to be dropped in silence,
+      # leaving a subscriber applying later diffs to a book that is wrong from here on with
+      # every price real. It is the same outcome as a sequence gap, and it gets the same
+      # notice: discard and resubscribe.
+      {:error, _reason} ->
+        notify(
+          state,
+          Notice.new(:degraded, :gemini,
+            details: %{reason: "undecodable depth update", symbol: symbol}
+          )
+        )
+    end
+
+    {:ok, Map.put(state, :last_depth_update, Map.put(last_by_symbol, symbol, message["u"]))}
+  end
+
+  # The anchor case: this symbol's snapshot parameter is in force and this is the first
+  # frame seen for it since the last (re)subscribe/connect. Marked anchored regardless of
+  # whether the decode below succeeds — the FIRST frame is defined by its position in the
+  # stream, not by whether this package could read it; treating a later frame as the anchor
+  # instead would read a genuine diff's changed levels as if they were the whole book.
+  defp decode_depth_frame(message, symbol, %{depth_snapshot?: true} = state) do
+    anchored = Map.get(state, :depth_anchored, MapSet.new())
+
+    if MapSet.member?(anchored, symbol) do
+      {WsDecode.to_order_book_delta(message, symbol), state}
+    else
+      state = Map.put(state, :depth_anchored, MapSet.put(anchored, symbol))
+      {WsDecode.to_order_book_from_depth_update(message, symbol, DateTime.utc_now()), state}
+    end
+  end
+
+  # No `snapshot` parameter in force on this connection: every depthUpdate is an ordinary
+  # diff, exactly as this socket has always delivered them.
+  defp decode_depth_frame(message, symbol, state),
+    do: {WsDecode.to_order_book_delta(message, symbol), state}
 
   defp deliver_trade(message, state) do
     case symbol_of(message) do
@@ -650,29 +941,58 @@ defmodule DpExchange.Gemini.Socket do
 
   # No trade price in the frame means the book has quotes and no execution to report. That
   # is a real state and it is silence here, not a `Quote` built from a bid.
-  defp deliver_last_trade(nil, _symbol, _timestamp, _state), do: :ok
-  defp deliver_last_trade("", _symbol, _timestamp, _state), do: :ok
+  defp deliver_last_trade(nil, _symbol, state), do: state
+  defp deliver_last_trade("", _symbol, state), do: state
 
-  defp deliver_last_trade(last, symbol, timestamp, state) do
+  # `c` is "Last trade price, present once the book has traded" (websocket.yaml:1254-1256)
+  # — the venue documents no trade TIME for it, only that the book has traded. This used to
+  # stamp `venue_time` with the FRAME's own `E`, which is `bookTicker`'s own event time — the
+  # book UPDATE, not the trade — so a real timestamp ended up attached to the wrong event: a
+  # book can tick with no trade at all. `nil` is what the venue actually states about when
+  # this traded: nothing. `Core.Types.Quote.venue_time` is explicitly nullable for exactly
+  # this shape — "`nil` where the venue publishes none" — and a `nil` here says that, rather
+  # than inventing a time this package was never given.
+  #
+  # And a `bookTicker` frame is not itself trade-triggered: the venue re-sends the SAME `c`
+  # on every quote change until the NEXT trade. Delivering a `Quote` on every one of those
+  # would report one real execution as a fresh trade each time the bid or ask merely moved —
+  # the same "real value, wrong meaning" substitution this family refuses one level up, here
+  # applied to time instead of price. So a `Quote` goes out only the first time this
+  # connection sees this symbol's `c`, or when it changes — tracked per symbol in
+  # `last_trade_price`, reset on connect for the same reason `last_depth_update` is: a
+  # reconnected socket has forgotten what it last reported, so its first frame must report
+  # again even if the venue's own `c` has not moved since the connection that dropped.
+  defp deliver_last_trade(last, symbol, state) do
     # `Quote.price` is required and must be a real traded price — a `Quote` with `price:
     # nil` is the same substitution the family's own `Quote.price` typespec exists to
     # rule out. `"null"` (an unparsable last-trade string) is the same case as `""`
     # above: nothing traded, not a zero and not a missing-but-real price.
     case decimal(last) do
       nil ->
-        :ok
+        state
 
       price ->
-        deliver(state, %Quote{
-          symbol: symbol,
-          price: price,
-          volume: nil,
-          venue_time: timestamp,
-          observed_at: DateTime.utc_now(),
-          provider: :gemini
-        })
+        last_by_symbol = Map.get(state, :last_trade_price, %{})
+
+        if unchanged_trade?(Map.get(last_by_symbol, symbol), price) do
+          state
+        else
+          deliver(state, %Quote{
+            symbol: symbol,
+            price: price,
+            volume: nil,
+            venue_time: nil,
+            observed_at: DateTime.utc_now(),
+            provider: :gemini
+          })
+
+          Map.put(state, :last_trade_price, Map.put(last_by_symbol, symbol, price))
+        end
     end
   end
+
+  defp unchanged_trade?(nil, _price), do: false
+  defp unchanged_trade?(previous, price), do: Decimal.equal?(previous, price)
 
   defp deliver(state, payload), do: send(state.subscriber, {:dp_exchange, :gemini, payload})
 

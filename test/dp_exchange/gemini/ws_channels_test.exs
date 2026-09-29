@@ -518,4 +518,79 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert book.observed_at == observed
     end
   end
+
+  describe "the anchor frame that follows a snapshot-parameter (re)subscribe is a full OrderBook" do
+    @observed ~U[2026-08-28 12:00:00Z]
+
+    # Same envelope as an ordinary depthUpdate (websocket.yaml:1263-1270) — `b`/`a` just
+    # hold absolute levels instead of a diff, and `u` is this book's own sequence.
+    @anchor %{
+      "e" => "depthUpdate",
+      "E" => 1_787_936_147_000_000_000,
+      "s" => "btcusd",
+      "U" => 1,
+      "u" => 100,
+      "b" => [["100.00", "1"], ["101.50", "2"]],
+      "a" => [["103.00", "1"]]
+    }
+
+    test "levels come back sorted, not in the venue's row order" do
+      assert {:ok, %Types.OrderBook{} = book} =
+               WsDecode.to_order_book_from_depth_update(@anchor, "BTC-USD", @observed)
+
+      assert Enum.map(book.bids, fn {price, _qty} -> Decimal.to_string(price) end) ==
+               ["101.50", "100.00"]
+    end
+
+    test "`u` becomes the sequence, the same value the next diff's `U` is checked against" do
+      assert {:ok, book} = WsDecode.to_order_book_from_depth_update(@anchor, "BTC-USD", @observed)
+      assert book.sequence == 100
+    end
+
+    test "venue_time is read from E, unlike the partial-depth snapshot which has none" do
+      assert {:ok, book} = WsDecode.to_order_book_from_depth_update(@anchor, "BTC-USD", @observed)
+      assert book.venue_time
+      assert book.venue_time.year == 2026
+    end
+
+    test "an unreadable E is nil rather than dropping the whole book" do
+      unreadable = %{@anchor | "E" => "soon"}
+
+      assert {:ok, book} =
+               WsDecode.to_order_book_from_depth_update(unreadable, "BTC-USD", @observed)
+
+      assert is_nil(book.venue_time)
+    end
+
+    test "an absent or unreadable side is refused, matching to_order_book/3" do
+      assert {:error, :unexpected_response_shape} =
+               WsDecode.to_order_book_from_depth_update(%{}, "BTC-USD", @observed)
+
+      assert {:error, :unexpected_response_shape} =
+               WsDecode.to_order_book_from_depth_update(
+                 %{"b" => nil, "a" => []},
+                 "BTC-USD",
+                 @observed
+               )
+    end
+  end
+
+  describe "WsChannels.partial_depth/0" do
+    test "names every channel whose messages are the unattributable OrderBookSnapshot" do
+      assert Enum.sort(WsChannels.partial_depth()) ==
+               Enum.sort([
+                 :depth5,
+                 :depth5_fast,
+                 :depth10,
+                 :depth10_fast,
+                 :depth20,
+                 :depth20_fast
+               ])
+    end
+
+    test "excludes the diff channels, which carry their own `s`" do
+      refute :depth in WsChannels.partial_depth()
+      refute :depth_fast in WsChannels.partial_depth()
+    end
+  end
 end

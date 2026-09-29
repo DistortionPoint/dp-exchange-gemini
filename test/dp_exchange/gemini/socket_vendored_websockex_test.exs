@@ -116,6 +116,41 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert_receive {:server_handshake, :error}, 5_000
   end
 
+  test "an explicit :url bypasses the snapshot query string — the test seam owns the URL" do
+    # `start_link/1`'s `:channels` opt only feeds `default_url/1`, which never runs when a
+    # caller supplies `:url` directly (`Keyword.get_lazy`). `state.depth_snapshot?` is set
+    # independently of the URL, from `opts` directly, so it is still true here even though
+    # the URL this socket actually dialled carries no query string at all.
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade/1])
+
+    {:ok, socket_pid} =
+      Socket.start_link(socket_opts(port) ++ [channels: [:depth]])
+
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert :sys.get_state(socket_pid).depth_snapshot? == true
+  end
+
+  test "no :channels means no snapshot parameter and depth_snapshot? stays falsy" do
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    refute :sys.get_state(socket_pid).depth_snapshot?
+  end
+
+  # `default_url/1` — the branch that actually calls `Environment.websocket_url/2` with the
+  # `:snapshot` opt — is not exercised here: `config/test.exs` points `:websocket_url` at a
+  # closed local port precisely so no tier-1 test dials anywhere by accident, and that
+  # Config seam wins before `default_url/1` ever reaches `Environment.websocket_url/2` (see
+  # `default_url/1`'s own body). `Environment.websocket_url/2` itself — the part that turns
+  # `snapshot: -1` into the query string — is a pure function, unit-tested directly in
+  # `environment_test.exs`. The two tests above cover the other half: that `:channels`
+  # actually reaches `state.depth_snapshot?`.
+
   defp socket_opts(port), do: [url: "ws://127.0.0.1:#{port}/", subscriber: self()] ++ @timeouts
 
   defp listen do

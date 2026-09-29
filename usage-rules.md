@@ -26,6 +26,23 @@ the book and last trade in it are delivered rather than dropped. Deltas do carry
 nanosecond event time and are refused without one, because `OrderBookDelta` enforces
 `:timestamp`.
 
+**The streamed last-trade `Quote`'s `venue_time` is `nil` unconditionally — not "unless `E`
+is missing".** This corrects an earlier version of this file, and of the code: `bookTicker`'s
+`c` field is, in the vendor's own words, "Last trade price, present once the book has
+traded" (its AsyncAPI document names no trade TIME at all). The frame's `E` is the
+**book-ticker update's** own event time, not the trade's — a book can tick with no trade at
+all — so stamping `E` onto that `Quote` attached a real timestamp to the wrong event. The
+`TopOfBook` delivered alongside it is unaffected: its `venue_time` is still read from `E`
+exactly as described above.
+
+**The same `Quote` is also no longer emitted on every `bookTicker` tick that repeats the
+same `c`.** This channel is not itself trade-triggered — the venue re-sends the same last
+trade price on every quote change until the next execution — so a subscriber now sees one
+`Quote` the first time a symbol's `c` is seen (or is unreadable-then-readable again) and one
+more each time it genuinely **changes**, never once per tick. A consumer counting on "one
+`Quote` per `bookTicker` frame that carries `c`" will now see fewer of them; a consumer
+wanting the raw tick cadence should read `TopOfBook`, which still arrives on every frame.
+
 ## An order book is sorted, so `hd(bids)` is the best bid
 
 Both arms guarantee it as of 0.2.32 — `get_order_book/2` and the streamed snapshot alike —
@@ -205,20 +222,26 @@ This package uses the venue's `Date` response header, and returns
 `{:error, :missing_venue_timestamp}` when it is absent. It never substitutes the local
 clock, which is what makes a stale quote indistinguishable from a live one.
 
-If you need sub-second freshness, use `subscribe/2` — the stream carries a real
-nanosecond event time per update.
+If you need sub-second freshness, use `subscribe/2` — the `TopOfBook` it delivers carries a
+real nanosecond event time per update. The `Quote` `subscribe/2` also delivers, on a frame
+that carries a last trade, does not — see the correction below the `venue_time` heading near
+the top of this file: the vendor documents no trade time for it, so it is `nil`
+unconditionally, on this transport as much as any other.
 
-**Since 0.2.0 this has a consequence worth knowing**: this venue's `Quote.venue_time` is
-**never `nil`**. The field is nullable across the family precisely because some venues
-publish no time for some frames — but here a response without a `Date` header fails the call
-outright, so a `Quote` that reaches you always carries the venue's own instant. A `nil`
-branch for this venue's quotes is dead code.
+**Since 0.2.0 this has a consequence worth knowing, scoped to `get_price/2` (REST)**: this
+venue's REST `Quote.venue_time` is **never `nil`**. The field is nullable across the family
+precisely because some venues publish no time for some frames — but here a response without
+a `Date` header fails the call outright, so a `Quote` `get_price/2` returns always carries
+the venue's own instant. A `nil` branch for THIS call's quotes is dead code — but the
+streamed last-trade `Quote` is a different call with a different rule, and its `venue_time`
+is `nil` every time, not dead code at all.
 
 `get_order_book/2` is the same. The **stream** is where `nil` appears: a partial-depth
 snapshot (`@depth5`/`@depth10`/`@depth20`) carries `venue_time: nil`, because the vendor's
 own AsyncAPI requires only `[lastUpdateId, bids, asks]` for `OrderBookSnapshot` where
-`BookTicker` requires an `E`. Deltas and `bookTicker` frames do carry a real nanosecond event
-time.
+`BookTicker` requires an `E`. Deltas and `bookTicker`'s own `TopOfBook` do carry a real
+nanosecond event time; the `Quote` a `bookTicker` frame's last trade produces does not — see
+above.
 
 ## A 404 on a market-data call is a refusal, not a retryable error
 

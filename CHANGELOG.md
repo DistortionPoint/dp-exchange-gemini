@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Checked against the vendor's WebSocket AsyncAPI (`websocket.yaml` 0.10.7), fetched 2026-09-29
+and now committed at `docs/reference/gemini/asyncapi/websocket.yaml`.
+
+- The last-trade `Quote` from `@bookTicker` has `venue_time: nil`, and is sent only when the
+  last trade price changes. It was stamped with the book update's time and re-sent on every
+  tick, so an old trade arrived as a fresh quote. `Fake`'s streamed quote matches.
+- Depth-diff sequence checks are per symbol and reset on reconnect. One key for the whole
+  connection compared one symbol's `U` with another's `u`, raising false gap notices and
+  able to hide real ones.
+- A socket started with `channels: [:depth]` (or `:depth_fast`) sets the venue's `snapshot`
+  connection parameter, and delivers the first `depthUpdate` per symbol as a full
+  `OrderBook` and the rest as `OrderBookDelta`. A diff stream previously had no base to apply to.
+- A partial-depth snapshot (`@depth5/10/20`) is attributed to the one symbol its connection
+  carries, since the frame names none. A second symbol on the same connection is refused
+  with `{:error, {:partial_depth_symbol_conflict, symbol}}`, and a frame that cannot be
+  attributed raises a notice. Such frames were dropped in silence because the code
+  required an `s` the frame does not have.
+
 ## [0.2.84] - 2026-09-29
 
 ### Fixed

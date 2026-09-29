@@ -15,6 +15,20 @@ defmodule DpExchange.Gemini.EnvironmentTest do
       assert Environment.websocket_url(:sandbox) == "wss://ws.sandbox.gemini.com"
     end
 
+    test "websocket_url/1 is unchanged — no query string by default" do
+      assert Environment.websocket_url(:production) == "wss://ws.gemini.com"
+      assert Environment.websocket_url(:production, []) == "wss://ws.gemini.com"
+    end
+
+    test "the `snapshot` connection parameter is opt-in, via websocket_url/2" do
+      # websocket.yaml:1263-1270: `-1` for the full book, a positive integer for the top N.
+      assert Environment.websocket_url(:production, snapshot: -1) ==
+               "wss://ws.gemini.com/?snapshot=-1"
+
+      assert Environment.websocket_url(:sandbox, snapshot: 20) ==
+               "wss://ws.sandbox.gemini.com/?snapshot=20"
+    end
+
     test "the REST host is api.sandbox, NOT exchange.sandbox" do
       # Gemini's market-data page names `exchange.sandbox.gemini.com` as the sandbox base
       # URL. That is the website. Measured 2026-08-28: `/v1/symbols` there returns 404 and

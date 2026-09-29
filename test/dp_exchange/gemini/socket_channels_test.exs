@@ -166,10 +166,13 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     end
 
     test "a contiguous frame raises no alarm and advances the sequence" do
+      # `last_depth_update` is per-SYMBOL now — websocket.yaml:1269-1270 states the gap
+      # rule per book, and a single node-wide integer (this override used to be a bare
+      # `10`) let one symbol's traffic mask or fabricate a gap on another's.
       assert {:ok, new_state} =
-               Socket.handle_frame(frame(@diff), state(%{last_depth_update: 10}))
+               Socket.handle_frame(frame(@diff), state(%{last_depth_update: %{"BTC-USD" => 10}}))
 
-      assert new_state.last_depth_update == 15
+      assert new_state.last_depth_update == %{"BTC-USD" => 15}
       refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
     end
 
@@ -177,10 +180,32 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       # The vendor's rule: discard the book and resubscribe. A consumer that keeps applying
       # holds a book that is silently wrong from here on, with every price real.
       assert {:ok, _state} =
-               Socket.handle_frame(frame(@diff), state(%{last_depth_update: 5}))
+               Socket.handle_frame(frame(@diff), state(%{last_depth_update: %{"BTC-USD" => 5}}))
 
       assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
       assert details.reason == "depth sequence gap"
+      assert details.symbol == "BTC-USD"
+    end
+
+    test "a gap on one symbol does not mask or fabricate one on another" do
+      # The exact bug a single node-wide counter had: ETH-USD's own history must not decide
+      # whether BTC-USD's frame is a gap.
+      # ETH-USD's own last-applied (10) makes THIS frame's U (20) a real gap (20 > 11);
+      # BTC-USD's is contiguous.
+      eth_diff = %{@diff | "s" => "ethusd", "U" => 20, "u" => 25}
+
+      state =
+        state(%{last_depth_update: %{"BTC-USD" => 10, "ETH-USD" => 10}})
+
+      assert {:ok, new_state} = Socket.handle_frame(frame(@diff), state)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+      assert new_state.last_depth_update["BTC-USD"] == 15
+      assert new_state.last_depth_update["ETH-USD"] == 10
+
+      assert {:ok, _state} = Socket.handle_frame(frame(eth_diff), new_state)
+
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
+      assert details.symbol == "ETH-USD"
     end
 
     test "the first frame is never a gap" do
@@ -197,34 +222,146 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert {:ok, new_state} = Socket.handle_frame(frame(undated), state())
 
       refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
-      assert new_state.last_depth_update == 15
+      assert new_state.last_depth_update == %{"BTC-USD" => 15}
       # The book is now missing this frame's changes and the next frame will show no gap,
       # so the subscriber is told, as it is for a gap. It used to be silence.
       assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
       assert details.reason == "undecodable depth update"
     end
 
-    test "a snapshot with an unreadable side is not delivered as a book" do
-      snapshot = %{"lastUpdateId" => 7, "s" => "BTCUSD", "bids" => nil, "asks" => []}
-      assert {:ok, _state} = Socket.handle_frame(frame(snapshot), state())
+    test "the anchor frame after a resubscribe is a full OrderBook, not a diff" do
+      # See the moduledoc's "A depth diff stream needs its own anchor" (websocket.yaml:
+      # 1263-1270): with the `snapshot` connection parameter set, the FIRST depthUpdate per
+      # symbol carries absolute levels. `depth_snapshot?: true` is what `start_link/1` sets
+      # from `:channels` when it includes `:depth`/`:depth_fast`.
+      anchored_state = state(%{depth_snapshot?: true})
+
+      assert {:ok, new_state} = Socket.handle_frame(frame(@diff), anchored_state)
+
+      assert_received {:dp_exchange, :gemini, %Types.OrderBook{} = book}
+      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+      assert book.symbol == "BTC-USD"
+      assert book.sequence == 15
+      # Absolute levels, sorted per `OrderBook`'s own contract, not the venue's row order.
+      assert [{price, quantity}] = book.bids
+      assert Decimal.equal?(price, Decimal.new("3610.00"))
+      assert Decimal.equal?(quantity, Decimal.new("1.5"))
+      assert MapSet.member?(new_state.depth_anchored, "BTC-USD")
+
+      # The SECOND frame for the same symbol is an ordinary diff.
+      assert {:ok, _state} = Socket.handle_frame(frame(@diff), new_state)
+      assert_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+    end
+
+    test "without the snapshot parameter, every depthUpdate is still a diff" do
+      # `depth_snapshot?` unset (the default) is this socket's behaviour before the AsyncAPI
+      # anchor was read at all.
+      assert {:ok, _state} = Socket.handle_frame(frame(@diff), state())
+      assert_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
       refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
     end
   end
 
-  describe "a partial-depth snapshot IS a book" do
-    test "it carries absolute levels and the venue's lastUpdateId as the sequence" do
+  describe "a partial-depth snapshot cannot name its own symbol" do
+    # `OrderBookSnapshot` (websocket.yaml:1217-1233) requires only `[lastUpdateId, bids,
+    # asks]` — no `s` — and no combined-stream wrapper names one either. This module used to
+    # embed `"s"` in these fixtures anyway, pinning a shape the venue's own AsyncAPI document
+    # never promises; corrected below to the genuine shape, attributed instead through
+    # `partial_depth_claims`, which mirrors what `subscribe/3` records.
+    test "it carries absolute levels and the venue's lastUpdateId as the sequence, attributed by the connection's one claimed symbol" do
       snapshot = %{
-        "s" => "btcusd",
         "lastUpdateId" => 4242,
         "bids" => [["3610.00", "1.5"]],
         "asks" => [["3611.00", "0.5"]]
       }
 
-      assert {:ok, _state} = Socket.handle_frame(frame(snapshot), state())
+      claimed = state(%{partial_depth_claims: MapSet.new([{:depth5, "BTC-USD"}])})
+      assert {:ok, _state} = Socket.handle_frame(frame(snapshot), claimed)
 
       assert_received {:dp_exchange, :gemini, %Types.OrderBook{} = book}
+      assert book.symbol == "BTC-USD"
       assert book.sequence == 4242
       assert length(book.bids) == 1
+    end
+
+    test "a snapshot with an unreadable side is not delivered as a book" do
+      snapshot = %{"lastUpdateId" => 7, "bids" => nil, "asks" => []}
+      claimed = state(%{partial_depth_claims: MapSet.new([{:depth5, "BTC-USD"}])})
+
+      assert {:ok, _state} = Socket.handle_frame(frame(snapshot), claimed)
+      refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
+
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
+      assert details.reason == "unreadable partial-depth snapshot"
+    end
+
+    test "a snapshot on a connection with no claim raises a notice rather than vanishing" do
+      # The `with` this replaced had no `else`: an unattributable snapshot silently
+      # disappeared. A snapshot that cannot be attributed must raise a notice instead.
+      snapshot = %{"lastUpdateId" => 1, "bids" => [], "asks" => []}
+
+      assert {:ok, _state} = Socket.handle_frame(frame(snapshot), state())
+      refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
+
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
+      assert details.reason == "unattributable partial-depth snapshot"
+    end
+  end
+
+  describe "subscribe/3 refuses a second, distinct partial-depth symbol on the same connection" do
+    defmodule SocketStub do
+      @moduledoc false
+      use GenServer
+
+      @spec start_link(map()) :: GenServer.on_start()
+      def start_link(state), do: GenServer.start_link(__MODULE__, state)
+
+      @impl true
+      def init(state), do: {:ok, state}
+
+      # Answers the raw `:gen.call(socket, :"$websockex_send", frame, timeout)` protocol
+      # `VendoredWebSockex.send_frame/2` uses, so `send_rpc/3` gets an ordinary `:ok`
+      # rather than timing out against a stub that only understands `:sys`.
+      @impl true
+      def handle_info({:"$websockex_send", from, _frame}, state) do
+        :gen.reply(from, :ok)
+        {:noreply, state}
+      end
+    end
+
+    setup do
+      {:ok, socket} = SocketStub.start_link(state())
+      %{socket: socket}
+    end
+
+    test "the same symbol on a second partial-depth channel is fine", %{socket: socket} do
+      assert :ok = Socket.subscribe(socket, ["BTC-USD"], :depth5)
+      assert :ok = Socket.subscribe(socket, ["BTC-USD"], :depth10)
+    end
+
+    test "a different symbol is refused, named, before any frame is sent", %{socket: socket} do
+      assert :ok = Socket.subscribe(socket, ["BTC-USD"], :depth5)
+
+      assert Socket.subscribe(socket, ["ETH-USD"], :depth10) ==
+               {:error, {:partial_depth_symbol_conflict, "BTC-USD"}}
+    end
+
+    test "one call naming two distinct symbols is refused outright", %{socket: socket} do
+      assert Socket.subscribe(socket, ["BTC-USD", "ETH-USD"], :depth5) ==
+               {:error, {:partial_depth_symbol_conflict, ["BTC-USD", "ETH-USD"]}}
+    end
+
+    test "unsubscribing releases the claim, so a different symbol can be claimed next", %{
+      socket: socket
+    } do
+      assert :ok = Socket.subscribe(socket, ["BTC-USD"], :depth5)
+      assert :ok = Socket.unsubscribe(socket, ["BTC-USD"], :depth5)
+      assert :ok = Socket.subscribe(socket, ["ETH-USD"], :depth5)
+    end
+
+    test "non-partial-depth channels never touch the claim", %{socket: socket} do
+      assert :ok = Socket.subscribe(socket, ["BTC-USD"], :book_ticker)
+      assert :ok = Socket.subscribe(socket, ["ETH-USD"], :trade)
     end
   end
 end

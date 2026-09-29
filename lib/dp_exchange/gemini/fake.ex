@@ -663,7 +663,7 @@ defmodule DpExchange.Gemini.Fake do
 
     for symbol <- symbols, symbol in @symbols do
       case get_price(symbol, []) do
-        {:ok, quote_struct} -> send(target, {:dp_exchange, :gemini, quote_struct})
+        {:ok, quote_struct} -> send(target, {:dp_exchange, :gemini, streamed(quote_struct)})
         _refused -> :ok
       end
     end
@@ -747,6 +747,20 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
+
+  # `get_price/2`'s `Quote` is the REST shape — `venue_time` is the venue's `Date` header
+  # and is genuinely never `nil` there (see `usage-rules.md`'s "Quote.venue_time is the
+  # venue's HTTP Date"). The STREAMED `Quote` is a different fact from a different
+  # transport: it comes off a `bookTicker` frame's `c`, which the vendor's own AsyncAPI
+  # documents no trade time for at all (websocket.yaml:1254-1256), so
+  # `DpExchange.Gemini.Socket` delivers it with `venue_time: nil` unconditionally — see
+  # `Socket.deliver_last_trade/3`. Reusing `get_price/2`'s struct unmodified here answered
+  # `venue_time: @at` on the stream, which is not "less capable than the real adapter", the
+  # only kind of divergence this fake is allowed — it is a DIFFERENT capability: a
+  # consumer's test asserting on the streamed Quote's `venue_time` would pass against this
+  # fake and fail against the real venue, the exact defect `CLAUDE.md` names as the family's
+  # own fail-closed rule for fakes.
+  defp streamed(%Types.Quote{} = quote_struct), do: %{quote_struct | venue_time: nil}
 
   defp candle(symbol, timeframe) do
     price = Decimal.new(@price[symbol])

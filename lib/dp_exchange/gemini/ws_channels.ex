@@ -129,4 +129,18 @@ defmodule DpExchange.Gemini.WsChannels do
   def per_symbol do
     for {name, address, _auth} <- @channels, String.contains?(address, "{symbol}"), do: name
   end
+
+  @doc """
+  Channels whose messages are `OrderBookSnapshot` (websocket.yaml:1217-1233).
+
+  That schema requires only `[lastUpdateId, bids, asks]` — **no `s`**, and no combined-stream
+  wrapper names one either. A frame on any of these channels cannot be attributed to a symbol
+  from the frame itself; the only unambiguous attribution is "this connection carries exactly
+  one of these, for exactly one symbol". `Socket.subscribe/3` uses this list to refuse a
+  second, distinct symbol against any channel here on the same connection, and
+  `Socket.handle_message/2` uses it to know which frames need that attribution at all.
+  """
+  @spec partial_depth() :: [atom()]
+  def partial_depth,
+    do: [:depth5, :depth5_fast, :depth10, :depth10_fast, :depth20, :depth20_fast]
 end

@@ -94,9 +94,33 @@ defmodule DpExchange.Gemini.Environment do
   @spec rest_url(t()) :: String.t()
   def rest_url(environment), do: Map.fetch!(@rest, environment)
 
-  @doc "WebSocket URL for an environment."
-  @spec websocket_url(t()) :: String.t()
-  def websocket_url(environment), do: Map.fetch!(@websocket, environment)
+  @doc """
+  WebSocket URL for an environment.
+
+  `opts` accepts `:snapshot`, the venue's `snapshot` **connection** parameter
+  (websocket.yaml:1263-1270): `-1` requests the full book as the anchor for a
+  `@depth`/`@depthFast` diff stream, a positive integer the top N levels. It is set once,
+  at the WebSocket upgrade, and cannot be changed after — see `Socket`'s moduledoc for why
+  a caller must declare its intended channels at `start_link/1` rather than after connecting.
+
+  Safe to set on a connection that also carries other channels: `snapshot` is named nowhere
+  in this AsyncAPI document except inside `DepthUpdate`'s own description
+  (websocket.yaml:1264) — no other schema, channel or message references it — so it changes
+  the shape of `depthUpdate` frames alone. A connection with no `@depth`/`@depthFast`
+  subscription never receives one, and every other channel's frames are unaffected.
+
+  Omitting `opts` (or `:snapshot`) leaves the URL exactly as `websocket_url/1` always
+  returned it — no query string.
+  """
+  @spec websocket_url(t(), keyword()) :: String.t()
+  def websocket_url(environment, opts \\ []) do
+    base = Map.fetch!(@websocket, environment)
+
+    case Keyword.get(opts, :snapshot) do
+      nil -> base
+      value -> "#{base}/?snapshot=#{value}"
+    end
+  end
 
   @doc "Whether this environment moves real money."
   @spec live?(t()) :: boolean()
