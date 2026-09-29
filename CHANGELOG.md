@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.90] - 2026-09-29
+
 ### Fixed
 
 - **`opts[:account]` now reaches every account-level private call**, not only
