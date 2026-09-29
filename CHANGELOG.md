@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.83] - 2026-09-29
+
 ### Fixed
 
 - `get_transactions/2` sent its filters under names the endpoint does not use and read its
