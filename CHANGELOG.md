@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- `nonce_mode: :incremental_ns` for an incremental key whose stored mark is above epoch
+  microseconds, which `:incremental_us` cannot reach (dp-exchange-core issue #36). It sends
+  `max(now_ns, previous + 1)` from its own node-wide counter: ~1.79e18 now, below `2^64`
+  until about 2554, re-anchored at boot, nothing seeded or persisted, one-way per key.
+  Under it, a "has not increased" refusal is `{:nonce_mark_out_of_reach, message}` as under
+  `:incremental_us`, and there it is conclusive: no 64-bit nonce reaches the mark, so the key
+  must be rotated.
+
 ## [0.2.87] - 2026-09-29
 
 ### Added

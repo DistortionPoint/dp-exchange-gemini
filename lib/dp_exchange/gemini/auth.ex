@@ -62,8 +62,8 @@ defmodule DpExchange.Gemini.Auth do
   both**, and the venue exposes no way to ask how a key was made.
 
   It is the host's key, so it is the host's answer: `nonce_mode: :time_based | :incremental |
-  :incremental_us` (the last for a key whose mark a millisecond counter cannot reach; see
-  below).
+  :incremental_us | :incremental_ns` (the last two for a key whose mark a millisecond counter
+  cannot reach; see below).
   The default is `:time_based`, matching the venue's own recommendation, and a mismatch
   fails loudly with `InvalidNonce` on the first request rather than producing a wrong
   result.
@@ -148,15 +148,30 @@ defmodule DpExchange.Gemini.Auth do
   milliseconds is locked out from then on. That is the host's call to make per key, so it is
   the host's option. It has its own counter for the same reason.
 
-  **When even this cannot reach the mark**, a private call refuses with
-  `{:nonce_mark_out_of_reach, message}` instead of the generic `{:invalid_nonce, message}`:
-  the venue said "has not increased" to a nonce this package cannot raise further, so the key
-  must be rotated, which is a human action. The distinct shape is what lets a host stop
-  retrying and page someone.
+  **When this cannot reach the mark**, a private call refuses with
+  `{:nonce_mark_out_of_reach, message}` instead of the generic `{:invalid_nonce, message}`.
+  Under `:incremental_us` that means the mark is above epoch microseconds, and the next step
+  is `:incremental_ns`, below.
+
+  ## Above epoch microseconds: `:incremental_ns`, the last step
+
+  dp-exchange-core issue #36: the same production key refused a microsecond nonce as well.
+  A mark between epoch microseconds and `2^64 - 1` is still reachable by the same shape one
+  unit finer, and nanoseconds are the last such unit that fits the 64-bit counter:
+  `max(now_ns, previous + 1)` is ~`1.79e18` today and stays below `2^64` until about 2554.
+  Everything said of `:incremental_us` holds (its own counter, re-anchored at boot, nothing
+  persisted, no escalation, one-way per key).
+
+  **Under `:incremental_ns`, `{:nonce_mark_out_of_reach, message}` is conclusive.** No nonce
+  that fits in 64 bits is above the key's mark, so no mode here or elsewhere reaches it, and
+  **the key must be rotated, which is a human action**. The same shape as under
+  `:incremental_us`, so a host already handling it needs no new clause; the mode it chose says
+  which of the two it means.
   """
 
   @nonce_counter {__MODULE__, :nonce_counter}
   @nonce_counter_us {__MODULE__, :nonce_counter_us}
+  @nonce_counter_ns {__MODULE__, :nonce_counter_ns}
 
   # The counter is `:atomics.new(1, signed: false)` — one 64-bit unsigned cell. A seed above
   # this cannot be stored at all, and `:atomics.put/3` raises rather than saturating, so
@@ -176,9 +191,9 @@ defmodule DpExchange.Gemini.Auth do
   @type scheme :: :api_key | :oauth
 
   @typedoc "Which validation mode the host's API key was provisioned with."
-  @type nonce_mode :: :time_based | :incremental | :incremental_us
+  @type nonce_mode :: :time_based | :incremental | :incremental_us | :incremental_ns
 
-  @nonce_modes [:time_based, :incremental, :incremental_us]
+  @nonce_modes [:time_based, :incremental, :incremental_us, :incremental_ns]
 
   @doc """
   Headers for a private request, for the scheme the host named.
@@ -189,7 +204,8 @@ defmodule DpExchange.Gemini.Auth do
 
   ## Options
 
-    * `:nonce_mode` — `:time_based` (default), `:incremental` or `:incremental_us`. `:api_key`
+    * `:nonce_mode` — `:time_based` (default), `:incremental`, `:incremental_us` or
+      `:incremental_ns`. `:api_key`
       only. See the moduledoc's "An incremental key the millisecond counter cannot reach".
 
   Returns `{:error, {:unsupported_auth_scheme, scheme}}` when `scheme` names something
@@ -297,6 +313,11 @@ defmodule DpExchange.Gemini.Auth do
   # microsecond magnitude by sharing a sequence with one.
   def nonce(:incremental_us), do: next_nonce(@nonce_counter_us, :microsecond)
 
+  # dp-exchange-core issue #36: the same key rejected microseconds too. Nanoseconds are the
+  # last clock-anchored step inside the 64-bit counter (~1.79e18 now, below 2^64 until about
+  # 2554), so a refusal under this mode is conclusive. Its own counter, for the same reason.
+  def nonce(:incremental_ns), do: next_nonce(@nonce_counter_ns, :nanosecond)
+
   def nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
 
   # `max(now, previous + 1)`: anchored to the wall clock, ahead of it by one only when calls
@@ -356,6 +377,7 @@ defmodule DpExchange.Gemini.Auth do
   """
   @spec ensure_counter() :: :atomics.atomics_ref()
   def ensure_counter do
+    ensure_counter(@nonce_counter_ns)
     ensure_counter(@nonce_counter_us)
     ensure_counter(@nonce_counter)
   end

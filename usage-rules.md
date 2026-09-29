@@ -473,10 +473,15 @@ by you. It is a separate mode rather than a change to `:incremental` because mov
 onto it is one-way: once the venue accepts a microsecond nonce, anything still counting in
 milliseconds against that key is locked out. Choose it per key.
 
-If the venue still answers "has not increased" to `:incremental_us`, the key's mark is above
-anything this package will ever send, and the call refuses with
-`{:nonce_mark_out_of_reach, message}` rather than `{:invalid_nonce, message}`. **That key must
-be rotated**; stop retrying and have a person do it.
+If the venue answers "has not increased" to `:incremental_us`, the call refuses with
+`{:nonce_mark_out_of_reach, message}` rather than `{:invalid_nonce, message}`: the key's mark
+is above epoch microseconds. Try **`nonce_mode: :incremental_ns`**, `max(now_ns, previous + 1)`
+from its own counter, which reaches any mark below `2^64` (it stays below that until about
+2554). Like `:incremental_us` it needs no seed and is one-way per key.
+
+Under `:incremental_ns` the same `{:nonce_mark_out_of_reach, message}` is **conclusive**: no
+nonce that fits in 64 bits is above the mark. **That key must be rotated**; stop retrying and
+have a person do it.
 
 `seed_nonce/1` remains for the millisecond counter: call it once with a value above the mark
 and the sequence advances by one per call from there. It refuses to lower the counter, a mark

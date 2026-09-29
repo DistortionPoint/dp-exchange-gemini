@@ -214,6 +214,35 @@ defmodule DpExchange.Gemini.AuthTest do
     end
   end
 
+  describe "nonce(:incremental_ns) — the last clock-anchored step (dp-exchange-core issue #36)" do
+    test "is nanoseconds: above any microsecond-scale mark, and inside 64 bits" do
+      nonce = Auth.nonce(:incremental_ns)
+      assert nonce > System.system_time(:microsecond) * 100
+      assert nonce < 0xFFFF_FFFF_FFFF_FFFF
+    end
+
+    test "is strictly increasing across processes" do
+      task = Task.async(fn -> for _index <- 1..300, do: Auth.nonce(:incremental_ns) end)
+      mine = for _index <- 1..300, do: Auth.nonce(:incremental_ns)
+      theirs = Task.await(task)
+
+      assert length(Enum.uniq(mine ++ theirs)) == 600
+      assert mine == Enum.sort(mine)
+    end
+
+    test "has its own counter: the microsecond sequence stays at microsecond magnitude" do
+      for _index <- 1..50, do: Auth.nonce(:incremental_ns)
+      assert Auth.nonce(:incremental_us) < System.system_time(:microsecond) + 60_000_000
+    end
+
+    test "reaches the signed payload" do
+      assert {:ok, headers} =
+               Auth.headers(:api_key, "/v1/balances", %{}, @api_key, nonce_mode: :incremental_ns)
+
+      assert nonce_from(headers) > System.system_time(:microsecond) * 100
+    end
+  end
+
   defp nonce_from(headers) do
     headers
     |> header("X-GEMINI-PAYLOAD")
