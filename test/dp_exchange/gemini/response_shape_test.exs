@@ -275,7 +275,9 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
             )
           end)
 
-        Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill)
+        # Three seconds, not one: the hang this guards took longer than four (measured at the
+        # 4-second kill), and one second timed out under a loaded full suite, 2026-09-29.
+        Task.yield(task, 3_000) || Task.shutdown(task, :brutal_kill)
       end
 
       for max_age <- [999_999_999_999_999_999_999_999_999, -(10 ** 27), 3_600_001] do
@@ -306,12 +308,18 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
     end
 
     test "list_payment_methods/2" do
-      for body <- [%{"methods" => "x"}, %{"methods" => %{}}] do
+      # `PaymentMethodsResponse` is `{balances: [...], banks: [...]}` (`rest.yaml:5454`) — a
+      # present array that is not a list is unreadable.
+      for body <- [%{"balances" => "x"}, %{"banks" => %{}}] do
         assert {:error, :unexpected_response_shape} =
                  Private.list_payment_methods(@credentials, base(body))
       end
 
-      assert {:ok, []} = Private.list_payment_methods(@credentials, base(%{"methods" => nil}))
+      assert {:ok, []} =
+               Private.list_payment_methods(
+                 @credentials,
+                 base(%{"balances" => nil, "banks" => nil})
+               )
     end
 
     test "list_approved_addresses/2" do
@@ -494,12 +502,18 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
             %{"provider-a" => "not-a-map"}
           ] do
         assert {:error, :unexpected_response_shape} =
-                 Private.get_staking_rewards(@credentials, base(body)),
+                 Private.get_staking_rewards(
+                   @credentials,
+                   Keyword.put(base(body), :since, ~U[2026-08-25 00:00:00Z])
+                 ),
                inspect(body)
       end
 
       assert {:ok, []} =
-               Private.get_staking_rewards(@credentials, base(%{"provider-a" => %{}}))
+               Private.get_staking_rewards(
+                 @credentials,
+                 Keyword.put(base(%{"provider-a" => %{}}), :since, ~U[2026-08-25 00:00:00Z])
+               )
     end
   end
 end

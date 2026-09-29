@@ -222,7 +222,13 @@ defmodule DpExchange.Gemini.Fake do
                {Decimal.add(bid, Decimal.new("0.02")), Decimal.new("0.0910")},
                {Decimal.add(bid, Decimal.new("0.03")), Decimal.new("0.3300")}
              ],
-             venue_time: @at,
+             # `nil`, not `@at` — `Rest.get_order_book/2` never has a real time to report
+             # here: the venue's own schema marks the only field this endpoint carries a
+             # "timestamp" — `OrderBookEntry.timestamp` — a dummy value, "DO NOT USE". A
+             # fake reporting a real `venue_time` would be more capable than the endpoint
+             # it fakes, which this family's parity rule ("less capable is allowed;
+             # differently capable is not") refuses exactly as much as the reverse.
+             venue_time: nil,
              observed_at: @at,
              provider: :gemini
            }}
@@ -283,26 +289,33 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def get_fx_rate(pair, at, _opts \\ []) do
+  def get_fx_rate(pair, at, opts \\ []) do
     with_injection(fn ->
-      native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
+      # Signed on the real venue (`Private.get_fx_rate/3`'s own doc — measured against
+      # `rest.yaml:7836-7851`), so the fake requires a credential too, the same as
+      # `list_networks/2` does for its own asset→networks direction: a fake that accepted
+      # `nil` here would let a consumer's test pass while the real call was refused before
+      # it ever signed a request.
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+        native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
 
-      # The fourteen pairs the venue serves, refused the same way the real package refuses:
-      # its 404 for an unsupported pair reads the same as one for a bad timestamp.
-      if native in ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
-                      SGDUSD KRWUSD JPYUSD CNYUSD) do
-        {:ok,
-         %Types.FxRate{
-           pair: native,
-           rate: Decimal.new("0.69"),
-           as_of: at,
-           # The institution that computed it — not the venue, which is `provider`.
-           source: "bcb",
-           benchmark: "Spot",
-           provider: :gemini
-         }}
-      else
-        {:error, {:unsupported_fx_pair, native}}
+        # The fourteen pairs the venue serves, refused the same way the real package refuses:
+        # its 404 for an unsupported pair reads the same as one for a bad timestamp.
+        if native in ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
+                        SGDUSD KRWUSD JPYUSD CNYUSD) do
+          {:ok,
+           %Types.FxRate{
+             pair: native,
+             rate: Decimal.new("0.69"),
+             as_of: at,
+             # The institution that computed it — not the venue, which is `provider`.
+             source: "bcb",
+             benchmark: "Spot",
+             provider: :gemini
+           }}
+        else
+          {:error, {:unsupported_fx_pair, native}}
+        end
       end
     end)
   end
@@ -526,13 +539,12 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_trade_history(credentials, opts) do
     with_injection(fn ->
-      # The real adapter requires a symbol — Gemini offers no all-symbols variant — so the
-      # fake requires one too. Less capable is allowed; differently capable is not.
+      # `opts[:symbol]` is optional on the real endpoint — `MyTradesRequest`
+      # (`rest.yaml:8294-8298`) names only `request` and `nonce` as required — so the fake
+      # no longer refuses a call with none. This used to require one; a fake that refused
+      # what the real venue accepts is differently capable, not less.
       with :ok <- authenticated(credentials, opts) do
-        case Keyword.get(opts, :symbol) do
-          nil -> {:error, {:missing_option, :symbol}}
-          _symbol -> {:ok, []}
-        end
+        {:ok, []}
       end
     end)
   end
@@ -881,7 +893,10 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       with :ok <- authenticated(fake_credentials(opts), opts) do
         # The whole position redeemable and none of it tradable — the real shape that breaks
-        # a caller reading a single "available".
+        # a caller reading a single "available". `by_provider` carries a real breakdown
+        # rather than the empty map this used to hardcode — `balanceByProvider`
+        # (`rest.yaml:6565,6573`) is sent on every row in the venue's own example, and an
+        # always-empty fake taught nothing about the field it exists for.
         {:ok,
          [
            %Types.StakingBalance{
@@ -889,7 +904,7 @@ defmodule DpExchange.Gemini.Fake do
              staked: Decimal.new("10"),
              available_to_trade: Decimal.new("0"),
              available_for_withdrawal: Decimal.new("10"),
-             by_provider: %{},
+             by_provider: %{"provider-a" => Decimal.new("10")},
              provider: :gemini
            }
          ]}
@@ -900,7 +915,12 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_staking_rewards(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts), opts) do
+      # `since` is required at the venue (`rest.yaml:6885`, in the request schema's
+      # `required` list) — the fake refuses its absence the same way
+      # `Private.get_staking_rewards/2` does now, rather than answering for a window the
+      # caller never named.
+      with :ok <- authenticated(fake_credentials(opts), opts),
+           {:ok, _since} <- fake_required_since(opts) do
         {:ok,
          [
            %Types.StakingReward{
@@ -916,6 +936,13 @@ defmodule DpExchange.Gemini.Fake do
          ]}
       end
     end)
+  end
+
+  defp fake_required_since(opts) do
+    case Keyword.get(opts, :since) do
+      nil -> {:error, {:missing_option, :since}}
+      since -> {:ok, since}
+    end
   end
 
   @impl true
@@ -951,7 +978,11 @@ defmodule DpExchange.Gemini.Fake do
          %Types.StakingTransaction{
            id: "stk-new",
            type: :stake,
-           venue_type: "Deposit",
+           # `nil`, not `"Deposit"` — `StakingDeposit` (`rest.yaml:9466-9497`), this
+           # endpoint's own reply shape, carries no `transactionType` field at all; that
+           # belongs to the *history* endpoint's row, a different schema. A fake naming a
+           # word the real reply never sends is more capable than the endpoint it fakes.
+           venue_type: nil,
            asset: String.upcase(asset),
            amount: amount,
            amount_paid_so_far: nil,
@@ -974,12 +1005,17 @@ defmodule DpExchange.Gemini.Fake do
          %Types.StakingTransaction{
            id: "stk-redeem",
            type: :unstake,
-           venue_type: "Redeem",
+           # `nil` — `StakingWithdrawal` (`rest.yaml:9663-9692`) carries no `transactionType`
+           # either. `venue_time` is `requestInitiated`, the one field this reply DOES carry
+           # that `StakingDeposit` does not — `stake/4`'s fake stays `nil` for the reason
+           # given there.
+           venue_type: nil,
            asset: String.upcase(asset),
            amount: amount,
            amount_paid_so_far: Decimal.new("0"),
            amount_remaining: amount,
            provider_id: provider_id,
+           venue_time: @at,
            provider: :gemini
          }}
       end
@@ -1023,7 +1059,11 @@ defmodule DpExchange.Gemini.Fake do
   def commit_conversion(id, opts \\ []) do
     with_injection(fn ->
       with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
-        case Enum.reject([:symbol, :side, :amount, :price], &Keyword.has_key?(opts, &1)) do
+        # `:fee` joined `:symbol`/`:side`/`:amount`/`:price` here — the venue requires it
+        # and states it "must match fee returned in the quote" (`rest.yaml:5071`), and
+        # `Private.commit_conversion/2` no longer defaults it to `"0"`. See that function's
+        # own comment.
+        case Enum.reject([:symbol, :side, :amount, :price, :fee], &Keyword.has_key?(opts, &1)) do
           [] ->
             {:ok,
              %Types.Conversion{
@@ -1206,12 +1246,28 @@ defmodule DpExchange.Gemini.Fake do
   def list_payment_methods(credentials, opts \\ []) do
     with_injection(fn ->
       with :ok <- authenticated(credentials, opts) do
-        # One verified and one pending: a consumer filtering on presence rather than status
-        # picks one the venue will refuse.
+        # `PaymentMethodsResponse` (`rest.yaml:5454`, schema `:9316-9328`) is
+        # `{balances: [...], banks: [...]}`, not the `"methods"` list this used to fake.
+        # `Private.list_payment_methods/2` tags each row `"kind" => "balance"` or
+        # `"kind" => "bank"` to keep the split the venue's own two arrays make; this mirrors
+        # that split with the venue's own example values rather than an invented
+        # verified/pending pair neither array actually carries (`PaymentMethodBank` has no
+        # status field at all).
         {:ok,
          [
-           %{"id" => "bank-1", "type" => "bank", "status" => "verified"},
-           %{"id" => "bank-2", "type" => "bank", "status" => "pending"}
+           %{
+             "kind" => "balance",
+             "type" => "exchange",
+             "currency" => "USD",
+             "amount" => "50893484.26",
+             "available" => "50889972.01",
+             "availableForWithdrawal" => "50889972.01"
+           },
+           %{
+             "kind" => "bank",
+             "bank" => "Jpmorgan Chase Bank Checking  - 1111",
+             "bankId" => "97631a24-ca40-4277-b3d5-38c37673d029"
+           }
          ]}
       end
     end)

@@ -88,6 +88,31 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert funding.next_funding_at == DateTime.from_unix!(1_787_940_001_000, :millisecond)
     end
 
+    test "fundingAmount is read where the vendor's own example uses it instead of amount" do
+      # `rest.yaml`'s own contradiction: `FundingAmountResponse`'s schema (`:9420`) names
+      # the field `amount`; the endpoint's own request example (`:562`) sends
+      # `fundingAmount` for the very same field. Both are the vendor's own names.
+      body = %{
+        "symbol" => "BTCGUSDPERP",
+        "fundingAmount" => -1.50991,
+        "estimatedFundingAmount" => -2.10595
+      }
+
+      assert {:ok, funding} =
+               Rest.get_funding("BTCGUSDPERP", plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(funding.amount, Decimal.from_float(-1.50991))
+    end
+
+    test "amount wins when both amount and fundingAmount are present" do
+      body = %{"symbol" => "BTCGUSDPERP", "amount" => -1.0, "fundingAmount" => -9.0}
+
+      assert {:ok, funding} =
+               Rest.get_funding("BTCGUSDPERP", plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(funding.amount, Decimal.new("-1.0"))
+    end
+
     test "the sign is carried through rather than normalised" do
       # A negative amount means one side paid the other, and which is which is a venue
       # convention this layer does not reinterpret.
@@ -345,9 +370,51 @@ defmodule DpExchange.Gemini.DerivativesTest do
       }
 
       assert {:ok, margin} =
-               Private.get_account_margin(@credentials, plug: responding(body), retry_attempts: 0)
+               Private.get_account_margin(@credentials,
+                 symbol: "BTC-GUSD-PERP",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
 
       assert margin["estimated_liquidation_price"] == "42000"
+    end
+
+    test "a symbol is required — rest.yaml:7158 lists it in the request's required fields" do
+      exploding = fn _conn -> raise "must not request margin for no contract" end
+
+      assert {:error, {:missing_option, :symbol}} =
+               Private.get_account_margin(@credentials, plug: exploding, retry_attempts: 0)
+    end
+
+    test "the symbol goes through SymbolFormat, like every other private call" do
+      me = self()
+
+      plug = fn conn ->
+        payload =
+          conn
+          |> Plug.Conn.get_req_header("x-gemini-payload")
+          |> List.first()
+          |> Base.decode64!()
+          |> Jason.decode!()
+
+        send(me, {:payload, payload})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(%{})
+      end
+
+      assert {:ok, _margin} =
+               Private.get_account_margin(@credentials,
+                 symbol: "BTC-GUSD-PERP",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+
+      assert payload["symbol"] ==
+               DpExchange.Gemini.SymbolFormat.to_exchange_symbol("BTC-GUSD-PERP")
     end
 
     test "funding payments keep the venue's Credit/Debit rather than a sign" do
@@ -393,6 +460,26 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert path == "/v1/perpetuals/fundingpaymentreport/records.json"
       assert query =~ "fromDate=2024-04-10"
       assert payload["request"] == path <> "?" <> query
+    end
+
+    test "the JSON report is a POST — the vendor's spec defines no GET for this path" do
+      # `rest.yaml:7412` defines only `post:` for `/v1/perpetuals/fundingpaymentreport/records.json`
+      # — the sibling `.xlsx` report one path up (`:7308`) is the `get:`. This used to send
+      # both the same way.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:method, conn.method})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json([])
+      end
+
+      assert {:ok, []} =
+               Private.funding_payment_report(@credentials, plug: plug, retry_attempts: 0)
+
+      assert_receive {:method, "POST"}
     end
 
     test "no dates means no date parameters, and the venue's own default row count" do

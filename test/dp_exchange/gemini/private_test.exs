@@ -2,7 +2,7 @@ defmodule DpExchange.Gemini.PrivateTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.Config
-  alias DpExchange.Core.Types.{Balance, Conversion, Fill, Order}
+  alias DpExchange.Core.Types.{Balance, Conversion, Fill, FxRate, Order}
   alias DpExchange.Gemini.{Private, Rest}
 
   @moduletag :capture_log
@@ -391,9 +391,20 @@ defmodule DpExchange.Gemini.PrivateTest do
   end
 
   describe "trade history" do
-    test "requires a symbol, because the venue offers no all-symbols variant" do
-      assert {:error, {:missing_option, :symbol}} =
-               Private.get_trade_history(@credentials, retry_attempts: 0)
+    test "a symbol is optional — MyTradesRequest names none required" do
+      # `rest.yaml:8294-8298`: only `request` and `nonce` are required on `/v1/mytrades`.
+      # This used to refuse a call naming no symbol before a request was ever made; the
+      # venue never required one.
+      me = self()
+
+      assert {:ok, []} =
+               Private.get_trade_history(@credentials,
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      refute Map.has_key?(payload, "symbol")
     end
 
     test "becomes Fills with the venue's own liquidity flag" do
@@ -422,6 +433,40 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert fill.liquidity == :taker
       assert fill.symbol == "BTC-USD"
       assert fill.trade_id == "2"
+    end
+
+    test "with no symbol requested, each row's own symbol is read" do
+      # Every `MyTrade` row carries its own `"symbol"` (`rest.yaml:1727`, the endpoint's own
+      # example responses — the schema itself omits the field). This used to echo the
+      # CALLER's `opts[:symbol]` onto every row unread, which was safe only because a
+      # symbol was required on every call; a call spanning several symbols needs each
+      # row's own field, not one label repeated across all of them.
+      body = [
+        %{
+          "order_id" => "1",
+          "tid" => "2",
+          "price" => "100",
+          "amount" => "0.5",
+          "type" => "Buy",
+          "timestampms" => 1_787_936_147_000,
+          "symbol" => "BTCUSD"
+        },
+        %{
+          "order_id" => "3",
+          "tid" => "4",
+          "price" => "10",
+          "amount" => "1",
+          "type" => "Sell",
+          "timestampms" => 1_787_936_148_000,
+          "symbol" => "ETHUSD"
+        }
+      ]
+
+      assert {:ok, [first, second]} =
+               Private.get_trade_history(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert first.symbol == "BTC-USD"
+      assert second.symbol == "ETH-USD"
     end
 
     test "a row missing an execution field refuses rather than reporting an empty fill" do
@@ -1089,10 +1134,92 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert Conversion.expired?(conversion, ~U[2026-08-28 17:02:00Z])
     end
 
+    # `quantity`/`quantityCurrency` name CCY1 on both a buy and a sell (`rest.yaml:4990,4991`
+    # sell quote, `:5178,5179` sell execute) — the sell quote example gives
+    # `totalSpend: "1"`, `totalSpendCurrency: "ETH"`, identical to `quantity`, because
+    # selling IS spending the quantity sold. This used to read `to_asset`/`to_amount` from
+    # `quantity`/`quantityCurrency` unconditionally, so a sell's `Conversion` named the same
+    # asset (ETH) on both ends and reported `to_amount` in ETH under a `to_asset` the caller
+    # could still label `USD`.
+    @sell_quote_body %{
+      "quoteId" => 20_930,
+      "maxAgeMs" => 60_000,
+      "pair" => "ETHUSD",
+      "price" => "225.42",
+      "priceCurrency" => "USD",
+      "side" => "sell",
+      "quantity" => "1",
+      "quantityCurrency" => "ETH",
+      "fee" => "2.99",
+      "feeCurrency" => "USD",
+      "totalSpend" => "1",
+      "totalSpendCurrency" => "ETH"
+    }
+
+    test "a sell reports what was given up; the venue states no proceeds figure to report" do
+      assert {:ok, conversion} =
+               Private.quote_conversion("ETH", "USD", Decimal.new("1"),
+                 symbol: "ETH-USD",
+                 side: :sell,
+                 credentials: @credentials,
+                 plug: responding(@sell_quote_body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(conversion.from_amount, Decimal.new("1"))
+      # No field in this response names a quote-currency amount received — computing one
+      # from `quantity * price` would be this package's arithmetic reported as the venue's
+      # own number.
+      assert conversion.to_amount == nil
+      assert Decimal.equal?(conversion.rate, Decimal.new("225.42"))
+    end
+
+    test "with no caller-named direction, a sell's assets come from the body correctly" do
+      # `commit_conversion/2` names neither asset itself (`to_conversion(body, nil, nil, ...)`),
+      # so this is the only path where `conversion_amounts/3`'s body-derived `to_asset` is
+      # actually exercised rather than overridden by a caller's own `from`/`to`.
+      assert {:ok, conversion} =
+               Private.commit_conversion("20930",
+                 symbol: "ETH-USD",
+                 side: :sell,
+                 amount: Decimal.new("1"),
+                 price: Decimal.new("225.42"),
+                 fee: Decimal.new("2.99"),
+                 credentials: @credentials,
+                 plug: responding(@sell_quote_body),
+                 retry_attempts: 0
+               )
+
+      assert conversion.from_asset == "ETH"
+      assert conversion.to_asset == "USD"
+      refute conversion.from_asset == conversion.to_asset
+      assert Decimal.equal?(conversion.from_amount, Decimal.new("1"))
+      assert conversion.to_amount == nil
+    end
+
+    test "a buy still reports what was spent and what was received, unaffected" do
+      assert {:ok, conversion} =
+               Private.commit_conversion("20930",
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 amount: Decimal.new("0.015"),
+                 price: Decimal.new("6445.07"),
+                 fee: Decimal.new("2.99"),
+                 credentials: @credentials,
+                 plug: responding(@quote_body),
+                 retry_attempts: 0
+               )
+
+      assert conversion.from_asset == "USD"
+      assert conversion.to_asset == "BTC"
+      assert Decimal.equal?(conversion.from_amount, Decimal.new("100"))
+      assert Decimal.equal?(conversion.to_amount, Decimal.new("0.01505181"))
+    end
+
     test "committing needs the terms the venue quoted against, not the id alone" do
       exploding = fn _conn -> raise "must not execute without the quoted terms" end
 
-      assert {:error, {:missing_option, [:symbol, :side, :amount, :price]}} =
+      assert {:error, {:missing_option, [:symbol, :side, :amount, :price, :fee]}} =
                Private.commit_conversion("20930",
                  credentials: @credentials,
                  plug: exploding,
@@ -1100,7 +1227,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                )
     end
 
-    test "a commit sends the id and the terms, and comes back settled" do
+    test "a commit sends the id as an integer and the terms, and comes back settled" do
       me = self()
 
       assert {:ok, conversion} =
@@ -1109,15 +1236,35 @@ defmodule DpExchange.Gemini.PrivateTest do
                  side: :buy,
                  amount: Decimal.new("0.015"),
                  price: Decimal.new("6445.07"),
+                 fee: Decimal.new("2.99"),
                  credentials: @credentials,
                  plug: capturing(@quote_body, me),
                  retry_attempts: 0
                )
 
       assert_receive {:payload, payload}
-      assert payload["quoteId"] == "20930"
+      # `quoteId` is `type: integer` in the venue's own schema (`rest.yaml:5072`) — sent as
+      # a number here, not the string `commit_conversion/2`'s caller received back.
+      assert payload["quoteId"] == 20_930
       assert payload["symbol"] == "btcusd"
+      assert payload["fee"] == "2.99"
       assert conversion.status == :settled
+    end
+
+    test "a quoteId that does not parse as an integer is refused before it is sent" do
+      exploding = fn _conn -> raise "must not send an id that is not the venue's integer" end
+
+      assert {:error, {:invalid_quote_id, "q-1"}} =
+               Private.commit_conversion("q-1",
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 amount: Decimal.new("0.015"),
+                 price: Decimal.new("6445.07"),
+                 fee: Decimal.new("2.99"),
+                 credentials: @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
     end
   end
 
@@ -1420,13 +1567,17 @@ defmodule DpExchange.Gemini.PrivateTest do
   end
 
   describe "a wrapper is never a row" do
-    # `payment_rows/1` wrapped any map as one row, so `{"methods": null}` came back as
-    # `{:ok, [%{"methods" => nil}]}` — the wrapper as a payment method. `Rest.promo_rows/1`
-    # did the same with `{"symbols": null}`.
-    test "list_payment_methods/2 with methods: null is no rows" do
+    # `payment_rows/1` used to wrap any map as one row, so `{"methods": null}` came back as
+    # `{:ok, [%{"methods" => nil}]}` — the wrapper as a payment method — under an assumed
+    # `"methods"` key the real reply does not send at all (`PaymentMethodsResponse` is
+    # `{balances: [...], banks: [...]}`, `rest.yaml:5454`). `Rest.promo_rows/1` had the same
+    # defect with `{"symbols": null}`.
+    test "list_payment_methods/2 with balances and banks both null is no rows" do
       assert {:ok, []} =
                Private.list_payment_methods(@credentials,
-                 plug: fn conn -> Req.Test.json(conn, %{"methods" => nil}) end,
+                 plug: fn conn ->
+                   Req.Test.json(conn, %{"balances" => nil, "banks" => nil})
+                 end,
                  retry_attempts: 0
                )
     end
@@ -1473,6 +1624,202 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert_received {:nonce, first}
       assert_received {:nonce, second}
       assert second != first
+    end
+  end
+
+  describe "get_fx_rate/3 — signed, moved from Rest, and relayed rather than traded" do
+    # This whole block moved here from `trades_test.exs` ("The public tape") when the
+    # endpoint moved from `Rest` to `Private`. Measured against the vendor's own OpenAPI
+    # (`rest.yaml:7836-7851`): `/v2/fxrate/{symbol}/{timestamp}`'s `security` lists
+    # `apiKeyAuth`, `signatureAuth` and `payloadAuth` — the full private scheme, not the
+    # unauthenticated GET `Rest` sent it as. `Rest` sends no credentials at all, so this
+    # could never have succeeded against the real venue no matter what a caller passed —
+    # the same defect `/v2/network/{token}` had, fixed the same way.
+    @fx %{
+      "fxPair" => "AUDUSD",
+      "rate" => "0.69",
+      "asOf" => 1_594_651_859_000,
+      "provider" => "bcb",
+      "benchmark" => "Spot"
+    }
+
+    test "the source is the institution and the provider is the venue" do
+      # Collapsing them makes a Gemini-relayed BCB rate indistinguishable from one Gemini
+      # computed itself, and only the second would be the venue's own claim.
+      assert {:ok, %FxRate{} = rate} =
+               Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: responding(@fx),
+                 retry_attempts: 0
+               )
+
+      assert rate.source == "bcb"
+      assert rate.provider == :gemini
+      assert rate.benchmark == "Spot"
+      assert Decimal.equal?(rate.rate, Decimal.new("0.69"))
+    end
+
+    test "the venue's own asOf wins over the instant asked for" do
+      # The venue may answer for a nearby moment, and its word is what happened.
+      assert {:ok, rate} =
+               Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: responding(@fx),
+                 retry_attempts: 0
+               )
+
+      assert rate.as_of == DateTime.from_unix!(1_594_651_859_000, :millisecond)
+    end
+
+    test "no asOf is refused, not replaced by the instant asked for" do
+      # This asserted the opposite: that the requested instant stood in. `Core.Types.FxRate`
+      # says `:as_of` is the instant echoed by the venue and that a rate without it is not a
+      # rate, and the venue may answer for a nearby moment. The requested instant was a
+      # plausible time with the wrong meaning.
+      assert {:error, :missing_venue_timestamp} =
+               Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: responding(Map.delete(@fx, "asOf")),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a non-positive or out-of-range asOf is refused, not dated 1970 or raised on" do
+      for bad <- [0, -1, 999_999_999_999_999_999] do
+        assert {:error, :missing_venue_timestamp} =
+                 Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                   credentials: @credentials,
+                   plug: responding(Map.put(@fx, "asOf", bad)),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "the instant is sent as milliseconds in the path, and the request is signed" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+        assert [_key] = Plug.Conn.get_req_header(conn, "x-gemini-apikey")
+        assert [_signature] = Plug.Conn.get_req_header(conn, "x-gemini-signature")
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(@fx)
+      end
+
+      assert {:ok, _rate} =
+               Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path}
+      # 2020-07-13T15:30:59Z in milliseconds. The venue's doc example uses a different
+      # instant; this asserts the conversion, not the example.
+      assert path == "/v2/fxrate/AUDUSD/1594654259000"
+    end
+
+    test "a hyphenated pair is normalised to the venue's form" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(@fx)
+      end
+
+      assert {:ok, _rate} =
+               Private.get_fx_rate("aud-usd", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path}
+      assert path =~ "/AUDUSD/"
+    end
+
+    test "a pair the venue does not serve is refused BEFORE the request" do
+      # The venue's 404 for an unsupported pair reads the same as one for a bad timestamp,
+      # so a caller sent there cannot tell which it got wrong.
+      exploding = fn _conn -> raise "must not ask for a pair the venue does not serve" end
+
+      assert {:error, {:unsupported_fx_pair, "USDJPY"}} =
+               Private.get_fx_rate("USDJPY", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "all fourteen documented pairs are accepted" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(@fx)
+      end
+
+      for pair <- ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
+                     SGDUSD KRWUSD JPYUSD CNYUSD) do
+        assert {:ok, _rate} =
+                 Private.get_fx_rate(pair, ~U[2020-07-13 15:30:59Z],
+                   credentials: @credentials,
+                   plug: plug,
+                   retry_attempts: 0
+                 ),
+               "#{pair} was refused"
+      end
+    end
+
+    test "a body with no rate is unreadable, not a rate of nothing" do
+      assert {:error, :unexpected_response_shape} =
+               Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: responding(%{}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a non-numeric rate is refused rather than delivering rate: nil" do
+      # `Decimal.new/1` used to raise here; now the record is refused.
+      body = %{"rate" => "null", "fxPair" => "GBPUSD"}
+
+      assert {:error, {:invalid_decimal, :rate, "null"}} =
+               Private.get_fx_rate(
+                 "GBP-USD",
+                 ~U[2026-08-28 17:00:01Z],
+                 credentials: @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "convert applies the rate without rounding" do
+      assert {:ok, rate} =
+               Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 credentials: @credentials,
+                 plug: responding(@fx),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(
+               FxRate.convert(rate, Decimal.new("100")),
+               Decimal.new("69.00")
+             )
+    end
+
+    test "without credentials, the call is refused before it is signed" do
+      exploding = fn _conn -> raise "must not sign or send without a credential" end
+
+      assert {:error, {:missing_credentials, :gemini}} =
+               Private.get_fx_rate("AUDUSD", ~U[2020-07-13 15:30:59Z],
+                 plug: exploding,
+                 retry_attempts: 0
+               )
     end
   end
 end

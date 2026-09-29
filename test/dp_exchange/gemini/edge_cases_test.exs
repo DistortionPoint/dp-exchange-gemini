@@ -53,16 +53,24 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                )
     end
 
-    test "an empty order book has no timestamp and therefore fails" do
-      assert {:error, :missing_venue_timestamp} =
+    test "an empty order book succeeds, with no venue time to report" do
+      # This used to refuse with `:missing_venue_timestamp` — deriving the book's own time
+      # from its (empty) levels and refusing when none carried one. `OrderBookEntry.timestamp`
+      # is documented "DO NOT USE ... just populated with a dummy value" (`rest.yaml:8065`);
+      # there was never a real time to derive, and an empty book is not a malformed one.
+      assert {:ok, book} =
                Rest.get_order_book("BTC-USD",
                  plug: responding(%{"bids" => [], "asks" => []}),
                  retry_attempts: 0
                )
+
+      assert book.bids == []
+      assert book.asks == []
+      assert book.venue_time == nil
     end
 
     test "a book missing a side entirely fails rather than half-answering" do
-      assert {:error, :missing_venue_timestamp} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_order_book("BTC-USD",
                  plug: responding(%{"bids" => []}),
                  retry_attempts: 0
@@ -188,15 +196,21 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert Decimal.equal?(candle.volume, Decimal.new(0))
     end
 
-    test "a string epoch on a book level is read as a number" do
+    test "a book level's timestamp, in either representation, is decoded but never used" do
+      # `price`/`amount` still read normally regardless of the level's `timestamp`
+      # representation; `venue_time` stays `nil` either way — `OrderBookEntry.timestamp` is
+      # documented "DO NOT USE ... just populated with a dummy value" (`rest.yaml:8065`).
       body = %{
         "bids" => [%{"price" => "1", "amount" => "1", "timestamp" => "1787936377"}],
         "asks" => [%{"price" => "2", "amount" => "1", "timestamp" => 1_787_936_378}]
       }
 
       assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: responding(body))
-      # The newest level's time, across both sides and both representations.
-      assert book.venue_time == DateTime.from_unix!(1_787_936_378)
+      assert [{bid_price, _bid_size}] = book.bids
+      assert [{ask_price, _ask_size}] = book.asks
+      assert Decimal.equal?(bid_price, Decimal.new("1"))
+      assert Decimal.equal?(ask_price, Decimal.new("2"))
+      assert book.venue_time == nil
     end
   end
 
@@ -207,8 +221,11 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
         Req.Test.json(conn, %{"bids" => [], "asks" => []})
       end
 
-      assert {:error, :missing_venue_timestamp} =
+      assert {:ok, book} =
                Rest.get_order_book("BTC-USD", plug: plug, depth: 5, retry_attempts: 0)
+
+      assert book.bids == []
+      assert book.asks == []
     end
   end
 
@@ -381,10 +398,12 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       end
     end
 
-    test "trade history requires a symbol, because the venue offers no all-symbols call" do
+    test "trade history does not require a symbol — MyTradesRequest names none required" do
+      # `rest.yaml:8294-8298`: only `request` and `nonce` are required. This used to refuse
+      # a call naming no symbol; the venue never did.
       credentials = %{api_key: "k", api_secret: "s"}
 
-      assert Fake.get_trade_history(credentials, []) == {:error, {:missing_option, :symbol}}
+      assert {:ok, []} = Fake.get_trade_history(credentials, [])
       assert {:ok, []} = Fake.get_trade_history(credentials, symbol: "BTC-USD")
     end
 

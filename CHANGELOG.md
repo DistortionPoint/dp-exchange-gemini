@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Checked against the vendor's `rest.yaml`, fetched 2026-09-29 and now committed at
+`docs/reference/gemini/openapi/rest.yaml`.
+
+- `get_staking_history/2` sends `since`/`until` as ISO datetimes and decodes the documented
+  `[{providerId, transactions: [...]}]` nesting. Any non-empty history was refused before.
+- `get_staking_rewards/2` sends its window as ISO datetimes and requires `:since`, which the
+  endpoint requires (`{:error, {:missing_option, :since}}`).
+- `funding_payment_report/2` is a POST, the only verb the endpoint defines.
+- `get_fx_rate/3` is signed. The endpoint requires authentication and the Auditor role, and
+  it was sent unauthenticated, so it could not succeed.
+- `list_payment_methods/2` decodes the documented `{balances, banks}` reply, tagging each row
+  with `"kind"`. The whole envelope came back as one row.
+- `commit_conversion/2` sends `quoteId` as an integer and requires `:fee`, which must match
+  the quote. It defaulted the fee to `"0"`, which no quote with a fee matches.
+- A sell conversion no longer reports the sold asset's quantity as the amount received;
+  `to_amount` is `nil`, because the venue states no proceeds figure for a sell.
+- `get_order_book/2` sets `venue_time` to `nil`. It was built from a per-level `timestamp`
+  the vendor documents as a dummy value not to be used.
+- Staking balances carry `balanceByProvider`; stake and unstake results carry the call's own
+  type and the unstake's `requestInitiated` time.
+- `hold` is computed when balances arrive as JSON numbers, as documented.
+- `get_account_margin/2` requires `:symbol`, which the endpoint requires.
+  `get_trade_history/2` no longer refuses a call without `:symbol`, which the endpoint allows.
+- `get_funding/2` reads `amount`, and `fundingAmount` where the reply uses the example's name.
+- `transfer_internal/5` sends a `clientTransferId`, and is still sent once.
+
 ## [0.2.83] - 2026-09-29
 
 ### Fixed

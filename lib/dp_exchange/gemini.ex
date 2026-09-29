@@ -423,11 +423,12 @@ defmodule DpExchange.Gemini do
   @doc """
   A foreign-exchange reference rate for `pair` at `at`.
 
-  See `DpExchange.Gemini.Rest.get_fx_rate/3` — including why this is not a rate the venue
-  trades at, and why the source is carried separately from the provider.
+  See `DpExchange.Gemini.Private.get_fx_rate/3` — including why this needs a credential (it
+  is signed, not public, however the vendor's docs once read) and why this is not a rate
+  the venue trades at, with the source carried separately from the provider.
   """
   @impl true
-  def get_fx_rate(pair, at, opts \\ []), do: Rest.get_fx_rate(pair, at, with_limiter(opts))
+  def get_fx_rate(pair, at, opts \\ []), do: Private.get_fx_rate(pair, at, with_limiter(opts))
 
   @doc """
   The networks an asset moves over, or the assets a network carries.

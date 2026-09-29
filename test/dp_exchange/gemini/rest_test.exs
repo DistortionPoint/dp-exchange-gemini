@@ -423,15 +423,18 @@ defmodule DpExchange.Gemini.RestTest do
       "asks" => [%{"price" => "77792.92", "amount" => "0.0182", "timestamp" => "1787936377"}]
     }
 
-    test "levels are Decimal tuples and the time is the venue's own" do
-      # Unlike a quote, the book carries per-level timestamps, so nothing is derived.
+    test "levels are Decimal tuples; venue_time is nil, because the venue reports none" do
+      # Each level's `timestamp` field is documented "DO NOT USE ... just populated with a
+      # dummy value" (`rest.yaml:8065`) — kept in the fixture to prove it is read for
+      # nothing, not carried into `venue_time`. `/v1/book` publishes no time of its own
+      # elsewhere in the response.
       assert {:ok, %Types.OrderBook{} = book} =
                Rest.get_order_book("BTC-USD", plug: responding(@book), retry_attempts: 0)
 
       assert [{bid_price, bid_size}] = book.bids
       assert Decimal.equal?(bid_price, Decimal.new("77792.91"))
       assert Decimal.equal?(bid_size, Decimal.new("0.0031"))
-      assert book.venue_time == DateTime.from_unix!(1_787_936_377)
+      assert book.venue_time == nil
       assert book.provider == :gemini
     end
 
@@ -484,11 +487,15 @@ defmodule DpExchange.Gemini.RestTest do
       assert Decimal.equal?(price, Decimal.new("77792.91"))
     end
 
-    test "a book with no level timestamps fails rather than guessing" do
+    test "a book with no level timestamps still succeeds, with venue_time nil" do
+      # There was never anything to guess: `OrderBookEntry.timestamp` (`rest.yaml:8065`) is
+      # a dummy value whether present or absent.
       body = %{"bids" => [%{"price" => "1", "amount" => "1"}], "asks" => []}
 
-      assert {:error, :missing_venue_timestamp} =
+      assert {:ok, book} =
                Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+
+      assert book.venue_time == nil
     end
   end
 
@@ -671,19 +678,9 @@ defmodule DpExchange.Gemini.RestTest do
     end
   end
 
-  describe "get_fx_rate/3 refuses a non-numeric rate rather than delivering rate: nil" do
-    test "Decimal.new/1 used to raise here; now the record is refused" do
-      body = %{"rate" => "null", "fxPair" => "GBPUSD"}
-
-      assert {:error, {:invalid_decimal, :rate, "null"}} =
-               Rest.get_fx_rate(
-                 "GBP-USD",
-                 ~U[2026-08-28 17:00:01Z],
-                 plug: responding(body),
-                 retry_attempts: 0
-               )
-    end
-  end
+  # `get_fx_rate/3`'s own describe block, including "refuses a non-numeric rate rather than
+  # delivering rate: nil", moved to `private_test.exs` with the rest of that endpoint's
+  # tests when it moved from `Rest` to `Private` — it is a signed call now, not a public GET.
 
   describe "rate_limit_blocking — family-wide gap, DpCryptoManagement issue #23" do
     # A real limiter module, recording which entry point it was actually called through —

@@ -8,12 +8,15 @@ stopped discarding a real traded price over a missing or unreadable `Date` heade
 substituted into that field: it is the venue's own instant or it is `nil`, never this
 package's clock.
 
-`get_order_book/2` is **not** the same, and the difference is where the time comes from. Its
-`venue_time` is derived from the per-level `timestamp` fields the venue puts on every book
-level, so a book in which not one level's timestamp can be read is a response this package is
-misreading rather than a venue declining to state a time — that still fails with
-`{:error, :missing_venue_timestamp}`, and it is the one place in this package where an
-unreadable time refuses a whole payload.
+`get_order_book/2`'s `venue_time` is **always `nil`.** Until checked against the vendor's
+own OpenAPI spec (2026-09-29), this section said `venue_time` was derived from the
+per-level `timestamp` fields the venue puts on every book level, and that a book in which
+not one level's timestamp could be read failed with `{:error, :missing_venue_timestamp}`.
+Neither claim was true: `OrderBookEntry.timestamp`'s own schema
+(`docs/reference/gemini/openapi/rest.yaml:8065`) says **"DO NOT USE — this field is
+included for compatibility reasons only and is just populated with a dummy value."**
+`/v1/book` publishes no time of its own anywhere else in the response, so there was never
+anything to derive, and never anything to refuse over.
 
 On the **stream**, a partial-depth snapshot (`@depth5`/`@depth10`/`@depth20`) carries
 `venue_time: nil`, because the vendor's own AsyncAPI requires only
@@ -542,16 +545,31 @@ them. `capabilities/0` declares `supported_instrument_types: [:spot, :perp]` —
 perpetuals surface has its own endpoints (`get_positions/1`, `get_contract_stats/2`,
 `get_funding/2`, among others), not a place in this list.
 
-## `:since` narrows a window as a `DateTime`, everywhere it appears
+## `:since` narrows a window as a `DateTime`, everywhere it appears — except the two staking reads
 
-`get_orders/2` (with `history: true`), `get_trade_history/2`, `list_custody_fees/1`,
-`list_accounts/1` and the staking history/reward reads all accept `since: ~U[...]` and
-convert it to the venue's own unit (milliseconds) before it goes on the wire — pass a
-`DateTime`, not a raw integer. `get_trade_history/2`'s `:limit` and `:since` used to reach
-the venue as `to_string(value)` instead — a `DateTime` became a string like
-`"2026-08-28 17:00:01Z"`, a shape `/v1/mytrades`'s `timestamp` field does not parse, so
-the filter silently failed to narrow anything. Fixed to match every other
-`:since`-accepting call in this module.
+`get_orders/2` (with `history: true`), `get_trade_history/2`, `list_custody_fees/1` and
+`list_accounts/1` accept `since: ~U[...]` and convert it to the venue's own unit
+(milliseconds) before it goes on the wire — pass a `DateTime`, not a raw integer.
+`get_trade_history/2`'s `:limit` and `:since` used to reach the venue as `to_string(value)`
+instead — a `DateTime` became a string like `"2026-08-28 17:00:01Z"`, a shape
+`/v1/mytrades`'s `timestamp` field does not parse, so the filter silently failed to narrow
+anything. Fixed to match every other `:since`-accepting call in this module.
+
+**`get_staking_history/2` and `get_staking_rewards/1` are the exception, not another
+member of the rule above.** This section used to list them alongside the millisecond
+converters; measured against the vendor's own OpenAPI spec (2026-09-29), both endpoints
+document `since`/`until` as ISO datetime with timezone (`rest.yaml:6729,6733` and `:6896`;
+both endpoints' own request examples give `"2022-11-01T00:00:00.000Z"`-shaped strings, not
+a number). A `DateTime` given to either is formatted to ISO 8601, not converted to
+milliseconds. `get_staking_rewards/1` additionally **requires** `:since` — the venue lists
+it in the request schema's `required` fields (`rest.yaml:6885`) — and this package refuses
+its absence locally as `{:error, {:missing_option, :since}}` rather than send the request
+without it.
+
+`get_staking_history/2`'s reply is nested, not a flat list of rows: an array of
+`{providerId, transactions: [...]}` (`rest.yaml:6770-6794`), one entry per provider the
+account has staked with. `provider_id` on each `StakingTransaction` this call returns comes
+from the parent entry; the transaction itself carries none.
 
 `get_transfers/2` is one exception: its filters (`currency:`, `timestamp:`,
 `limit_transfers:`) are the venue's own field names and units unchanged, not translated —

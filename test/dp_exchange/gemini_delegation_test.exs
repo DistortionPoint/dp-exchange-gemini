@@ -517,8 +517,13 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "list_payment_methods/2 and add_payment_method/2", %{opts: sup} do
+      # `PaymentMethodsResponse` is `{balances: [...], banks: [...]}` (`rest.yaml:5454`), not
+      # a bare list.
       assert {:ok, [_method]} =
-               Gemini.list_payment_methods(@money_creds, money_opts(sup, [%{"id" => "b-1"}]))
+               Gemini.list_payment_methods(
+                 @money_creds,
+                 money_opts(sup, %{"banks" => [%{"bank" => "Test Bank", "bankId" => "b-1"}]})
+               )
 
       assert {:ok, _added} =
                Gemini.add_payment_method(
@@ -624,27 +629,39 @@ defmodule DpExchange.GeminiDelegationTest do
       # holding `ratePeriods` — `rest.yaml`, 2026-09-29 — not the flat array this fixture
       # used to send.
       body = %{"provider-a" => %{"ETH" => %{"ratePeriods" => [%{"accrualTotal" => "0.1"}]}}}
-      assert {:ok, [_reward]} = Gemini.get_staking_rewards(money_opts(sup, body))
+
+      assert {:ok, [_reward]} =
+               Gemini.get_staking_rewards(money_opts(sup, body, since: ~U[2026-08-25 00:00:00Z]))
     end
 
     test "get_staking_history/1", %{opts: sup} do
-      rows = [
+      # The reply is an array of `{providerId, transactions: [...]}`
+      # (`rest.yaml:6770-6794`), not the flat array of transaction rows this fixture used
+      # to send.
+      groups = [
         %{
-          "transactionId" => "stk-d1",
-          "transactionType" => "Redeem",
-          "currency" => "ETH",
-          "amount" => "1"
+          "providerId" => "provider-a",
+          "transactions" => [
+            %{
+              "transactionId" => "stk-d1",
+              "transactionType" => "Redeem",
+              "amountCurrency" => "ETH",
+              "amount" => "1"
+            }
+          ]
         }
       ]
 
-      assert {:ok, [tx]} = Gemini.get_staking_history(money_opts(sup, rows))
+      assert {:ok, [tx]} = Gemini.get_staking_history(money_opts(sup, groups))
       assert tx.type == :unstake
     end
 
     test "stake/3 and unstake/3 both reach the venue", %{opts: sup} do
+      # `StakingDeposit` / `StakingWithdrawal` (`rest.yaml:9466-9497`, `:9663-9692`) carry
+      # no `transactionType` — that field belongs to the history endpoint's row, a
+      # different schema this fixture used to assume.
       body = %{
         "transactionId" => "stk-d2",
-        "transactionType" => "Deposit",
         "currency" => "ETH",
         "amount" => "1"
       }
@@ -698,7 +715,9 @@ defmodule DpExchange.GeminiDelegationTest do
 
     test "get_account_margin/1 and list_funding_payments/1", %{opts: sup} do
       assert {:ok, %{"leverage" => "1.5"}} =
-               Gemini.get_account_margin(money_opts(sup, %{"leverage" => "1.5"}))
+               Gemini.get_account_margin(
+                 money_opts(sup, %{"leverage" => "1.5"}, symbol: "BTC-GUSD-PERP")
+               )
 
       assert {:ok, [_payment]} =
                Gemini.list_funding_payments(money_opts(sup, [%{"eventType" => "x"}]))
@@ -740,7 +759,6 @@ defmodule DpExchange.GeminiDelegationTest do
 
     test "the perpetuals and margin reads refuse" do
       assert {:error, {:missing_credentials, :gemini}} = Gemini.get_positions()
-      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_account_margin()
       assert {:error, {:missing_credentials, :gemini}} = Gemini.list_funding_payments()
       assert {:error, {:missing_credentials, :gemini}} = Gemini.funding_payment_report()
       assert {:error, {:missing_credentials, :gemini}} = Gemini.get_margin_account()
@@ -760,12 +778,24 @@ defmodule DpExchange.GeminiDelegationTest do
       assert {:error, :missing_order_fields} = Gemini.preview_margin_order(%{side: :buy})
     end
 
+    test "get_account_margin/1 refuses on its own missing symbol before credentials" do
+      # Same order-of-refusal rule as the margin preview above: `rest.yaml:7158` requires
+      # `symbol` at the venue, and a request this package cannot build is not a credential
+      # problem.
+      assert {:error, {:missing_option, :symbol}} = Gemini.get_account_margin()
+    end
+
     test "the staking reads and writes refuse" do
       assert {:error, {:missing_credentials, :gemini}} = Gemini.get_staking_balances()
-      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_staking_rewards()
       assert {:error, {:missing_credentials, :gemini}} = Gemini.get_staking_history()
       assert {:error, :missing_provider_id} = Gemini.stake("ETH", Decimal.new("1"))
       assert {:error, :missing_provider_id} = Gemini.unstake("ETH", Decimal.new("1"))
+    end
+
+    test "get_staking_rewards/1 refuses on its own missing since before credentials" do
+      # `since` is required at the venue (`rest.yaml:6885`) — same order-of-refusal rule as
+      # `get_account_margin/1` above.
+      assert {:error, {:missing_option, :since}} = Gemini.get_staking_rewards()
     end
 
     test "the money-movement writes refuse" do
@@ -804,7 +834,7 @@ defmodule DpExchange.GeminiDelegationTest do
       assert {:error, {:ambiguous_conversion, "BTC", "USD"}} =
                Gemini.quote_conversion("BTC", "USD", Decimal.new("1"))
 
-      assert {:error, {:missing_option, [:symbol, :side, :amount, :price]}} =
+      assert {:error, {:missing_option, [:symbol, :side, :amount, :price, :fee]}} =
                Gemini.commit_conversion("q-1")
     end
   end

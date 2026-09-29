@@ -258,6 +258,36 @@ defmodule DpExchange.Gemini.StakingTest do
 
       assert balance.by_provider == %{}
     end
+
+    test "a real breakdown is read from balanceByProvider, not hardcoded away" do
+      # This used to hardcode `by_provider: %{}` unconditionally, with a comment claiming
+      # the venue never breaks the position down. It does: `rest.yaml:6565,6573` (schema
+      # `:9429-9465`), `balanceByProvider` is `{<providerId uuid>: {balance: <number>}}`,
+      # sent on every row in the venue's own example.
+      rows = [
+        %{
+          "currency" => "ETH",
+          "balance" => "10",
+          "balanceByProvider" => %{
+            "62b21e17-2534-4b9f-afcf-b7edb609dd8d" => %{"balance" => "7"},
+            "provider-b" => %{"balance" => "3"}
+          }
+        }
+      ]
+
+      assert {:ok, [balance]} =
+               Private.get_staking_balances(@credentials,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(
+               balance.by_provider["62b21e17-2534-4b9f-afcf-b7edb609dd8d"],
+               Decimal.new("7")
+             )
+
+      assert Decimal.equal?(balance.by_provider["provider-b"], Decimal.new("3"))
+    end
   end
 
   describe "get_staking_rewards/2 — the window is part of the value" do
@@ -286,6 +316,7 @@ defmodule DpExchange.Gemini.StakingTest do
 
       assert {:ok, [reward]} =
                Private.get_staking_rewards(@credentials,
+                 since: ~U[2026-08-25 00:00:00Z],
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -307,6 +338,7 @@ defmodule DpExchange.Gemini.StakingTest do
 
       assert {:ok, [first, second]} =
                Private.get_staking_rewards(@credentials,
+                 since: ~U[2026-08-25 00:00:00Z],
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -329,6 +361,7 @@ defmodule DpExchange.Gemini.StakingTest do
           ] do
         assert {:error, ^expected} =
                  Private.get_staking_rewards(@credentials,
+                   since: ~U[2026-08-25 00:00:00Z],
                    plug: responding(body),
                    retry_attempts: 0
                  ),
@@ -353,7 +386,9 @@ defmodule DpExchange.Gemini.StakingTest do
       assert reward.period_end == nil
     end
 
-    test "the window is sent to the venue in milliseconds" do
+    test "the window is sent to the venue as an ISO datetime, not epoch milliseconds" do
+      # `rest.yaml:6896`; the request example at `:6910` gives
+      # `"2022-08-20T00:00:00.000Z"`.
       me = self()
 
       assert {:ok, []} =
@@ -365,29 +400,48 @@ defmodule DpExchange.Gemini.StakingTest do
                )
 
       assert_receive {:payload, payload, "/v1/staking/rewards"}
-      assert payload["since"] == 1_787_936_401_000
+      assert payload["since"] == "2026-08-28T17:00:01Z"
       assert payload["providerId"] == "provider-a"
+    end
+
+    test "since is required — rest.yaml:6885 lists it among the request's required fields" do
+      exploding = fn _conn -> raise "must not ask for rewards over no window" end
+
+      assert {:error, {:missing_option, :since}} =
+               Private.get_staking_rewards(@credentials,
+                 provider_id: "provider-a",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
     end
   end
 
   describe "get_staking_history/2 — a redemption is a process" do
+    # Every fixture in this describe block was corrected to the vendor's documented reply
+    # shape (`rest.yaml:6770-6794`, schemas `:9499-9545`), 2026-09-29: an array of
+    # `{providerId, transactions: [{transactionId, transactionType, amountCurrency,
+    # amount, dateTime}]}` — not the flat array of transaction rows these fixtures used to
+    # build, and `amountCurrency`/`dateTime`, not `currency`/`timestamp(ms)`.
+    defp history_body(provider_id, transactions) do
+      [%{"providerId" => provider_id, "transactions" => transactions}]
+    end
+
     test "requested, paid so far and remaining all survive" do
-      rows = [
+      transactions = [
         %{
           "transactionId" => "stk-1",
           "transactionType" => "Redeem",
-          "currency" => "ETH",
+          "amountCurrency" => "ETH",
           "amount" => "10",
           "amountPaidSoFar" => "4",
           "amountRemaining" => "6",
-          "providerId" => "provider-a",
-          "timestampms" => 1_787_936_401_000
+          "dateTime" => 1_787_936_401_000
         }
       ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
-                 plug: responding(rows),
+                 plug: responding(history_body("provider-a", transactions)),
                  retry_attempts: 0
                )
 
@@ -398,19 +452,75 @@ defmodule DpExchange.Gemini.StakingTest do
       assert Decimal.equal?(tx.amount_remaining, Decimal.new("6"))
     end
 
+    test "the provider id comes from the parent group, not the transaction" do
+      transactions = [
+        %{
+          "transactionId" => "stk-1",
+          "transactionType" => "Redeem",
+          "amountCurrency" => "ETH",
+          "amount" => "10"
+        }
+      ]
+
+      assert {:ok, [tx]} =
+               Private.get_staking_history(@credentials,
+                 plug:
+                   responding(history_body("62b21e17-2534-4b9f-afcf-b7edb609dd8d", transactions)),
+                 retry_attempts: 0
+               )
+
+      assert tx.provider_id == "62b21e17-2534-4b9f-afcf-b7edb609dd8d"
+    end
+
+    test "two providers each contribute their own transactions" do
+      body = [
+        %{
+          "providerId" => "provider-a",
+          "transactions" => [
+            %{
+              "transactionId" => "stk-a1",
+              "transactionType" => "Deposit",
+              "amountCurrency" => "ETH",
+              "amount" => "1"
+            }
+          ]
+        },
+        %{
+          "providerId" => "provider-b",
+          "transactions" => [
+            %{
+              "transactionId" => "stk-b1",
+              "transactionType" => "Deposit",
+              "amountCurrency" => "MATIC",
+              "amount" => "30"
+            }
+          ]
+        }
+      ]
+
+      assert {:ok, [first, second]} =
+               Private.get_staking_history(@credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert {first.provider_id, first.asset} == {"provider-a", "ETH"}
+      assert {second.provider_id, second.asset} == {"provider-b", "MATIC"}
+    end
+
     test "the venue's own word is kept beside the normalised one" do
-      rows = [
+      transactions = [
         %{
           "transactionId" => "stk-2",
           "transactionType" => "Deposit",
-          "currency" => "ETH",
+          "amountCurrency" => "ETH",
           "amount" => "1"
         }
       ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
-                 plug: responding(rows),
+                 plug: responding(history_body("provider-a", transactions)),
                  retry_attempts: 0
                )
 
@@ -418,35 +528,44 @@ defmodule DpExchange.Gemini.StakingTest do
       assert tx.venue_type == "Deposit"
     end
 
-    test "a staking row missing an identifying field is refused, not filled with placeholders" do
+    test "a transaction missing an identifying field is refused, not filled with placeholders" do
       # `StakingTransaction` names `:id`, `:type`, `:asset`, `:amount` and `:provider` in its
       # `@enforce_keys`, so its `new/1` refuses a `nil` in any of them. Nothing here calls
       # `new/1` — the struct is built literally, as everywhere in this family — so that check
       # never ran and none of these was guarded.
-      #
-      # `asset` had the sharper version: `String.upcase(row["currency"] || "")` answered `""`
-      # for an absent currency, which is not a weaker answer but a different kind of wrong,
-      # because `""` passes every `nil` check a consumer might write while naming no asset at
-      # all. The same substitution this module already records for `to_string(nil)` on
-      # `order_id`.
       complete = %{
         "transactionId" => "stk-9",
         "transactionType" => "Deposit",
-        "currency" => "ETH",
+        "amountCurrency" => "ETH",
         "amount" => "1"
       }
 
       for {field, expected} <- [
             {"transactionId", {:missing_required_field, :id}},
-            {"currency", {:missing_required_field, :asset}},
+            {"amountCurrency", {:missing_required_field, :asset}},
             {"amount", {:missing_required_field, :amount}}
           ] do
         assert {:error, ^expected} =
                  Private.get_staking_history(@credentials,
-                   plug: responding([Map.delete(complete, field)]),
+                   plug: responding(history_body("provider-a", [Map.delete(complete, field)])),
                    retry_attempts: 0
                  ),
-               "a staking row missing #{field} must be refused"
+               "a transaction missing #{field} must be refused"
+      end
+    end
+
+    test "a group naming no provider or no transaction list is refused" do
+      for group <- [
+            %{"transactions" => []},
+            %{"providerId" => "provider-a"},
+            %{"providerId" => "provider-a", "transactions" => "not a list"}
+          ] do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_staking_history(@credentials,
+                   plug: responding([group]),
+                   retry_attempts: 0
+                 ),
+               "#{inspect(group)} must be refused"
       end
     end
 
@@ -463,18 +582,18 @@ defmodule DpExchange.Gemini.StakingTest do
     end
 
     test "an unrecognised type is :other, not the nearest atom that fits" do
-      rows = [
+      transactions = [
         %{
           "transactionId" => "stk-3",
           "transactionType" => "Slashing",
-          "currency" => "ETH",
+          "amountCurrency" => "ETH",
           "amount" => "1"
         }
       ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
-                 plug: responding(rows),
+                 plug: responding(history_body("provider-a", transactions)),
                  retry_attempts: 0
                )
 
@@ -483,44 +602,64 @@ defmodule DpExchange.Gemini.StakingTest do
     end
 
     test "an Interest row is a reward" do
-      rows = [
+      transactions = [
         %{
           "transactionId" => "stk-4",
           "transactionType" => "Interest",
-          "currency" => "ETH",
+          "amountCurrency" => "ETH",
           "amount" => "0.01"
         }
       ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
-                 plug: responding(rows),
+                 plug: responding(history_body("provider-a", transactions)),
                  retry_attempts: 0
                )
 
       assert tx.type == :reward
     end
 
-    test "a seconds timestamp and a milliseconds one both land in this century" do
-      # The payload does not say which unit it used. Reading milliseconds as seconds lands
-      # past the epoch ceiling and raises.
-      seconds = [
+    test "an epoch-millisecond dateTime, the venue's own example shape, lands in this century" do
+      # `StakingTransaction.dateTime`'s own example (`rest.yaml:9532`) is
+      # `1667418560153` — an epoch-millisecond integer, despite the field being described
+      # as "the time of the transaction in milliseconds". `staking_time/1` reads it whether
+      # it is that, an epoch-second integer, or an ISO string.
+      transactions = [
         %{
           "transactionId" => "stk-5",
           "transactionType" => "Deposit",
-          "currency" => "ETH",
+          "amountCurrency" => "ETH",
           "amount" => "1",
-          "timestamp" => 1_787_936_401
+          "dateTime" => 1_787_936_401_000
         }
       ]
 
       assert {:ok, [tx]} =
                Private.get_staking_history(@credentials,
-                 plug: responding(seconds),
+                 plug: responding(history_body("provider-a", transactions)),
                  retry_attempts: 0
                )
 
       assert tx.venue_time.year == 2026
+    end
+
+    test "since and until go out as ISO datetime strings, not epoch milliseconds" do
+      # `rest.yaml:6729,6733`; the request example at `:6758` gives
+      # `"2022-11-01T00:00:00.000Z"`.
+      me = self()
+
+      assert {:ok, []} =
+               Private.get_staking_history(@credentials,
+                 since: ~U[2026-08-25 00:00:00Z],
+                 until: ~U[2026-09-01 00:00:00Z],
+                 plug: capturing(history_body("provider-a", []), me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, "/v1/staking/history"}
+      assert payload["since"] == "2026-08-25T00:00:00Z"
+      assert payload["until"] == "2026-09-01T00:00:00Z"
     end
   end
 

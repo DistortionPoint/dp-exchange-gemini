@@ -338,7 +338,7 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "committing needs the terms the venue quoted against" do
-      assert {:error, {:missing_option, [:symbol, :side, :amount, :price]}} =
+      assert {:error, {:missing_option, [:symbol, :side, :amount, :price, :fee]}} =
                Fake.commit_conversion("q-1", credentials: @credentials)
     end
 
@@ -349,6 +349,7 @@ defmodule DpExchange.Gemini.FakeTest do
                  side: :buy,
                  amount: Decimal.new("1"),
                  price: Decimal.new("40000"),
+                 fee: Decimal.new("2.50"),
                  credentials: @credentials
                )
 
@@ -407,7 +408,7 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "the tape is not the caller's own fills" do
-      # get_trade_history/2 needs a symbol and credentials; the tape needs neither.
+      # get_trade_history/2 needs credentials (a symbol is optional); the tape needs neither.
       assert {:ok, [_trade]} = Fake.get_trades("BTC-USD")
 
       assert {:error, {:missing_credentials, :gemini}} =
@@ -499,9 +500,13 @@ defmodule DpExchange.Gemini.FakeTest do
   end
 
   describe "the fake's payment and transfer surface" do
-    test "a payment method list carries a pending one" do
+    test "a payment method list carries both kinds the venue's reply splits into" do
+      # `PaymentMethodsResponse` (`rest.yaml:5454`) has no per-row status at all — `banks`
+      # (`PaymentMethodBank`) has none, so the "pending" narrative this used to check
+      # described a field the real reply never carries.
       assert {:ok, methods} = Fake.list_payment_methods(@credentials)
-      assert Enum.any?(methods, &(&1["status"] == "pending"))
+      assert Enum.any?(methods, &(&1["kind"] == "balance"))
+      assert Enum.any?(methods, &(&1["kind"] == "bank"))
     end
 
     test "a newly added method is pending, never verified" do
@@ -621,10 +626,20 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "a reward carries the window it accrued over" do
-      assert {:ok, [reward]} = Fake.get_staking_rewards(credentials: @credentials)
+      assert {:ok, [reward]} =
+               Fake.get_staking_rewards(
+                 credentials: @credentials,
+                 since: ~U[2026-08-01 00:00:00Z]
+               )
+
       assert reward.period_start
       assert reward.period_end
       assert reward.accrual_count == 7
+    end
+
+    test "get_staking_rewards refuses a missing since, the way the venue requires it" do
+      assert {:error, {:missing_option, :since}} =
+               Fake.get_staking_rewards(credentials: @credentials)
     end
 
     test "the writes refuse without a provider" do

@@ -325,12 +325,13 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
   end
 
   describe "payment methods" do
-    test "rows come back with their status, because listed is not usable" do
+    test "balances and banks come back tagged by kind, because the reply is two arrays under two names" do
+      # `PaymentMethodsResponse` is `{balances: [...], banks: [...]}` (`rest.yaml:5454`,
+      # schema `:9316-9328`), not a `"methods"` array. This used to fixture the shape the
+      # endpoint has never sent.
       body = %{
-        "methods" => [
-          %{"id" => "bank-1", "status" => "verified"},
-          %{"id" => "bank-2", "status" => "pending"}
-        ]
+        "balances" => [%{"currency" => "USD", "amount" => "100.00"}],
+        "banks" => [%{"bank" => "Test Bank", "bankId" => "b-1"}]
       }
 
       assert {:ok, methods} =
@@ -340,13 +341,14 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                )
 
       assert length(methods) == 2
-      assert Enum.any?(methods, &(&1["status"] == "pending"))
+      assert Enum.any?(methods, &(&1["kind"] == "balance"))
+      assert Enum.any?(methods, &(&1["kind"] == "bank"))
     end
 
-    test "a bare list comes back too" do
-      assert {:ok, [%{"id" => "bank-1"}]} =
+    test "neither array present is no rows, not an error" do
+      assert {:ok, []} =
                Private.list_payment_methods(@credentials,
-                 plug: responding([%{"id" => "bank-1"}]),
+                 plug: responding(%{}),
                  retry_attempts: 0
                )
     end
@@ -845,19 +847,23 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
     end
 
     test "commit_conversion/2 sends quantity and price in full notation" do
-      Private.commit_conversion("q-1",
+      Private.commit_conversion("20930",
         credentials: @credentials,
         symbol: "BTC-USD",
         side: :buy,
         amount: @tiny,
         price: @large,
-        plug: capturing(%{"quoteId" => "q-1"}, self()),
+        fee: Decimal.new("2.50"),
+        plug: capturing(%{"quoteId" => 20_930}, self()),
         retry_attempts: 0
       )
 
       assert_receive {:payload, payload, "/v1/instant/execute"}
       assert payload["quantity"] == "0.00000001"
       assert payload["price"] == "1500000"
+      # `quoteId` is `type: integer` in the venue's own schema (`rest.yaml:5072`) — sent as
+      # a number, not the string `commit_conversion/2` received it as.
+      assert payload["quoteId"] == 20_930
     end
 
     test "commit_conversion/2 refuses a forwarded nil amount rather than sending an empty one" do
@@ -867,13 +873,14 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       # module's own comment promises "a missing one is an error rather than a value
       # invented here".
       assert {:error, {:missing_option, missing}} =
-               Private.commit_conversion("q-1",
+               Private.commit_conversion("20930",
                  credentials: @credentials,
                  symbol: "BTC-USD",
                  side: :buy,
                  amount: nil,
                  price: "  ",
-                 plug: capturing(%{"quoteId" => "q-1"}, self()),
+                 fee: Decimal.new("2.50"),
+                 plug: capturing(%{"quoteId" => 20_930}, self()),
                  retry_attempts: 0
                )
 

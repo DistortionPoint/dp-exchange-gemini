@@ -82,6 +82,7 @@ defmodule DpExchange.Gemini.Private do
     Conversion,
     DepositAddress,
     Fill,
+    FxRate,
     Order,
     Position,
     StakingBalance,
@@ -290,6 +291,16 @@ defmodule DpExchange.Gemini.Private do
   defp timestamp_param(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
   defp timestamp_param(other), do: other
 
+  # The staking endpoints are the exception to `timestamp_param/1`'s rule above: both
+  # `/v1/staking/history` (`rest.yaml:6729,6733`) and `/v1/staking/rewards` (`:6896,:6900`)
+  # document `since`/`until` as "in iso datetime with timezone format", and their own
+  # request examples give `"2022-11-01T00:00:00.000Z"` (`:6758`) — not an epoch number. A
+  # `DateTime` is formatted to ISO 8601; a caller's own already-ISO string passes through
+  # unchanged, the same shape `timestamp_param/1` affords its own callers.
+  defp iso_timestamp_param(nil), do: nil
+  defp iso_timestamp_param(%DateTime{} = at), do: DateTime.to_iso8601(at)
+  defp iso_timestamp_param(other), do: other
+
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
 
@@ -364,10 +375,16 @@ defmodule DpExchange.Gemini.Private do
   defp ids(_unreadable), do: {:error, :unexpected_response_shape}
 
   @doc """
-  Past fills for a symbol.
+  Past fills, optionally narrowed to one symbol.
 
-  Gemini requires a symbol here — there is no all-symbols variant — so a caller asking for
-  everything is asking for one request per symbol, and it is theirs to decide whether to.
+  **`opts[:symbol]` is optional.** `MyTradesRequest` (`rest.yaml:8294-8298`) names only
+  `request` and `nonce` as required; `symbol` sits beside `limit_trades` and `timestamp` as
+  a filter. This used to refuse a call with no symbol before a request was ever made,
+  reading a per-request filter as an all-or-nothing requirement the venue never stated —
+  every fill row the venue returns already carries its own `"symbol"` (`:1727`, the
+  endpoint's own example responses — `MyTrade`'s schema omits the field entirely, another
+  gap between the two), which is exactly what a caller asking across every symbol needs
+  and a refusal here withheld.
 
   `opts[:since]` accepts a `DateTime`, converted to the venue's own unit — **milliseconds**,
   per its own request examples (`timestamp: 1591084414000`) — the same conversion every
@@ -381,20 +398,20 @@ defmodule DpExchange.Gemini.Private do
   @spec get_trade_history(map(), keyword()) ::
           {:ok, [Fill.t()]} | {:error, term()} | {:refused, term()}
   def get_trade_history(credentials, opts) do
-    case Keyword.get(opts, :symbol) do
-      nil ->
-        {:error, {:missing_option, :symbol}}
+    requested_symbol = Keyword.get(opts, :symbol)
 
-      symbol ->
-        params =
-          %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
-          |> put_present("limit_trades", Keyword.get(opts, :limit))
-          |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
+    params =
+      %{}
+      |> put_present(
+        "symbol",
+        requested_symbol && SymbolFormat.to_exchange_symbol(requested_symbol)
+      )
+      |> put_present("limit_trades", Keyword.get(opts, :limit))
+      |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
 
-        with {:ok, rows, _headers} <- post("/v1/mytrades", params, credentials, opts),
-             {:ok, rows} <- list_rows(rows) do
-          to_fills(rows, symbol)
-        end
+    with {:ok, rows, _headers} <- post("/v1/mytrades", params, credentials, opts),
+         {:ok, rows} <- list_rows(rows) do
+      to_fills(rows, requested_symbol)
     end
   end
 
@@ -790,10 +807,15 @@ defmodule DpExchange.Gemini.Private do
   # Gemini reports the total and what is available, not the hold. The difference is the
   # hold — derived rather than invented, and `nil` when either side is missing rather than
   # a zero that would read as "nothing on hold".
-  defp hold(%{"amount" => amount, "available" => available})
-       when is_binary(amount) and is_binary(available) do
-    # Both fields go through the safe parser now, not `Decimal.new/1` directly — a
-    # malformed side must not raise, and it must not produce a fabricated hold either.
+  #
+  # `Balance`'s own schema (`rest.yaml:8730-8750`) types `amount` and `available` as
+  # `number`, not `string` — the `is_binary` guard this used to carry refused every real
+  # `/v1/balances` row, which sends JSON numbers, and answered `nil` for a hold this
+  # decoder could plainly compute. Both fields go through `decimal/1`, the same safe parser
+  # for either shape, rather than requiring one specific JSON type the venue does not
+  # promise: a malformed side must not raise, and it must not produce a fabricated hold
+  # either.
+  defp hold(%{"amount" => amount, "available" => available}) do
     subtract_hold(decimal(amount), decimal(available))
   end
 
@@ -820,10 +842,20 @@ defmodule DpExchange.Gemini.Private do
   #
   # `fee`, `fee_currency` and `liquidity` stay unguarded on purpose: none is enforced, and a
   # venue that did not state a fee has not stated one.
-  defp to_fill(row, _symbol) when not is_map(row), do: {:error, :unexpected_response_shape}
+  defp to_fill(row, _requested_symbol) when not is_map(row),
+    do: {:error, :unexpected_response_shape}
 
-  defp to_fill(row, symbol) do
+  # `symbol` used to be the CALLER's own argument, echoed onto every row unread — safe only
+  # because `get_trade_history/2` required a symbol on every call, so caller and row could
+  # never disagree. Now that the venue's filter is optional (`get_trade_history/2`'s own
+  # doc), a call naming none can return fills across several symbols, and every one of the
+  # venue's own example rows carries its own `"symbol"` (`rest.yaml:1727`) — so the row's
+  # own field is read first, `SymbolFormat.to_canonical_symbol/1` the same conversion every
+  # other decoder in this module applies to a venue symbol. `requested_symbol` is the
+  # fallback for a row that somehow carries none, not the primary source it used to be.
+  defp to_fill(row, requested_symbol) do
     with {:ok, order_id} <- required_id(row["order_id"], :order_id),
+         {:ok, symbol} <- fill_symbol(row["symbol"], requested_symbol),
          {:ok, side} <- required_side(row["type"]),
          {:ok, quantity} <- required_decimal(row["amount"], :quantity),
          {:ok, price} <- required_decimal(row["price"], :price),
@@ -844,6 +876,16 @@ defmodule DpExchange.Gemini.Private do
        }}
     end
   end
+
+  defp fill_symbol(row_symbol, _requested) when is_binary(row_symbol) and row_symbol != "" do
+    {:ok, SymbolFormat.to_canonical_symbol(row_symbol)}
+  end
+
+  defp fill_symbol(_row_symbol, requested) when is_binary(requested) and requested != "" do
+    {:ok, requested}
+  end
+
+  defp fill_symbol(_row_symbol, _requested), do: {:error, {:missing_required_field, :symbol}}
 
   # One unreadable fill refuses the whole page rather than leaving a gap in it. A trade
   # history with an execution silently missing is the one shape a consumer cannot detect: it
@@ -963,6 +1005,15 @@ defmodule DpExchange.Gemini.Private do
   see `Core.Types.Conversion`, whose `expires_at` exists for exactly this. Ask
   `Conversion.expired?/2` before committing; the venue is still the authority on whether
   a commit succeeds.
+
+  `opts[:symbol]`, `opts[:side]`, `opts[:amount]` and `opts[:price]` are the terms the quote
+  was made at — see `execute_params/2`'s own comment — and now `opts[:fee]` too: the venue
+  requires it and states it "must match fee returned in the quote" (`rest.yaml:5071`), so
+  this package sends what the caller was quoted rather than a `"0"` this package used to
+  invent. All five are required; any missing is `{:error, {:missing_option, missing}}`
+  before a request is made. `id` — the quote's `quoteId` — is sent as the integer the
+  venue's own schema names (`rest.yaml:5072`), parsed back from the string this package
+  handed the caller in the quote; an id that does not parse is refused rather than sent.
   """
   @spec commit_conversion(String.t(), keyword()) ::
           {:ok, Conversion.t()} | {:error, term()} | {:refused, term()}
@@ -994,21 +1045,35 @@ defmodule DpExchange.Gemini.Private do
   # `1500000` as `"1.5E+6"`, also measured on the wire. `place_order/3` in this same module
   # already sends through `decimal_string/1` for exactly that reason; this path was the one
   # the earlier sweep missed.
+  #
+  # **A third defect, on the same call.** `fee` defaulted to `"0"` here. The venue's own
+  # requirement (`rest.yaml:5077`): "The fee for the order. fee must match fee returned in
+  # the quote" — `fee` is in the request schema's `required` list (`:5049-5057`) alongside
+  # `quoteId`, `symbol`, `side`, `quantity` and `price`, and a real fee is essentially never
+  # zero (`quote_conversion/4`'s own doc example: `"2.9900309233"`). Sending `"0"` when the
+  # caller did not supply one was not a safe default, it was asserting a fee the venue never
+  # quoted — the caller now supplies it, exactly as it does `:amount` and `:price`, both of
+  # which already come from the quote this package returned.
   defp execute_params(id, opts) do
-    required = [:symbol, :side, :amount, :price]
+    required = [:symbol, :side, :amount, :price, :fee]
     values = Map.new(required, &{&1, Config.opt(opts, &1, nil)})
 
     case Enum.reject(required, &present?(values[&1])) do
       [] ->
-        {:ok,
-         %{
-           "quoteId" => id,
-           "symbol" => SymbolFormat.to_exchange_symbol(values.symbol),
-           "side" => to_string(values.side),
-           "quantity" => decimal_string(values.amount),
-           "price" => decimal_string(values.price),
-           "fee" => decimal_string(Config.opt(opts, :fee, "0"))
-         }}
+        # The quote id is checked only once the terms it belongs to are all present — a
+        # caller who forwarded no terms at all sees "the terms are missing", not "the id
+        # looks wrong", which would send them looking at the wrong thing.
+        with {:ok, quote_id} <- quote_id_integer(id) do
+          {:ok,
+           %{
+             "quoteId" => quote_id,
+             "symbol" => SymbolFormat.to_exchange_symbol(values.symbol),
+             "side" => to_string(values.side),
+             "quantity" => decimal_string(values.amount),
+             "price" => decimal_string(values.price),
+             "fee" => decimal_string(values.fee)
+           }}
+        end
 
       missing ->
         {:error, {:missing_option, missing}}
@@ -1018,6 +1083,23 @@ defmodule DpExchange.Gemini.Private do
   defp present?(nil), do: false
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(_value), do: true
+
+  # `quoteId` is `type: integer` in the venue's own schema (`rest.yaml:5072`), not the
+  # string `commit_conversion/2`'s caller received back — `Conversion.id` is always a
+  # string, including when it came from an integer (`required_id/2` above runs every
+  # `quoteId` through `Integer.to_string/1` on the way in). Signing and sending that string
+  # unchanged would put a JSON string where the venue's schema names a number. Parsed back
+  # to an integer here, and refused — never guessed — when it does not parse: an id this
+  # package cannot read back as the number it came from is not one it can vouch for.
+  defp quote_id_integer(id) when is_binary(id) do
+    case Integer.parse(id) do
+      {value, ""} -> {:ok, value}
+      _unparseable -> {:error, {:invalid_quote_id, id}}
+    end
+  end
+
+  defp quote_id_integer(id) when is_integer(id), do: {:ok, id}
+  defp quote_id_integer(id), do: {:error, {:invalid_quote_id, id}}
 
   defp instant_pair(from, to, opts) do
     case {Keyword.get(opts, :symbol), Keyword.get(opts, :side)} do
@@ -1073,24 +1155,70 @@ defmodule DpExchange.Gemini.Private do
     # field `Conversion` marks required. The test covering that path asserted on `status`
     # and `expires_at` and never on the id, so it passed throughout.
     with {:ok, id} <- required_id(Map.get(body, "quoteId") || Map.get(body, "orderId"), :id),
-         {:ok, from_asset} <-
-           required_id(from || Map.get(body, "totalSpendCurrency"), :from_asset),
-         {:ok, to_asset} <- required_id(to || Map.get(body, "quantityCurrency"), :to_asset) do
-      {:ok, build_conversion(body, id, from_asset, to_asset, status, headers)}
+         {:ok, from_asset, from_amount, to_asset, to_amount} <-
+           conversion_amounts(body, from, to) do
+      {:ok,
+       build_conversion(body, id, from_asset, from_amount, to_asset, to_amount, status, headers)}
     end
   end
 
   defp to_conversion(_body, _from, _to, _status, _headers),
     do: {:error, :unexpected_response_shape}
 
-  defp build_conversion(body, id, from_asset, to_asset, status, headers) do
+  # **`quantity`/`quantityCurrency` name `CCY1` on both a buy and a sell.** The venue's own
+  # examples agree across both endpoints: a BTCUSD buy's `quantityCurrency` is `BTC`, on
+  # the quote (`rest.yaml:4971,4972`) as well as the execute (`:5160,5161`) response, and
+  # an ETHUSD SELL's is `ETH` on both too (`:4990,4991` quote; `:5178,5179` execute) — the
+  # base of the pair either way, never the quote currency. `totalSpend`/`totalSpendCurrency`
+  # name whichever side was actually given up: `CCY2` on a buy (cash spent for crypto
+  # received), but `CCY1` on a sell — the sell quote example gives `totalSpend: "1"`,
+  # `totalSpendCurrency: "ETH"`, identical to `quantity`, because selling IS spending the
+  # quantity sold.
+  #
+  # This used to read `from`/`to` unconditionally from `totalSpend(Currency)` and
+  # `quantity(Currency)` regardless of side. On a buy that is right. On a sell it put
+  # `quantityCurrency` — `CCY1`, the asset being SOLD — on `to_asset` too, so a sell's
+  # `Conversion` named the same asset on both ends and reported `to_amount` in `CCY1` units
+  # under a `to_asset` a caller-supplied override could still label `USD`: a caller selling
+  # ETH for USD read `to_amount: 1` as "1 USD received" when the venue said nothing of the
+  # kind.
+  #
+  # **The venue reports no proceeds figure for a sell.** Nothing in this response — quote,
+  # execute or wrap — carries a quote-currency amount received; `quantity`/`totalSpend` are
+  # both `CCY1`, and `price`/`priceCurrency` is a rate, not an amount. `to_amount` is `nil`
+  # on a sell rather than computed here from `quantity * price`: that would be this
+  # package's arithmetic reported as the venue's own number, the exact substitution this
+  # family's `Conversion` types refuse elsewhere.
+  #
+  # `from`/`to` — the caller's own asset names, where the caller already knows them
+  # (`quote_conversion/4`, `convert/4`) — still win over anything derived from the body, as
+  # they did before; only the AMOUNTS, which never had a caller-supplied override, depend on
+  # `body["side"]`.
+  defp conversion_amounts(%{"side" => "sell"} = body, from, to) do
+    with {:ok, from_asset} <-
+           required_id(from || Map.get(body, "quantityCurrency"), :from_asset),
+         {:ok, to_asset} <- required_id(to || Map.get(body, "priceCurrency"), :to_asset) do
+      {:ok, from_asset, decimal(Map.get(body, "quantity")), to_asset, nil}
+    end
+  end
+
+  defp conversion_amounts(body, from, to) do
+    with {:ok, from_asset} <-
+           required_id(from || Map.get(body, "totalSpendCurrency"), :from_asset),
+         {:ok, to_asset} <- required_id(to || Map.get(body, "quantityCurrency"), :to_asset) do
+      {:ok, from_asset, decimal(Map.get(body, "totalSpend")), to_asset,
+       decimal(Map.get(body, "quantity"))}
+    end
+  end
+
+  defp build_conversion(body, id, from_asset, from_amount, to_asset, to_amount, status, headers) do
     %Conversion{
       id: id,
       status: status,
       from_asset: from_asset,
       to_asset: to_asset,
-      from_amount: decimal(Map.get(body, "totalSpend")),
-      to_amount: decimal(Map.get(body, "quantity")),
+      from_amount: from_amount,
+      to_amount: to_amount,
       rate: decimal(Map.get(body, "price")),
       fee: decimal(Map.get(body, "fee")),
       expires_at: expires_at(Map.get(body, "maxAgeMs"), headers),
@@ -1162,9 +1290,10 @@ defmodule DpExchange.Gemini.Private do
   The account's own traded volume, as the venue aggregates it — `/v1/tradevolume`.
 
   One row per symbol per day, with the maker and taker breakdown the venue's fee tiers are
-  computed from. **Not `get_trade_history/2` summed**: this venue requires a symbol on every
-  fills request, so reproducing this means one request per symbol per period, and the answer
-  would still be this package's arithmetic against the venue's ledger.
+  computed from. **Not `get_trade_history/2` summed**: `get_trade_history/2` answers fills,
+  not the venue's own daily aggregation, so reproducing this from fills would still be this
+  package's arithmetic against the venue's ledger rather than the number `/v1/tradevolume`
+  itself publishes.
 
   Rows come back as the venue sends them. The fields differ enough between venues that a
   normalised struct would be mostly `nil`, and a caller reading `buy_maker_notional` wants
@@ -1231,6 +1360,91 @@ defmodule DpExchange.Gemini.Private do
       {:ok, List.wrap(body)}
     end
   end
+
+  # The pairs the venue serves, from its own documentation. **Enumerated rather than passed
+  # through** because an unsupported pair returns a 404 the caller cannot distinguish from
+  # a bad timestamp, and the list is short and stated.
+  @fx_pairs ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
+               SGDUSD KRWUSD JPYUSD CNYUSD)
+
+  @doc """
+  A foreign-exchange reference rate for `pair` at `at` — `GET /v2/fxrate/{symbol}/{timestamp}`.
+
+  **This used to live in `Rest`, documented "Public". It is not.** Measured against the
+  vendor's own OpenAPI (`rest.yaml:7836-7851`): this route's `security` lists `apiKeyAuth`,
+  `signatureAuth` and `payloadAuth`, the same full private scheme as `/v1/margin` or any
+  signed POST, and the vendor states the key must carry the Auditor role. `Rest` sends no
+  credentials at all — that is that module's whole design — so this could never succeed no
+  matter what a caller passed it, the same defect `list_networks/2`'s own doc records for
+  `/v2/network/{token}`. Signed here through `signed_get/3` like every other authenticated
+  GET in this module; `opts[:credentials]` names the key, exactly as `list_networks/2`
+  reads its own.
+
+  **This is not a rate the venue trades at.** Gemini's own documentation: *"Gemini does not
+  offer foreign exchange services. This endpoint is for historical reference only and does
+  not provide any guarantee of future exchange rates."* The number comes from a third party
+  the venue names in `provider`, which this package carries as `Types.FxRate`'s `:source` —
+  `:provider` stays `:gemini`, the venue relaying it.
+
+  Fourteen pairs are served and they are all `…USD`; a pair outside the list is refused here
+  rather than sent, because the venue's 404 for an unsupported pair reads the same as one
+  for a bad timestamp.
+
+  `at` is the instant, sent as milliseconds.
+  """
+  @spec get_fx_rate(String.t(), DateTime.t(), keyword()) ::
+          {:ok, FxRate.t()} | {:error, term()} | {:refused, term()}
+  def get_fx_rate(pair, %DateTime{} = at, opts) do
+    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
+    credentials = Keyword.get(opts, :credentials, %{})
+
+    with :ok <- fx_pair(native) do
+      timestamp = DateTime.to_unix(at, :millisecond)
+
+      with {:ok, body, _headers} <-
+             signed_get("/v2/fxrate/#{native}/#{timestamp}", credentials, opts) do
+        to_fx_rate(body, native, at)
+      end
+    end
+  end
+
+  defp fx_pair(pair) when pair in @fx_pairs, do: :ok
+  defp fx_pair(pair), do: {:error, {:unsupported_fx_pair, pair}}
+
+  defp to_fx_rate(%{"rate" => rate} = body, native, _requested_at) do
+    with {:ok, parsed_rate} <- required_decimal(rate, :rate),
+         {:ok, as_of} <- fx_as_of(body["asOf"]) do
+      {:ok,
+       %FxRate{
+         pair: body["fxPair"] || native,
+         rate: parsed_rate,
+         # The venue's own `asOf`, and only that. The venue may answer for a nearby moment,
+         # so the instant asked for is not a stand-in for the one it answered for.
+         as_of: as_of,
+         # The institution that computed the rate. Named `provider` by the venue and
+         # carried as `source` here, because `provider` in this contract means the venue.
+         source: body["provider"],
+         benchmark: body["benchmark"],
+         provider: :gemini
+       }}
+    end
+  end
+
+  defp to_fx_rate(_body, _native, _requested_at), do: {:error, :unexpected_response_shape}
+
+  # `Core.Types.FxRate`: `:as_of` is the instant "echoed by the venue", and "a rate without
+  # it is a number with no time attached, which is not a rate". This must not fall back to
+  # the instant requested when `asOf` is absent — the venue may answer for a nearby moment,
+  # so the instant asked for is not a stand-in for the one it answered for — and must not
+  # date a non-positive `asOf` to 1970 or raise on one outside `DateTime`'s range.
+  defp fx_as_of(ms) when is_integer(ms) and ms > 0 do
+    case DateTime.from_unix(ms, :millisecond) do
+      {:ok, at} -> {:ok, at}
+      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
+    end
+  end
+
+  defp fx_as_of(_absent_or_unreadable), do: {:error, :missing_venue_timestamp}
 
   @doc """
   A fresh deposit address for `asset` on `network` — `/v1/deposit/{network}/newAddress`.
@@ -1583,9 +1797,22 @@ defmodule DpExchange.Gemini.Private do
   @doc """
   The funding sources this account can move fiat through — `/v1/payments/methods`.
 
-  Rows are the venue's own. **A method being listed is not the same as being usable**: a
-  bank account added through `add_payment_method/2` sits pending verification, and the
-  status is in the row.
+  **The reply has no `"methods"` key.** Measured against the vendor's `rest.yaml`
+  (2026-09-29): `PaymentMethodsResponse` (`rest.yaml:5448` request, `:5454` response
+  example; schema `:9316-9328`) is `{balances: [...], banks: [...]}` — two arrays under two
+  names, neither called `"methods"`. This used to read a `"methods"` array the endpoint
+  does not send, so every real response fell through to this module's bare-object or
+  bare-list fallback and was decoded as a shape this endpoint never returns.
+
+  `Core.Venue`'s `list_payment_methods/2` callback returns `[map()]` — one flat list, with
+  no room for two arrays under two names — so each row is tagged `"kind" => "balance"` or
+  `"kind" => "bank"` rather than losing which array it came from. A consumer filtering on
+  `row["kind"]` sees the same split the venue's own response makes; one that ignores the
+  key gets every funding source in one list, which is what the contract promises.
+
+  A missing array is no rows of that kind, not an error — the venue's own example always
+  sends both, but nothing states either is required. A present array that is not a list is
+  unreadable.
   """
   @spec list_payment_methods(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -1595,21 +1822,25 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp payment_rows(%{"methods" => rows}) when is_list(rows), do: {:ok, rows}
-  # **The wrapper is never a row.** When `"methods"` is present it decides the shape whatever
-  # it holds; only a response with no `"methods"` key at all is treated as one bare object.
-  # The catch-all used to take the wrapper too: `{"methods": null}` came back as
-  # `{:ok, [%{"methods" => nil}]}`. The same defect
-  # `dp_exchange_webull`'s `rows/1` had, found the same day.
-  #
-  # `null` is no methods; any other non-list, or a body that is not an object or a list, is
-  # unreadable. It used to answer `{:ok, []}`, no payment methods, from a reply that said
-  # nothing about them.
-  defp payment_rows(%{"methods" => nil}), do: {:ok, []}
-  defp payment_rows(%{"methods" => _unreadable}), do: {:error, :unexpected_response_shape}
-  defp payment_rows(rows) when is_list(rows), do: {:ok, rows}
-  defp payment_rows(%{} = row), do: {:ok, [row]}
+  defp payment_rows(%{} = body) do
+    with {:ok, balances} <- payment_kind_rows(body["balances"], "balance"),
+         {:ok, banks} <- payment_kind_rows(body["banks"], "bank") do
+      {:ok, balances ++ banks}
+    end
+  end
+
   defp payment_rows(_other), do: {:error, :unexpected_response_shape}
+
+  defp payment_kind_rows(nil, _kind), do: {:ok, []}
+
+  defp payment_kind_rows(rows, kind) when is_list(rows) do
+    reduce_rows(rows, &payment_kind_row(&1, kind))
+  end
+
+  defp payment_kind_rows(_unreadable, _kind), do: {:error, :unexpected_response_shape}
+
+  defp payment_kind_row(%{} = row, kind), do: {:ok, Map.put(row, "kind", kind)}
+  defp payment_kind_row(_unreadable, _kind), do: {:error, :unexpected_response_shape}
 
   @doc """
   Registers a bank account — `/v1/payments/addbank`, or `/v1/payments/addbank/cad` for a
@@ -1654,23 +1885,39 @@ defmodule DpExchange.Gemini.Private do
   address, no network and no network fee. `opts[:from]` and `opts[:to]` are the venue's own
   account names and both are required: a transfer with one end missing is not a transfer,
   and defaulting either would move funds between accounts the caller did not name.
+
+  **`clientTransferId` is sent on every call**, generated when `opts[:client_transfer_id]`
+  names none — the same pattern `withdraw/6` uses for its own idempotency key, and the
+  venue offers one here too (`rest.yaml:6210`, uuid4). Unlike `withdraw/6`'s field, this one
+  is not documented to be idempotent: the venue states only that it is "a unique identifier
+  for the internal transfer", never the `withdraw` endpoint's *"duplicate requests with the
+  same clientTransferId will not create additional withdrawals"*. Absent that guarantee,
+  this still sends once (`post_once/4`) rather than assume a retry is safe because an id
+  happens to be attached — the id is worth sending regardless, as a correlation handle for
+  reconciling with the venue, but this package will not claim a dedup behaviour the spec
+  does not state.
   """
   @spec transfer_internal(String.t(), Decimal.t(), keyword(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def transfer_internal(asset, amount, transfer_opts, credentials, opts) do
     with {:ok, from} <- required_opt(transfer_opts, :from),
          {:ok, to} <- required_opt(transfer_opts, :to) do
+      transfer_id = Keyword.get(transfer_opts, :client_transfer_id) || generate_transfer_id()
+
       params = %{
         "sourceAccount" => from,
         "targetAccount" => to,
         # Full notation — see `withdraw/6`.
-        "amount" => decimal_string(amount)
+        "amount" => decimal_string(amount),
+        "clientTransferId" => transfer_id
       }
 
       currency = String.downcase(asset)
 
-      # Once: nothing in this payload lets the venue tell a second transfer from the first,
-      # and an OAuth request carries no nonce to be refused on replay. See `post_once/4`.
+      # Once: the venue's own schema never says a repeated `clientTransferId` here
+      # deduplicates the way `withdraw/6`'s does — see this function's own doc — so a retry
+      # is not known to be safe, and an OAuth request carries no nonce to be refused on
+      # replay either. See `post_once/4`.
       with {:ok, body, _headers} <-
              post_once("/v1/account/transfer/#{currency}", params, credentials, opts) do
         {:ok, body}
@@ -1933,19 +2180,40 @@ defmodule DpExchange.Gemini.Private do
 
   defp to_staking_balance(_row, _at), do: {:error, :unexpected_response_shape}
 
+  # `by_provider` used to be hardcoded `%{}` with a comment claiming the venue never breaks
+  # the position down — it does. `rest.yaml:6565,6573` (schema `:9429-9465`):
+  # `balanceByProvider` is `{<providerId uuid>: {balance: <number>}}`, sent on every row in
+  # the endpoint's own example. Empty now means what the comment always said it should —
+  # the venue reported no breakdown for THIS row — rather than a value this decoder never
+  # read.
   defp build_staking_balance(row, at, asset, staked) do
     %StakingBalance{
       asset: String.upcase(asset),
       staked: staked,
       available_to_trade: decimal(row["available"]),
       available_for_withdrawal: decimal(row["availableForWithdrawal"]),
-      # Empty means the venue did not break the position down — never that there is one
-      # provider, which is what a `%{}` default silently asserts.
-      by_provider: %{},
+      by_provider: by_provider(row["balanceByProvider"]),
       venue_time: at,
       provider: :gemini
     }
   end
+
+  defp by_provider(%{} = breakdown) do
+    breakdown
+    |> Enum.flat_map(fn
+      {provider_id, %{"balance" => balance}} ->
+        case decimal(balance) do
+          nil -> []
+          amount -> [{provider_id, amount}]
+        end
+
+      _unreadable ->
+        []
+    end)
+    |> Map.new()
+  end
+
+  defp by_provider(_absent_or_unreadable), do: %{}
 
   @doc """
   Rewards accrued over a window — `POST /v1/staking/rewards`.
@@ -1958,19 +2226,28 @@ defmodule DpExchange.Gemini.Private do
 
   `:apy_pct` is the rate **at accrual**, which is not what `get_staking_rates/1` reports
   today. That is what lets a caller reconcile a reward against the rate that produced it.
+
+  `opts[:since]` goes out in ISO datetime with timezone format (`rest.yaml:6896`), not the
+  epoch-millisecond number every other filtered endpoint in this module sends, and it is
+  **required** at the venue (`rest.yaml:6885` lists it in the request schema's `required`
+  alongside `request` and `nonce`) — refused here as `{:error, {:missing_option, :since}}`
+  before a request goes out, rather than sent without it or defaulted to a window this
+  package invented. `opts[:until]` is the same format and stays optional, matching the
+  venue.
   """
   @spec get_staking_rewards(map(), keyword()) ::
           {:ok, [StakingReward.t()]} | {:error, term()} | {:refused, term()}
   def get_staking_rewards(credentials, opts) do
-    params =
-      %{}
-      |> put_present("since", timestamp_param(Keyword.get(opts, :since)))
-      |> put_present("until", timestamp_param(Keyword.get(opts, :until)))
-      |> put_present("providerId", Keyword.get(opts, :provider_id))
+    with {:ok, since} <- required_opt(opts, :since) do
+      params =
+        %{"since" => iso_timestamp_param(since)}
+        |> put_present("until", iso_timestamp_param(Keyword.get(opts, :until)))
+        |> put_present("providerId", Keyword.get(opts, :provider_id))
 
-    with {:ok, body, _headers} <- post("/v1/staking/rewards", params, credentials, opts),
-         {:ok, periods} <- reward_periods(body) do
-      reduce_rows(periods, &to_staking_reward/1)
+      with {:ok, body, _headers} <- post("/v1/staking/rewards", params, credentials, opts),
+           {:ok, periods} <- reward_periods(body) do
+        reduce_rows(periods, &to_staking_reward/1)
+      end
     end
   end
 
@@ -2053,20 +2330,34 @@ defmodule DpExchange.Gemini.Private do
   `Redeem`, `Interest` and others. A normalisation that loses the original cannot be audited
   when it turns out to be wrong, and an unrecognised word maps to `:other` rather than to
   the nearest one that fits.
+
+  `opts[:since]` and `opts[:until]` go out **in ISO datetime with timezone format**
+  (`rest.yaml:6729,6733`; the request example at `:6758` gives
+  `"2022-11-01T00:00:00.000Z"`), not the epoch-millisecond number `timestamp_param/1` sends
+  every other filtered endpoint in this module — measured against the vendor's own spec,
+  2026-09-29. A `DateTime` is formatted to ISO 8601; a caller's own already-ISO string
+  passes through unchanged.
+
+  **The reply is nested, not flat.** `rest.yaml:6770-6794` (schemas `:9499-9545`):
+  an array of `{providerId, transactions: [{transactionId, transactionType,
+  amountCurrency, amount, dateTime}]}`, one entry per provider the account has staked
+  with — not the flat array of transaction rows this used to assume, a shape the endpoint
+  does not send. `providerId` comes from the parent entry, since a `StakingTransaction`
+  in the reply carries none of its own.
   """
   @spec get_staking_history(map(), keyword()) ::
           {:ok, [StakingTransaction.t()]} | {:error, term()} | {:refused, term()}
   def get_staking_history(credentials, opts) do
     params =
       %{}
-      |> put_present("since", timestamp_param(Keyword.get(opts, :since)))
-      |> put_present("until", timestamp_param(Keyword.get(opts, :until)))
+      |> put_present("since", iso_timestamp_param(Keyword.get(opts, :since)))
+      |> put_present("until", iso_timestamp_param(Keyword.get(opts, :until)))
       |> put_present("limit", Keyword.get(opts, :limit))
       |> put_present("providerId", Keyword.get(opts, :provider_id))
 
-    with {:ok, rows, _headers} <- post("/v1/staking/history", params, credentials, opts),
-         {:ok, rows} <- list_rows(rows) do
-      to_staking_transactions(rows)
+    with {:ok, groups, _headers} <- post("/v1/staking/history", params, credentials, opts),
+         {:ok, groups} <- list_rows(groups) do
+      to_staking_history(groups)
     end
   end
 
@@ -2084,7 +2375,7 @@ defmodule DpExchange.Gemini.Private do
   @spec stake(String.t(), Decimal.t(), map(), keyword()) ::
           {:ok, StakingTransaction.t()} | {:error, term()} | {:refused, term()}
   def stake(asset, amount, credentials, opts) do
-    staking_write("/v1/staking/stake", asset, amount, credentials, opts)
+    staking_write("/v1/staking/stake", :stake, asset, amount, credentials, opts)
   end
 
   @doc """
@@ -2101,10 +2392,10 @@ defmodule DpExchange.Gemini.Private do
   @spec unstake(String.t(), Decimal.t(), map(), keyword()) ::
           {:ok, StakingTransaction.t()} | {:error, term()} | {:refused, term()}
   def unstake(asset, amount, credentials, opts) do
-    staking_write("/v1/staking/unstake", asset, amount, credentials, opts)
+    staking_write("/v1/staking/unstake", :unstake, asset, amount, credentials, opts)
   end
 
-  defp staking_write(path, asset, amount, credentials, opts) do
+  defp staking_write(path, type, asset, amount, credentials, opts) do
     with {:ok, provider_id} <- required_provider_id(opts) do
       params = %{
         "currency" => String.upcase(asset),
@@ -2113,7 +2404,7 @@ defmodule DpExchange.Gemini.Private do
       }
 
       with {:ok, body, _headers} <- post_once(path, params, credentials, opts) do
-        to_staking_transaction(body)
+        to_staking_transaction(body, type)
       end
     end
   end
@@ -2136,30 +2427,15 @@ defmodule DpExchange.Gemini.Private do
   # same substitution this module already records for `to_string(nil)` on `order_id`, and the
   # same answer applies.
   #
-  # `:type` needs no guard — `staking_type/1` answers `:other` for a word this package does
-  # not know, which is a real value and deliberately so.
-  # One unreadable row refuses the whole page rather than leaving a gap in it — the rule
-  # `to_fills/2` above already states: a list with an entry silently missing reconciles to a
-  # smaller number and looks complete.
-  defp to_staking_transactions(rows) do
-    rows
-    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-      case to_staking_transaction(row) do
-        {:ok, transaction} -> {:cont, {:ok, [transaction | acc]}}
-        error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, transactions} -> {:ok, Enum.reverse(transactions)}
-      error -> error
-    end
-  end
-
-  defp to_staking_transaction(row) when is_map(row) do
+  # `type` is not read from the body at all — see `build_staking_transaction/5` below for
+  # why — so the reply naming no `transactionType` (it never does, on either of these two
+  # endpoints) can no longer produce `:other`, an answer that used to be true only because
+  # this decoder was misreading a shape it never receives.
+  defp to_staking_transaction(row, type) when is_map(row) do
     with {:ok, id} <- required_id(row["transactionId"] || row["id"], :id),
          {:ok, asset} <- required_id(row["currency"], :asset),
          {:ok, amount} <- required_decimal(row["amount"], :amount) do
-      {:ok, build_staking_transaction(row, id, asset, amount)}
+      {:ok, build_staking_transaction(row, id, asset, amount, type)}
     end
   end
 
@@ -2167,22 +2443,85 @@ defmodule DpExchange.Gemini.Private do
   # `asset: ""`, `amount: nil` — for any row that was not a map. A staking transaction naming
   # no id, no asset and no amount is not a degraded record, it is a placeholder wearing the
   # shape of one.
-  defp to_staking_transaction(_row), do: {:error, :unexpected_response_shape}
+  defp to_staking_transaction(_row, _type), do: {:error, :unexpected_response_shape}
 
-  defp build_staking_transaction(row, id, asset, amount) do
+  # `type` comes from **which endpoint was called**, not from a `transactionType` field —
+  # `StakingDeposit` (`rest.yaml:9466-9497`) and `StakingWithdrawal` (`:9663-9692`) are
+  # `stake/4`'s and `unstake/4`'s own reply shapes, and neither carries one; that field
+  # belongs to `StakingTransaction`, the *history* endpoint's row (see
+  # `to_staking_history_transaction/2`), a different schema this decoder used to assume by
+  # mistake. `venue_type` stays `nil` for the same reason: the venue did not say a word here
+  # for this package to keep beside the normalised one.
+  #
+  # `venue_time` is `requestInitiated` (`rest.yaml:7044`, schema `:9689`, ISO datetime with
+  # timezone, e.g. `"2022-11-02T19:49:20.153Z"`) — present only on `StakingWithdrawal`. A
+  # stake response has no time field at all, so `staking_time(nil)` answers `nil`, not a
+  # read time standing in for one the venue never gave.
+  defp build_staking_transaction(row, id, asset, amount, type) do
     %StakingTransaction{
       id: id,
-      type: staking_type(row["transactionType"]),
-      venue_type: row["transactionType"],
+      type: type,
+      venue_type: nil,
       asset: String.upcase(asset),
       amount: amount,
       amount_paid_so_far: decimal(row["amountPaidSoFar"]),
       amount_remaining: decimal(row["amountRemaining"]),
       provider_id: row["providerId"],
-      venue_time: staking_time(row["timestamp"] || row["timestampms"]),
+      venue_time: staking_time(row["requestInitiated"]),
       provider: :gemini
     }
   end
+
+  # `get_staking_history/2`'s reply — an array of `{providerId, transactions: [...]}`
+  # (`rest.yaml:6770-6794`, schemas `:9499-9545`) — not the flat array of transaction rows
+  # this used to assume. One unreadable group, or one unreadable transaction inside a
+  # group, refuses the whole page rather than leaving a gap in it — the rule `to_fills/2`
+  # above already states: a list with an entry silently missing reconciles to a smaller
+  # number and looks complete.
+  defp to_staking_history(groups) do
+    with {:ok, per_group} <- reduce_rows(groups, &staking_history_group/1) do
+      {:ok, List.flatten(per_group)}
+    end
+  end
+
+  defp staking_history_group(%{"providerId" => provider_id, "transactions" => transactions})
+       when is_list(transactions) do
+    reduce_rows(transactions, &to_staking_history_transaction(&1, provider_id))
+  end
+
+  defp staking_history_group(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # `providerId` lives on the PARENT group, not on the transaction — a `StakingTransaction`
+  # row (`rest.yaml:9499-9518`) carries `transactionId`, `transactionType`,
+  # `amountCurrency`, `amount`, `dateTime` and nothing that names the provider. `asset`
+  # comes from `amountCurrency`, not `currency`, which this row does not have either.
+  #
+  # `dateTime` goes through `staking_time/1`, which already reads both shapes the venue's
+  # own `TimestampType` allows — an epoch number (the field's own example,
+  # `1667418560153`, and its description "in milliseconds") or an ISO string, should the
+  # venue ever send one here the way `requestInitiated` does elsewhere.
+  defp to_staking_history_transaction(txn, provider_id) when is_map(txn) do
+    with {:ok, id} <- required_id(txn["transactionId"], :id),
+         {:ok, asset} <- required_id(txn["amountCurrency"], :asset),
+         {:ok, amount} <- required_decimal(txn["amount"], :amount) do
+      {:ok,
+       %StakingTransaction{
+         id: id,
+         type: staking_type(txn["transactionType"]),
+         venue_type: txn["transactionType"],
+         asset: String.upcase(asset),
+         amount: amount,
+         amount_paid_so_far: decimal(txn["amountPaidSoFar"]),
+         amount_remaining: decimal(txn["amountRemaining"]),
+         provider_id: provider_id,
+         venue_time: staking_time(txn["dateTime"]),
+         provider: :gemini
+       }}
+    end
+  end
+
+  defp to_staking_history_transaction(_txn, _provider_id),
+    do: {:error, :unexpected_response_shape}
 
   defp staking_type("Deposit"), do: :stake
   defp staking_type("Redeem"), do: :unstake
@@ -2420,14 +2759,24 @@ defmodule DpExchange.Gemini.Private do
   Returned as the venue's own map. Its eleven fields divide margin four ways — by position,
   by open order, by buy side and by sell side — and a struct that kept only a total would
   drop the split a caller sizing its next order needs.
+
+  `opts[:symbol]` is **required** — `rest.yaml:7158` lists it in the request schema's
+  `required` alongside `request` and `nonce`, and the venue's own example
+  (`"BTC-GUSD-PERP"`) names one contract, not the account as a whole. Missing it is
+  `{:error, {:missing_option, :symbol}}` before a request is made, rather than a request
+  the venue would refuse for the same reason. It goes through `SymbolFormat`, the same as
+  every other private call that takes a symbol (`margin_preview_params/1` below, `to_order/1`),
+  rather than the caller's raw string sent unchanged.
   """
   @spec get_account_margin(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_account_margin(credentials, opts) do
-    params = put_present(%{}, "symbol", Keyword.get(opts, :symbol))
+    with {:ok, symbol} <- required_opt(opts, :symbol) do
+      params = %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
 
-    with {:ok, body, _headers} <- post("/v1/margin", params, credentials, opts) do
-      {:ok, body}
+      with {:ok, body, _headers} <- post("/v1/margin", params, credentials, opts) do
+        {:ok, body}
+      end
     end
   end
 
@@ -2458,11 +2807,19 @@ defmodule DpExchange.Gemini.Private do
   The funding payment report as JSON —
   `/v1/perpetuals/fundingpaymentreport/records.json`.
 
-  **The query string is part of what is signed.** Gemini's private GETs put the *full* path,
-  query string included, in the signed `request` field; signing the bare path produces a
-  valid signature over the wrong string, and the venue reports that as a credential problem
-  rather than a parameter one. This builds the query once and uses the same string in both
-  places.
+  **This is a `POST`, not a `GET`.** The vendor's spec defines only a `post:` for this
+  path (`rest.yaml:7412`) — the sibling `.xlsx` report one path up (`:7308`) is the `get:`,
+  and the two used to be read as the same shape. Sent as a GET, the venue's routing either
+  404s or reaches a handler that never parses this package's query string, either of which
+  this package would have reported as an empty or unreadable report rather than the wrong
+  verb.
+
+  **The query string is still part of what is signed**, exactly as on the `.xlsx` sibling:
+  the venue's own request example (`:7479`) gives `request` as the full path *with* the
+  query string attached — `?fromDate=...&toDate=...&numRows=...` — not the bare path a
+  POST's signed payload usually carries. This builds that query once with `report_path/2`
+  and sends it as the POST's own URL, so the string that is signed and the string the venue
+  receives are the same one.
 
   `opts[:from]` and `opts[:to]` are dates, `opts[:rows]` a count. The venue's own default is
   **8760 rows** — a year of hourly funding — and this package does not send one, because a
@@ -2473,7 +2830,7 @@ defmodule DpExchange.Gemini.Private do
   def funding_payment_report(credentials, opts) do
     path = report_path("/v1/perpetuals/fundingpaymentreport/records.json", opts)
 
-    with {:ok, body, _headers} <- signed_get(path, credentials, opts) do
+    with {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
       flattened_rows(body)
     end
   end

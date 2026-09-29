@@ -86,45 +86,29 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
       assert book.asks == []
     end
 
-    test "an unreadable level timestamp does not become the epoch" do
-      # This test's NAME was always right and its assertion was the opposite: it asserted
-      # `book.venue_time == DateTime.from_unix!(0)`, pinning the very substitution the name
-      # says must not happen. The old comment defended it — "`to_integer` answering 0 for
-      # unparseable input would date the book to 1970, which every staleness check would
-      # then reject — loudly, which is the point."
+    test "a level's timestamp, readable or not, never becomes the book's venue_time" do
+      # This test used to derive the book's own time from the newest level's `timestamp`
+      # and carries a real production incident about it: the assertion once pinned
+      # `DateTime.from_unix!(0)`, dating an unreadable stamp to 1970 while looking entirely
+      # valid — "Return `:error`. Raise. Refuse. Do not guess a value that looks right."
+      # Refusing (`:missing_venue_timestamp`, when no level's timestamp parsed) is what
+      # replaced that guess.
       #
-      # It is not loud. `DateTime.from_unix!(0)` is a perfectly valid `DateTime`, and the
-      # argument assumes a staleness check this package neither requires nor can see. A
-      # consumer computing an age gets fifty-six years and may well skip the book; one that
-      # logs or charts the timestamp shows 1970 and calls it data. The honest answer was
-      # already in this function's own vocabulary: `{:error, :missing_venue_timestamp}` is
-      # what `book_time/1` returns when no level carries a timestamp at all, which is
-      # precisely what "none of them could be read" means.
-      #
-      # "Return `:error`. Raise. Refuse. Do not guess a value that looks right."
-      body = %{
-        "bids" => [%{"price" => "1", "amount" => "1", "timestamp" => "not a time"}],
-        "asks" => []
-      }
+      # The premise under BOTH answers was false. `OrderBookEntry.timestamp`'s own schema
+      # (`rest.yaml:8065`) says **"DO NOT USE — this field is included for compatibility
+      # reasons only and is just populated with a dummy value."** There is no real time in
+      # it to derive, readable or not, so there is nothing to refuse over either: `nil` is
+      # the honest answer regardless of whether every level's timestamp parses, none do, or
+      # the field is missing outright.
+      for timestamp <- ["not a time", 1_757_000_000, nil] do
+        body = %{
+          "bids" => [%{"price" => "1", "amount" => "1", "timestamp" => timestamp}],
+          "asks" => []
+        }
 
-      assert {:error, :missing_venue_timestamp} =
-               Rest.get_order_book("BTC-USD", plug: json(body), retry_attempts: 0)
-    end
-
-    test "one unreadable level timestamp among readable ones still dates the book" do
-      # The other half, and why `to_integer/1` answers `nil` rather than refusing outright:
-      # `book_time/1` takes the MAX across levels, so one unreadable stamp among real ones is
-      # not a book that cannot be dated. Only a book where nothing could be read is.
-      body = %{
-        "bids" => [
-          %{"price" => "1", "amount" => "1", "timestamp" => "not a time"},
-          %{"price" => "2", "amount" => "1", "timestamp" => 1_757_000_000}
-        ],
-        "asks" => []
-      }
-
-      assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: json(body), retry_attempts: 0)
-      assert book.venue_time == DateTime.from_unix!(1_757_000_000)
+        assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: json(body), retry_attempts: 0)
+        assert book.venue_time == nil, "timestamp #{inspect(timestamp)} must not surface"
+      end
     end
   end
 

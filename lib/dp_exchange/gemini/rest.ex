@@ -81,7 +81,6 @@ defmodule DpExchange.Gemini.Rest do
     Candle,
     ContractStats,
     Funding,
-    FxRate,
     OrderBook,
     Quote,
     StakingRate,
@@ -403,8 +402,15 @@ defmodule DpExchange.Gemini.Rest do
   @doc """
   A price-level snapshot for one symbol.
 
-  Each level carries the venue's own `timestamp`, so unlike a quote there is nothing to
-  derive: the book's time is the newest level's time.
+  **`venue_time` is always `nil`.** Each level carries a `timestamp` field, and this used
+  to read the newest one as the book's own time — but `OrderBookEntry.timestamp`'s own
+  schema (`rest.yaml:8065`) says **"DO NOT USE — this field is included for compatibility
+  reasons only and is just populated with a dummy value."** There is no real time in it to
+  derive, readable or not, and `/v1/book` publishes no time of its own elsewhere in the
+  response. A body whose levels carry no readable timestamp used to refuse the whole book
+  for that reason (`:missing_venue_timestamp`) — refusing a real book over a field the
+  vendor states is meaningless was itself the bug; `venue_time: nil` is the honest answer
+  regardless of what the field holds.
 
   `opts[:depth]` defaults to the venue's own documented default — see
   `docs/reference/gemini/order-book.md`, which quotes `limit_bids`/`limit_asks`'s "Default
@@ -420,13 +426,13 @@ defmodule DpExchange.Gemini.Rest do
     params = [limit_bids: depth, limit_asks: depth]
 
     with {:ok, body} <- get_body("/v1/book/#{native}", Keyword.put(opts, :params, params)),
-         {:ok, timestamp} <- book_time(body) do
+         :ok <- book_shape(body) do
       {:ok,
        %OrderBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
          bids: levels(body["bids"], :desc),
          asks: levels(body["asks"], :asc),
-         venue_time: timestamp,
+         venue_time: nil,
          observed_at: DateTime.utc_now(),
          provider: :gemini
        }}
@@ -596,81 +602,14 @@ defmodule DpExchange.Gemini.Rest do
   defp trade_side("sell"), do: :sell
   defp trade_side(_other), do: nil
 
-  # The pairs the venue serves, from its own documentation. **Enumerated rather than passed
-  # through** because an unsupported pair returns a 404 the caller cannot distinguish from
-  # a bad timestamp, and the list is short and stated.
-  @fx_pairs ~w(AUDUSD CADUSD COPUSD EURUSD CHFUSD HKDUSD NZDUSD GBPUSD BRLUSD INRUSD
-               SGDUSD KRWUSD JPYUSD CNYUSD)
-
-  @doc """
-  A foreign-exchange reference rate for `pair` at `at` — `/v2/fxrate/{symbol}/{timestamp}`.
-
-  **This is not a rate the venue trades at.** Gemini's own documentation: *"Gemini does not
-  offer foreign exchange services. This endpoint is for historical reference only and does
-  not provide any guarantee of future exchange rates."* The number comes from a third party
-  the venue names in `provider`, which this package carries as `Types.FxRate`'s `:source` —
-  `:provider` stays `:gemini`, the venue relaying it.
-
-  **Requires the Auditor role**, which the vendor states on the endpoint.
-
-  Fourteen pairs are served and they are all `…USD`; a pair outside the list is refused here
-  rather than sent, because the venue's 404 for an unsupported pair reads the same as one
-  for a bad timestamp.
-
-  `at` is the instant, sent as milliseconds.
-  """
-  @spec get_fx_rate(String.t(), DateTime.t(), keyword()) ::
-          {:ok, FxRate.t()} | {:error, term()} | {:refused, term()}
-  def get_fx_rate(pair, %DateTime{} = at, opts) do
-    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
-
-    with :ok <- fx_pair(native) do
-      timestamp = DateTime.to_unix(at, :millisecond)
-
-      with {:ok, body} <- get_body("/v2/fxrate/#{native}/#{timestamp}", opts) do
-        to_fx_rate(body, native, at)
-      end
-    end
-  end
-
-  defp fx_pair(pair) when pair in @fx_pairs, do: :ok
-  defp fx_pair(pair), do: {:error, {:unsupported_fx_pair, pair}}
-
-  defp to_fx_rate(%{"rate" => rate} = body, native, _requested_at) do
-    with {:ok, parsed_rate} <- required_decimal(rate, :rate),
-         {:ok, as_of} <- as_of(body["asOf"]) do
-      {:ok,
-       %FxRate{
-         pair: body["fxPair"] || native,
-         rate: parsed_rate,
-         # The venue's own `asOf`, and only that. The venue may answer for a nearby moment,
-         # so the instant asked for is not a stand-in for the one it answered for.
-         as_of: as_of,
-         # The institution that computed the rate. Named `provider` by the venue and
-         # carried as `source` here, because `provider` in this contract means the venue.
-         source: body["provider"],
-         benchmark: body["benchmark"],
-         provider: :gemini
-       }}
-    end
-  end
-
-  defp to_fx_rate(_body, _native, _requested_at), do: {:error, :unexpected_response_shape}
-
-  # `Core.Types.FxRate`: `:as_of` is the instant "echoed by the venue", and "a rate without
-  # it is a number with no time attached, which is not a rate". This used to fall back to
-  # the instant requested when `asOf` was absent, although the comment above it said the
-  # venue may answer for a nearby moment. That labelled the rate with a time the venue never
-  # stated. It also dated a non-positive `asOf` to 1970, and raised in the caller's process
-  # (`from_unix!/2`) on one outside `DateTime`'s range.
-  defp as_of(ms) when is_integer(ms) and ms > 0 do
-    case DateTime.from_unix(ms, :millisecond) do
-      {:ok, at} -> {:ok, at}
-      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
-    end
-  end
-
-  defp as_of(_absent_or_unreadable), do: {:error, :missing_venue_timestamp}
+  # `GET /v2/fxrate/{symbol}/{timestamp}` — a foreign-exchange reference rate — used to live
+  # here, documented "Public". It is not: measured against the vendor's own OpenAPI
+  # (`rest.yaml:7836-7851`), this route's `security` lists `apiKeyAuth`, `signatureAuth`
+  # and `payloadAuth`, the same full private scheme as any signed POST, and states the key
+  # must carry the Auditor role. `Rest` never sends credentials — that is this module's
+  # whole design, see the moduledoc — so this function could never succeed no matter what a
+  # caller passed it, the same defect `/v2/network/{token}` had directly above. It now lives
+  # in `DpExchange.Gemini.Private.get_fx_rate/3`, signed like every other authenticated call.
 
   # `GET /v2/network/{token}` — the blockchain networks an asset moves over — used to live
   # here, documented "Public". It is not: measured live 2026-09-05, an unauthenticated
@@ -849,6 +788,13 @@ defmodule DpExchange.Gemini.Rest do
   Both timestamps travel: `fundingTimestampMilliSecs` is when this one settled and
   `nextFundingTimestamp` is when the next one lands. A caller holding across that instant
   pays or receives at it.
+
+  **The vendor's own spec contradicts itself on the settled amount's field name.**
+  `FundingAmountResponse`'s schema (`rest.yaml:9420`) names it `amount`; the very same
+  endpoint's own example response two sections up (`:562`) gives `fundingAmount` instead —
+  both are the vendor's own names for the field, in the same document, for the same
+  endpoint. `amount` is read first, and `fundingAmount` where it is absent, rather than
+  picking one and reading the other's real value as "not reported".
   """
   @spec get_funding(String.t(), keyword()) ::
           {:ok, Funding.t()} | {:error, term()} | {:refused, term()}
@@ -858,7 +804,7 @@ defmodule DpExchange.Gemini.Rest do
       {:ok,
        %Funding{
          symbol: body["symbol"] || symbol,
-         amount: decimal(body["amount"]),
+         amount: decimal(body["amount"] || body["fundingAmount"]),
          estimated_amount: decimal(body["estimatedFundingAmount"]),
          funded_at: epoch_ms(body["fundingTimestampMilliSecs"]),
          next_funding_at: epoch_ms(body["nextFundingTimestamp"]),
@@ -1250,56 +1196,24 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
-  # `List.wrap/1` on each side rather than `bids ++ asks`: a venue that sends
+  # This used to derive the book's own time from the newest level's `timestamp` — see this
+  # function's callers' @doc for why that was reading a field the vendor's own schema marks
+  # a meaningless dummy value. What is left of that function is the shape check it also
+  # did: `List.wrap/1` on each side rather than `bids ++ asks`, because a venue that sends
   # `"asks": null` for an empty side crashed this with a FunctionClauseError from deep
-  # inside `Enum.map`, reaching a caller as a crash rather than an answer. An absent side
-  # is a book with no asks, not a malformed response. Found by a test, not in production.
-  defp book_time(%{"bids" => bids, "asks" => asks})
-       when (is_list(bids) or is_nil(bids)) and (is_list(asks) or is_nil(asks)) do
-    (List.wrap(bids) ++ List.wrap(asks))
-    |> Enum.flat_map(&level_timestamp/1)
-    # Rejected AFTER `to_integer/1`, not before. It used to answer `0` for a string it could
-    # not read, and `0` is a timestamp: with every level unreadable the max is `0` and the
-    # book is stamped 1 January 1970 — a value that passes every type check and every
-    # freshness comparison in the wrong direction. It answers `nil` now, which this pipeline
-    # already knows how to say, and an all-unreadable set becomes
-    # `{:error, :missing_venue_timestamp}` — the honest answer, and one this function's own
-    # vocabulary already had.
-    |> Enum.map(&to_integer/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.max(fn -> nil end)
-    |> case do
-      nil -> {:error, :missing_venue_timestamp}
-      seconds -> DateTime.from_unix(seconds)
-    end
-  end
+  # inside `Enum.map`, reaching a caller as a crash rather than an answer — an absent side
+  # is a book with no asks, not a malformed response, and `levels/2` already answers `[]`
+  # for `nil`. A side that is PRESENT but not a list is not an empty side, though; that
+  # used to raise out of `Map.get/2` too (REST fuzz, 2026-09-27), and `levels/2` has no
+  # clause for a value that is neither a list nor `nil` — this is what keeps it from
+  # reaching one.
+  defp book_shape(%{"bids" => bids, "asks" => asks})
+       when (is_list(bids) or is_nil(bids)) and (is_list(asks) or is_nil(asks)),
+       do: :ok
 
-  # A side that is present but not a list is not an empty side. It used to raise out of
-  # `Map.get/2` (REST fuzz, 2026-09-27). Answering `[]` for it would state that nobody is
-  # bidding, which the venue did not say.
-  defp book_time(%{"bids" => _bids, "asks" => _asks}), do: {:error, :unexpected_response_shape}
+  defp book_shape(%{"bids" => _bids, "asks" => _asks}), do: {:error, :unexpected_response_shape}
+  defp book_shape(_other), do: {:error, :unexpected_response_shape}
 
-  defp book_time(_other), do: {:error, :missing_venue_timestamp}
-
-  # A level that is not an object has no price to read. It is dropped, as an unreadable
-  # price already is below, rather than raised on.
-  defp level_timestamp(%{} = level), do: [Map.get(level, "timestamp")]
-  defp level_timestamp(_not_a_level), do: []
-
-  # **`book_time/1` stays strict, and that is NOT the same call `get_price/2` got.**
-  #
-  # The `Date`-header sweep that relaxed quotes and books on three other venues reached this
-  # function and stopped. The difference is where the time comes from: an HTTP `Date` header
-  # is metadata a venue may legitimately omit, so refusing a real price over it discarded the
-  # payload for the sake of a wrapper. This venue's book time comes from the LEVELS —
-  # `/v1/book` documents a `timestamp` on each one — so a book in which not one level's
-  # timestamp can be read is a response this package is misreading, not a venue declining to
-  # state a time.
-  #
-  # `defensive_branches_test.exs`'s "an unreadable level timestamp does not become the epoch"
-  # carries the incident: the assertion once pinned `DateTime.from_unix!(0)`, dating the book
-  # to 1970 while looking entirely valid. Refusing is what replaced it, and `venue_time: nil`
-  # here would be a third answer to a question that has already been settled once.
   defp levels(nil, _direction), do: []
 
   # Sorted, and levels with an unreadable price dropped — the REST arm of the fix
@@ -1522,22 +1436,6 @@ defmodule DpExchange.Gemini.Rest do
       parsed -> {:ok, parsed}
     end
   end
-
-  # `nil` for anything unreadable, never `0`. See `book_time/1`, its only caller, for what
-  # the `0` cost. `{integer, ""}` rather than `{integer, _rest}` for the same reason
-  # `decimal/1` above requires the whole string consumed: a leading run of digits out of
-  # `"1757000000000-ish"` is a number this package invented, not one the venue sent.
-  defp to_integer(value) when is_integer(value), do: value
-  defp to_integer(value) when is_float(value), do: trunc(value)
-
-  defp to_integer(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {integer, ""} -> integer
-      _unparsable -> nil
-    end
-  end
-
-  defp to_integer(_other), do: nil
 
   # Sort key only — never used to bucket or window-check a real candle, so an
   # approximation here is not the family's forbidden kind. `1w` and `1M` have no
