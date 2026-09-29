@@ -1,0 +1,8 @@
+{
+  "request": "/v1/margin/order/preview",
+  "nonce": "<nonce>",
+  "symbol": "btcusd",
+  "side": "sell",
+  "type": "market",
+  "amount": "0.25"
+}

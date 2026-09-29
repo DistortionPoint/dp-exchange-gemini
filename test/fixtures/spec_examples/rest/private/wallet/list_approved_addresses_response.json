@@ -1,0 +1,36 @@
+{
+  "approvedAddresses": [
+    {
+      "network": "ethereum",
+      "scope": "account",
+      "label": "api_added_ETH_address",
+      "status": "pending-time",
+      "createdAt": "1602692572349",
+      "address": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "network": "ethereum",
+      "scope": "group",
+      "label": "api_added_ETH_address",
+      "status": "pending-time",
+      "createdAt": "1602692542296",
+      "address": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "network": "ethereum",
+      "scope": "group",
+      "label": "hardware_wallet",
+      "status": "active",
+      "createdAt": "1602087433270",
+      "address": "0xA63123350Acc8F5ee1b1fBd1A6717135e82dBd28"
+    },
+    {
+      "network": "ethereum",
+      "scope": "account",
+      "label": "hardware_wallet",
+      "status": "active",
+      "createdAt": "1602086832986",
+      "address": "0xA63123350Acc8F5ee1b1fBd1A6717135e82dBd28"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "request": "/v1/margin/account",
+  "nonce": "<nonce>",
+  "symbol": "btcusd"
+}

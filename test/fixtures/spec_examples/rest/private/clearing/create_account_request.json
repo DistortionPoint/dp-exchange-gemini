@@ -1,0 +1,6 @@
+{
+  "request": "/v1/account/create",
+  "nonce": "<nonce>",
+  "name": "My Secondary Account",
+  "type": "exchange"
+}

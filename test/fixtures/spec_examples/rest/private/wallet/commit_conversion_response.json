@@ -1,0 +1,15 @@
+{
+  "orderId": 375089415,
+  "pair": "BTCUSD",
+  "price": "6445.07",
+  "priceCurrency": "USD",
+  "side": "buy",
+  "quantity": "0.01505181",
+  "quantityCurrency": "BTC",
+  "totalSpend": "100",
+  "totalSpendCurrency": "USD",
+  "fee": "2.9900309233",
+  "feeCurrency": "USD",
+  "depositFee": "0",
+  "depositFeeCurrency": "USD"
+}

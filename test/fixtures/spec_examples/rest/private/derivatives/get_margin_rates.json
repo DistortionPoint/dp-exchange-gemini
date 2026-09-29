@@ -1,0 +1,25 @@
+{
+  "rates": [
+    {
+      "currency": "BTC",
+      "borrowRate": "0.00001141552511",
+      "borrowRateDaily": "0.00027397260264",
+      "borrowRateAnnual": "0.1",
+      "lastUpdated": 1700000000000
+    },
+    {
+      "currency": "ETH",
+      "borrowRate": "0.00001141552511",
+      "borrowRateDaily": "0.00027397260264",
+      "borrowRateAnnual": "0.1",
+      "lastUpdated": 1700000000000
+    },
+    {
+      "currency": "USD",
+      "borrowRate": "0.00000913242009",
+      "borrowRateDaily": "0.00021917808216",
+      "borrowRateAnnual": "0.08",
+      "lastUpdated": 1700000000000
+    }
+  ]
+}

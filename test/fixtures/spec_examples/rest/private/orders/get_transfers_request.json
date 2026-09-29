@@ -1,0 +1,7 @@
+{
+  "request": "/v2/transfers",
+  "nonce": "<nonce>",
+  "timestamp": 1591084414000,
+  "limit_transfers": 25,
+  "account": "primary"
+}

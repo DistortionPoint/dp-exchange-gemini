@@ -1,0 +1,15 @@
+{
+  "network": "ethereum",
+  "assets": [
+    "AAVE",
+    "BAT",
+    "DAI",
+    "ETH",
+    "LINK",
+    "MATIC",
+    "UNI",
+    "USDC",
+    "USDT",
+    "WBTC"
+  ]
+}

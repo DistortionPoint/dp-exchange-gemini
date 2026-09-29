@@ -1,0 +1,6 @@
+{
+  "request": "/v1/order/status",
+  "nonce": "<nonce>",
+  "order_id": 123456789012345,
+  "include_trades": true
+}

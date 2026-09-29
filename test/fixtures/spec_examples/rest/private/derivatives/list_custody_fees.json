@@ -1,0 +1,30 @@
+[
+  {
+    "txTime": 1657236174056,
+    "feeAmount": "10",
+    "feeCurrency": "BTC",
+    "eid": 256627,
+    "eventType": "Withdrawal"
+  },
+  {
+    "txTime": 1652279045196,
+    "feeAmount": "10000000",
+    "feeCurrency": "ETH",
+    "eid": 15364,
+    "eventType": "CustodyFeeDebit"
+  },
+  {
+    "txTime": 1652279025196,
+    "feeAmount": "1850",
+    "feeCurrency": "WFIL",
+    "eid": 9016,
+    "eventType": "RiaFeeDebit"
+  },
+  {
+    "txTime": 1652279025196,
+    "feeAmount": "1850",
+    "feeCurrency": "WFIL",
+    "eid": 9016,
+    "eventType": "RiaFeeCredit"
+  }
+]

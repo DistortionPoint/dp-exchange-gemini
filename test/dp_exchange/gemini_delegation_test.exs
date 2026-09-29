@@ -734,7 +734,9 @@ defmodule DpExchange.GeminiDelegationTest do
 
     test "the spot margin trio", %{opts: sup} do
       assert {:ok, %{"leverage" => "1.5"}} =
-               Gemini.get_margin_account(money_opts(sup, %{"leverage" => "1.5"}))
+               Gemini.get_margin_account(
+                 money_opts(sup, %{"leverage" => "1.5"}, symbol: "BTC-USD")
+               )
 
       assert {:ok, [_rate]} =
                Gemini.get_margin_rates(money_opts(sup, %{"rates" => [%{"currency" => "BTC"}]}))
@@ -761,8 +763,16 @@ defmodule DpExchange.GeminiDelegationTest do
       assert {:error, {:missing_credentials, :gemini}} = Gemini.get_positions()
       assert {:error, {:missing_credentials, :gemini}} = Gemini.list_funding_payments()
       assert {:error, {:missing_credentials, :gemini}} = Gemini.funding_payment_report()
-      assert {:error, {:missing_credentials, :gemini}} = Gemini.get_margin_account()
       assert {:error, {:missing_credentials, :gemini}} = Gemini.get_margin_rates()
+    end
+
+    test "get_margin_account/1 checks :symbol before it ever reaches a credential" do
+      # Not in the list above for the same reason `get_account_margin/1` never was:
+      # `Private.get_margin_account/2` now requires `opts[:symbol]` (rest.yaml:2255-2257)
+      # and checks it BEFORE signing anything, so a call with neither a symbol nor
+      # credentials refuses on the symbol first — the same precedent the sibling perpetuals
+      # read already set.
+      assert {:error, {:missing_option, :symbol}} = Gemini.get_margin_account()
     end
 
     test "the report files refuse" do

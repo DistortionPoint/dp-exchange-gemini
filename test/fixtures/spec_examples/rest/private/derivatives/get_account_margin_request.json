@@ -1,0 +1,5 @@
+{
+  "request": "/v1/margin",
+  "nonce": "<nonce>",
+  "symbol": "BTC-GUSD-PERP"
+}

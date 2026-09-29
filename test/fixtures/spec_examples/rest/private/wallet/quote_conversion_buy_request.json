@@ -1,0 +1,7 @@
+{
+  "request": "/v1/instant/quote",
+  "nonce": "<nonce>",
+  "symbol": "btcusd",
+  "side": "buy",
+  "totalSpend": "100"
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "symbol": "btcgusdperp",
+    "instrument_type": "perp",
+    "quantity": "0.2",
+    "notional_value": "4000.036",
+    "realised_pnl": "1234.5678",
+    "unrealised_pnl": "999.946",
+    "average_cost": "15000.45",
+    "mark_price": "20000.18"
+  }
+]

@@ -570,10 +570,21 @@ defmodule DpExchange.Gemini.DerivativesTest do
       }
 
       assert {:ok, summary} =
-               Private.get_margin_account(@credentials, plug: responding(body), retry_attempts: 0)
+               Private.get_margin_account(@credentials,
+                 symbol: "BTC-USD",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
 
       assert summary["marginAssetValue"]["currency"] == "USD"
       assert summary["totalBorrowed"]["currency"] == "BTC"
+    end
+
+    test "a symbol is required — rest.yaml's own schema for /v1/margin/account lists it" do
+      exploding = fn _conn -> raise "must not request a spot margin summary for no symbol" end
+
+      assert {:error, {:missing_option, :symbol}} =
+               Private.get_margin_account(@credentials, plug: exploding, retry_attempts: 0)
     end
 
     test "all three borrow rates travel" do

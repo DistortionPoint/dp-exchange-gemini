@@ -1,0 +1,41 @@
+[
+  {
+    "type": "Withdrawal",
+    "status": "Complete",
+    "timestampms": 1772818620354,
+    "eid": 368598436530,
+    "currency": "USDC",
+    "amount": "0.01",
+    "network": "ethereum",
+    "feeAmount": "0.118856",
+    "feeCurrency": "USDC",
+    "txHash": "714a15c4fd2d37629d27e56a63aaec5f91e0053dde3eb357be71663c1197b391",
+    "destination": "0x83cFb8C13f06716b449E5D24F5b4cc6Cc64a189A",
+    "withdrawalId": "69ab0b0f-3c76-433d-84a5-c8bcc6718411"
+  },
+  {
+    "type": "Withdrawal",
+    "status": "Complete",
+    "timestampms": 1772034480391,
+    "eid": 368474658614,
+    "currency": "USDC",
+    "amount": "1799",
+    "network": "solana",
+    "feeAmount": "0.202536",
+    "feeCurrency": "USDC",
+    "txHash": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+    "withdrawalId": "9b7a5100-b3ee-4820-9b5b-c2dd7db6559b"
+  },
+  {
+    "type": "Deposit",
+    "status": "Advanced",
+    "timestampms": 1771990797452,
+    "eid": 309356152,
+    "currency": "ETH",
+    "amount": "100",
+    "network": "ethereum",
+    "feeAmount": "0",
+    "feeCurrency": "ETH",
+    "txHash": "605c5fa8bf99458d24d61e09941bc443ddc44839d9aaa508b14b296c0c8269b2"
+  }
+]

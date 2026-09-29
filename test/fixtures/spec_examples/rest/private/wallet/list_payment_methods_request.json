@@ -1,0 +1,5 @@
+{
+  "request": "/v1/payments/methods",
+  "account": "primary",
+  "nonce": "<nonce>"
+}

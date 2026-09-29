@@ -1,0 +1,6 @@
+{
+  "request": "/v1/account/list",
+  "nonce": "<nonce>",
+  "limit_accounts": 100,
+  "timestamp": 1632485834721
+}

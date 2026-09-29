@@ -1,0 +1,46 @@
+{
+  "marginAssetValue": {
+    "currency": "USD",
+    "value": "10000.00"
+  },
+  "availableCollateral": {
+    "currency": "USD",
+    "value": "8500.00"
+  },
+  "notionalValue": {
+    "currency": "USD",
+    "value": "15000.00"
+  },
+  "totalBorrowed": {
+    "currency": "USD",
+    "value": "5000.00"
+  },
+  "leverage": "1.5",
+  "buyingPower": {
+    "currency": "USD",
+    "value": "8500.00"
+  },
+  "sellingPower": {
+    "currency": "USD",
+    "value": "8500.00"
+  },
+  "liquidationRisk": {
+    "lossPercentage": "0.1550",
+    "liquidationPrice": {
+      "currency": "USD",
+      "value": "50000.00"
+    }
+  },
+  "interestRate": {
+    "rate": "0.00001141552511",
+    "interval": "hour"
+  },
+  "reservedBuyOrders": {
+    "currency": "USD",
+    "value": "1000.00"
+  },
+  "reservedSellOrders": {
+    "currency": "USD",
+    "value": "500.00"
+  }
+}

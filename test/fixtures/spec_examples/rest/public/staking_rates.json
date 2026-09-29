@@ -1,0 +1,25 @@
+{
+  "62bb4d27-a9c8-4493-a737-d4fa33994f1f": {
+    "MATIC": {
+      "providerId": "62bb4d27-a9c8-4493-a737-d4fa33994f1f",
+      "rate": 95.8909,
+      "apyPct": 0.96,
+      "ratePct": 0.958909,
+      "depositUsdLimit": 500000
+    },
+    "ETH": {
+      "providerId": "62bb4d27-a9c8-4493-a737-d4fa33994f1f",
+      "rate": 228.0197,
+      "apyPct": 2.31,
+      "ratePct": 2.280197,
+      "depositUsdLimit": 500000
+    },
+    "SOL": {
+      "providerId": "62bb4d27-a9c8-4493-a737-d4fa33994f1f",
+      "rate": 321.5282,
+      "apyPct": 3.27,
+      "ratePct": 3.215282,
+      "depositUsdLimit": 500000
+    }
+  }
+}

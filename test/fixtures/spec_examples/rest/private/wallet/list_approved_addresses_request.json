@@ -1,0 +1,5 @@
+{
+  "request": "/v1/approvedAddresses/account/ethereum",
+  "nonce": "<nonce>",
+  "account": "primary"
+}

@@ -1,0 +1,8 @@
+{
+  "request": "/v1/account/transfer/eth",
+  "nonce": "<nonce>",
+  "sourceAccount": "primary",
+  "targetAccount": "my-custody-account",
+  "amount": "1",
+  "clientTransferId": "AA97B177-9383-4934-8543-0F91A7A02838"
+}

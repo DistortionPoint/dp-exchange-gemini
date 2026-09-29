@@ -1,0 +1,8 @@
+{
+  "request": "/v1/staking/rewards",
+  "nonce": "<nonce>",
+  "since": "2022-08-20T00:00:00.000Z",
+  "until": "2022-11-05T00:00:00.000Z",
+  "providerId": "62b21e17-2534-4b9f-afcf-b7edb609dd8d",
+  "currency": "ETH"
+}

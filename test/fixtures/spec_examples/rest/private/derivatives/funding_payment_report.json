@@ -1,0 +1,13 @@
+[
+  {
+    "eventType": "Hourly Funding Transfer",
+    "timestamp": 1713344403617,
+    "assetCode": "GUSD",
+    "action": "Credit",
+    "quantity": {
+      "currency": "GUSD",
+      "value": "35.81084"
+    },
+    "instrumentSymbol": "BTCGUSDPERP"
+  }
+]

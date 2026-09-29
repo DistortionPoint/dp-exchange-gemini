@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Primary",
+    "account": "primary",
+    "type": "exchange",
+    "counterparty_id": "EMONNYXH",
+    "created": 1495127793000,
+    "status": "open"
+  },
+  {
+    "name": "My Custody Account",
+    "account": "my-custody-account",
+    "type": "custody",
+    "counterparty_id": null,
+    "created": 1565970772000,
+    "status": "open"
+  },
+  {
+    "name": "Other exchange account!",
+    "account": "other-exchange-account",
+    "type": "exchange",
+    "counterparty_id": "EMONNYXK",
+    "created": 1565970772000,
+    "status": "closed"
+  }
+]

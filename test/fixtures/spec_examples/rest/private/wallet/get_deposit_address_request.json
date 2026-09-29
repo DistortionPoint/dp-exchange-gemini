@@ -1,0 +1,5 @@
+{
+  "request": "/v1/deposit/bitcoin/newAddress",
+  "nonce": "<nonce>",
+  "label": "optional test label"
+}

@@ -1,0 +1,34 @@
+{
+  "results": [
+    {
+      "sourceAccount": "primary",
+      "targetAccount": "primary",
+      "pair": "BTCUSD",
+      "sourceSide": "buy",
+      "price": "1",
+      "quantity": "1000",
+      "clearingId": "41M23L5Q",
+      "status": "Settled",
+      "expirationTimeMs": 1662567706120,
+      "createdMs": 1662481306139,
+      "lastUpdatedMs": 1662481561668,
+      "hasBroker": false,
+      "wasNotified": false
+    },
+    {
+      "sourceAccount": "primary",
+      "targetAccount": "primary",
+      "pair": "BTCUSD",
+      "sourceSide": "buy",
+      "price": "12",
+      "quantity": "1000",
+      "clearingId": "0EMOYLJ5",
+      "status": "AwaitTargetConfirm",
+      "expirationTimeMs": 1662567728123,
+      "createdMs": 1662481328126,
+      "lastUpdatedMs": 1662481561415,
+      "hasBroker": false,
+      "wasNotified": true
+    }
+  ]
+}

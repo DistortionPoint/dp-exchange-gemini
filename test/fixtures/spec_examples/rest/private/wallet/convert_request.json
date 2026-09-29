@@ -1,0 +1,7 @@
+{
+  "request": "/v1/wrap/GUSDUSD",
+  "nonce": "<nonce>",
+  "amount": "1",
+  "side": "buy",
+  "client_order_id": "4ac6f45f-baf1-40f8-83c5-001e3ea73c7f"
+}

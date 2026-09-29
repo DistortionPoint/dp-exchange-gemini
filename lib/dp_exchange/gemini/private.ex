@@ -712,7 +712,22 @@ defmodule DpExchange.Gemini.Private do
   defp side("sell"), do: :sell
   defp side(_other), do: nil
 
-  defp order_type_of(%{"type" => "exchange stop limit"}), do: :stop_limit
+  # **The schema and the vendor's own example disagree on this string.** `NewOrderRequest`/
+  # `Order`'s own enum (`rest.yaml` components.schemas) names `"exchange stop limit"`, the
+  # same wire string `order_type/1` above sends on a stop-limit REQUEST — but the vendor's
+  # own `/v1/order/new` `stopLimitOrder` response EXAMPLE (`rest.yaml:686`) gives `"type":
+  # "stop-limit"`, not the schema's spelling, found by driving that exact example through
+  # this decoder in this package's own spec-example conformance suite: it fell through to
+  # the catch-all below and reported a stop-limit order as an ordinary `:limit` one,
+  # silently dropping the ONE fact that distinguishes it, while `stop_price` still carried
+  # a real value on an order the caller could no longer tell needed one. The family's
+  # standing rule for a documented schema/example contradiction (`Rest.get_funding/2`'s
+  # `amount`/`fundingAmount`, `get_positions/2`'s bare-array/`openPositions`) is to accept
+  # both spellings rather than pick the one that happens to be checkable — never a guess in
+  # either direction.
+  defp order_type_of(%{"type" => type}) when type in ["exchange stop limit", "stop-limit"],
+    do: :stop_limit
+
   defp order_type_of(%{"options" => ["maker-or-cancel" | _rest]}), do: :post_only
   defp order_type_of(%{"options" => ["immediate-or-cancel" | _rest]}), do: :ioc
   defp order_type_of(%{"options" => ["fill-or-kill" | _rest]}), do: :fok
@@ -720,8 +735,32 @@ defmodule DpExchange.Gemini.Private do
 
   # A cancelled MOC/IOC/FOK order arrives as a successful 200. It is a state, not a
   # failure, and reporting it as one would have a caller retry an order the venue handled.
+  #
+  # **A cancelled order can have filled PART of its quantity, and this used to report that
+  # as `:filled` — a status `Core.Types.Order`'s own contract means "the entire quantity
+  # traded" (`filled_quantity == quantity`).** Found by this package's own spec-example
+  # conformance suite (`test/dp_exchange/gemini/spec_examples_test.exs`) against the
+  # vendor's OWN `/v1/order/cancel` "cancelledOrder" example (`rest.yaml:874`, response
+  # `examples.cancelledOrder`): `original_amount: "5"`, `executed_amount: "3.7610296649"`,
+  # `is_cancelled: true` — a cancel that landed after a 75.2% fill, not a 100% one. The old
+  # two-way branch below (`positive? -> :filled, else -> :cancelled`) decoded it as
+  # `%Order{status: :filled, quantity: ~M[5], filled_quantity: ~M[3.7610296649]}` — a
+  # caller trusting `status == :filled` to mean `filled_quantity == quantity` would have
+  # been wrong. `test/dp_exchange/gemini/private_test.exs`'s existing coverage of this
+  # branch ("a cancelled order that did fill is `:filled`, not `:cancelled`") used a fixture
+  # where `executed_amount == original_amount`, so it never exercised the partial case the
+  # vendor's own example documents — a fixture written to agree with the code's binary
+  # framing rather than with the vendor, the exact failure mode that suite exists to catch.
+  #
+  # A cancelled partial fill is `:cancelled`, not `:partially_filled`. That atom is what the
+  # `is_live` branch below uses for an order still WORKING with a fill on it, and a caller
+  # reading it would wait for more fills on an order the venue has already closed. The order
+  # is finished; how much of it filled is `filled_quantity`, which carries it exactly.
+  # `:filled` is kept for a cancel that arrived after the whole amount executed.
   defp status_of(%{"is_cancelled" => true} = body) do
-    if positive?(body["executed_amount"]), do: :filled, else: :cancelled
+    if fully_filled?(body["executed_amount"], body["original_amount"]),
+      do: :filled,
+      else: :cancelled
   end
 
   defp status_of(%{"is_live" => true} = body) do
@@ -738,6 +777,19 @@ defmodule DpExchange.Gemini.Private do
     case decimal(amount) do
       nil -> false
       value -> Decimal.positive?(value)
+    end
+  end
+
+  # Whether `executed_amount` accounts for the ENTIRE `original_amount` — the boundary
+  # between a full fill (`:filled`) and a partial one that was cancelled before it finished
+  # (`:partially_filled`). Either side unreadable answers `false` rather than guessing the
+  # order filled in full: an order this package cannot compare is not one it can vouch for
+  # as fully filled.
+  defp fully_filled?(executed_amount, original_amount) do
+    case {decimal(executed_amount), decimal(original_amount)} do
+      {nil, _original} -> false
+      {_executed, nil} -> false
+      {executed, original} -> Decimal.equal?(executed, original)
     end
   end
 
@@ -2926,12 +2978,31 @@ defmodule DpExchange.Gemini.Private do
 
   Returned as the venue's own map for that reason. Flattening the currency off an amount is
   how a caller ends up adding a BTC number to a USD one.
+
+  `opts[:symbol]` is **required** — `rest.yaml:2255-2257` lists it in the request schema's
+  `required` alongside `request` and `nonce` ("The trading pair for which to calculate
+  pair-specific buying and selling power"), and the venue's own request example sends it as
+  the plain native form (`"btcusd"`). Missing it is `{:error, {:missing_option, :symbol}}`
+  before a request is made, rather than a request the venue would refuse for the same
+  reason.
+
+  **Found empty of this field entirely** while building this package's spec-example
+  conformance suite (`test/dp_exchange/gemini/spec_examples_test.exs`): this used to POST
+  `%{}`, an empty body, against an endpoint whose own schema requires `symbol` — every real
+  call to this endpoint would have been rejected by the venue for a missing required field,
+  silently, since nothing in this repository's fakes or fixtures ever sent this request
+  anywhere that checked. Fixed to require and send it, the same way `get_account_margin/2`
+  already does for its own (perpetuals) `symbol` requirement.
   """
   @spec get_margin_account(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_margin_account(credentials, opts) do
-    with {:ok, body, _headers} <- post("/v1/margin/account", %{}, credentials, opts) do
-      {:ok, body}
+    with {:ok, symbol} <- required_opt(opts, :symbol) do
+      params = %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
+
+      with {:ok, body, _headers} <- post("/v1/margin/account", params, credentials, opts) do
+        {:ok, body}
+      end
     end
   end
 

@@ -1,0 +1,48 @@
+{
+  "62b21e17-2534-4b9f-afcf-b7edb609dd8d": {
+    "MATIC": {
+      "providerId": "62b21e17-2534-4b9f-afcf-b7edb609dd8d",
+      "currency": "MATIC",
+      "accrualTotal": 0.103994,
+      "ratePeriods": [
+        {
+          "providerId": "62b21e17-2534-4b9f-afcf-b7edb609dd8d",
+          "currency": "MATIC",
+          "apyPct": 5.75,
+          "ratePct": 5.592369,
+          "numberOfAccruals": 1,
+          "accrualTotal": 0.0065678,
+          "firstAccrualAt": "2022-08-23T20:00:00.000Z",
+          "lastAccrualAt": "2022-08-23T20:00:00.000Z"
+        },
+        {
+          "providerId": "62b21e17-2534-4b9f-afcf-b7edb609dd8d",
+          "currency": "MATIC",
+          "apyPct": 5.2,
+          "ratePct": 5.073801,
+          "numberOfAccruals": 1,
+          "accrualTotal": 0.0037971687995651837,
+          "firstAccrualAt": "2022-10-28T20:00:00.000Z",
+          "lastAccrualAt": "2022-10-28T20:00:00.000Z"
+        }
+      ]
+    },
+    "ETH": {
+      "providerId": "62b21e17-2534-4b9f-afcf-b7edb609dd8d",
+      "currency": "ETH",
+      "accrualTotal": 0.017999076209977,
+      "ratePeriods": [
+        {
+          "providerId": "62b21e17-2534-4b9f-afcf-b7edb609dd8d",
+          "currency": "ETH",
+          "apyPct": 0.66,
+          "ratePct": 0.65913408,
+          "numberOfAccruals": 1,
+          "accrualTotal": 0.00014802170517505,
+          "firstAccrualAt": "2022-11-02T20:00:00.000Z",
+          "lastAccrualAt": "2022-11-02T20:00:00.000Z"
+        }
+      ]
+    }
+  }
+}

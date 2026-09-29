@@ -1,0 +1,9 @@
+{
+  "request": "/v1/clearing/confirm",
+  "nonce": "<nonce>",
+  "clearing_id": "OM9VNL1G",
+  "symbol": "btcusd",
+  "amount": "100",
+  "price": "9500.00",
+  "side": "sell"
+}

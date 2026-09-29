@@ -1,0 +1,10 @@
+{
+  "request": "/v1/clearing/broker/list",
+  "nonce": "<nonce>",
+  "symbol": "BTCEUR",
+  "expiration_start": 1642222800000,
+  "expiration_end": 1642309200000,
+  "submission_start": 1641790800000,
+  "submission_end": 1641791100000,
+  "funded": false
+}

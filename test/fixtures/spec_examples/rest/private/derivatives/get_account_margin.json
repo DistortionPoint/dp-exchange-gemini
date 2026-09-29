@@ -1,0 +1,15 @@
+{
+  "margin_assets_value": "9800",
+  "initial_margin": "6000",
+  "available_margin": "3800",
+  "margin_maintenance_limit": "5800",
+  "leverage": "12.34567",
+  "notional_value": "1300",
+  "estimated_liquidation_price": "1300",
+  "initial_margin_positions": "3500",
+  "reserved_margin": "2500",
+  "reserved_margin_buys": "1800",
+  "reserved_margin_sells": "700",
+  "buying_power": "0.19",
+  "selling_power": "0.19"
+}

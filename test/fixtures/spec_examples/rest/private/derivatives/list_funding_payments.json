@@ -1,0 +1,29 @@
+[
+  {
+    "eventType": "Hourly Funding Transfer",
+    "hourlyFundingTransfer": {
+      "eventType": "Hourly Funding Transfer",
+      "timestamp": 1683730803940,
+      "assetCode": "GUSD",
+      "action": "Debit",
+      "quantity": {
+        "currency": "GUSD",
+        "value": "4.78958"
+      }
+    }
+  },
+  {
+    "eventType": "Hourly Funding Transfer",
+    "hourlyFundingTransfer": {
+      "eventType": "Hourly Funding Transfer",
+      "timestamp": 1683734406746,
+      "assetCode": "GUSD",
+      "action": "Debit",
+      "quantity": {
+        "currency": "GUSD",
+        "value": "4.78958"
+      },
+      "instrumentSymbol": "BTCGUSDPERP"
+    }
+  }
+]

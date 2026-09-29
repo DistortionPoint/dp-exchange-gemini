@@ -1,0 +1,5 @@
+{
+  "request": "/v1/approvedAddresses/ethereum/remove",
+  "nonce": "<nonce>",
+  "address": "0x0000000000000000000000000000000000000000"
+}

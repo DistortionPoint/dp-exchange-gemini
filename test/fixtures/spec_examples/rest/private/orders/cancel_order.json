@@ -1,0 +1,21 @@
+{
+  "order_id": "106817811",
+  "id": "106817811",
+  "symbol": "btcusd",
+  "exchange": "gemini",
+  "avg_execution_price": "3632.85101103",
+  "side": "buy",
+  "type": "exchange limit",
+  "timestamp": "1495742383",
+  "timestampms": 1495742383345,
+  "is_live": false,
+  "is_cancelled": true,
+  "is_hidden": false,
+  "was_forced": false,
+  "executed_amount": "3.7610296649",
+  "remaining_amount": "1.2389703351",
+  "reason": "Requested",
+  "options": [],
+  "price": "2960.00",
+  "original_amount": "5"
+}

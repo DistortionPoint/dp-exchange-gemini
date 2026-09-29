@@ -1,0 +1,7 @@
+{
+  "fxPair": "AUDUSD",
+  "rate": "0.69",
+  "asOf": 1594651859000,
+  "provider": "bcb",
+  "benchmark": "Spot"
+}

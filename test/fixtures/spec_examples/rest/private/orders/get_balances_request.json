@@ -1,0 +1,6 @@
+{
+  "request": "/v1/balances",
+  "nonce": "<nonce>",
+  "account": "primary",
+  "showPendingBalances": false
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "timestamp": 1547146811,
+    "timestampms": 1547146811357,
+    "tid": 5335307668,
+    "price": "3610.85",
+    "amount": "0.27413495",
+    "exchange": "gemini",
+    "type": "buy",
+    "broken": true
+  }
+]

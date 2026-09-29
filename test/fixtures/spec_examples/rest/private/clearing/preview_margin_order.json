@@ -1,0 +1,79 @@
+{
+  "preorder": {
+    "marginAssetValue": {
+      "currency": "USD",
+      "value": "10000.00"
+    },
+    "availableCollateral": {
+      "currency": "USD",
+      "value": "8500.00"
+    },
+    "notionalValue": {
+      "currency": "USD",
+      "value": "15000.00"
+    },
+    "totalBorrowed": {
+      "currency": "USD",
+      "value": "5000.00"
+    },
+    "leverage": "1.5",
+    "reservedBuyOrders": {
+      "currency": "USD",
+      "value": "0.00"
+    },
+    "reservedSellOrders": {
+      "currency": "USD",
+      "value": "0.00"
+    },
+    "buyingPower": {
+      "currency": "USD",
+      "value": "8500.00"
+    },
+    "sellingPower": {
+      "currency": "USD",
+      "value": "8500.00"
+    }
+  },
+  "postorder": {
+    "marginAssetValue": {
+      "currency": "USD",
+      "value": "10000.00"
+    },
+    "availableCollateral": {
+      "currency": "USD",
+      "value": "6000.00"
+    },
+    "notionalValue": {
+      "currency": "USD",
+      "value": "40000.00"
+    },
+    "totalBorrowed": {
+      "currency": "USD",
+      "value": "30000.00"
+    },
+    "leverage": "4.0",
+    "reservedBuyOrders": {
+      "currency": "USD",
+      "value": "0.00"
+    },
+    "reservedSellOrders": {
+      "currency": "USD",
+      "value": "0.00"
+    },
+    "buyingPower": {
+      "currency": "USD",
+      "value": "6000.00"
+    },
+    "sellingPower": {
+      "currency": "USD",
+      "value": "6000.00"
+    },
+    "liquidationRisk": {
+      "lossPercentage": "0.6000",
+      "liquidationPrice": {
+        "currency": "USD",
+        "value": "30000.00"
+      }
+    }
+  }
+}

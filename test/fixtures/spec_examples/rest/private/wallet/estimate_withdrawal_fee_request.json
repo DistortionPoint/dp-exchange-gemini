@@ -1,0 +1,6 @@
+{
+  "request": "/v2/withdraw/ethereum/eth/feeEstimate",
+  "nonce": "<nonce>",
+  "address": "0x31c2105b8dea834167f32f7ea7d877812e059230",
+  "amount": "0.01"
+}

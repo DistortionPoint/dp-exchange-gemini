@@ -1,0 +1,26 @@
+{
+  "account": {
+    "accountName": "Primary",
+    "shortName": "primary",
+    "type": "exchange",
+    "created": "1498245007981"
+  },
+  "users": [
+    {
+      "name": "Satoshi Nakamoto",
+      "lastSignIn": "2020-07-21T13:37:39.453Z",
+      "status": "Active",
+      "countryCode": "US",
+      "isVerified": true
+    },
+    {
+      "name": "Gemini Support",
+      "lastSignIn": "2018-07-11T20:04:36.073Z",
+      "status": "Suspended",
+      "countryCode": "US",
+      "isVerified": false
+    }
+  ],
+  "memo_reference_code": "GEMPJBRDZ",
+  "virtual_account_number": "123456"
+}

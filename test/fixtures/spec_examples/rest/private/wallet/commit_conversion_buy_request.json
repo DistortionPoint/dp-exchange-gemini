@@ -1,0 +1,10 @@
+{
+  "request": "/v1/instant/execute",
+  "nonce": "<nonce>",
+  "symbol": "BTCUSD",
+  "side": "buy",
+  "quantity": "0.01505181",
+  "price": "6445.07",
+  "fee": "2.9900309233",
+  "quoteId": 1328
+}

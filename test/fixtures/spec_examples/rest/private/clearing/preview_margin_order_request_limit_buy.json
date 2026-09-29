@@ -1,0 +1,9 @@
+{
+  "request": "/v1/margin/order/preview",
+  "nonce": "<nonce>",
+  "symbol": "btcusd",
+  "side": "buy",
+  "type": "limit",
+  "amount": "0.5",
+  "price": "50000.00"
+}

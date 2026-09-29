@@ -1,0 +1,8 @@
+{
+  "fromAccount": "my-account",
+  "toAccount": "my-other-account",
+  "amount": "1",
+  "currency": "Bitcoin",
+  "uuid": "9c153d64-83ba-4532-a159-ebe3f6797766",
+  "message": "Success, transfer completed."
+}

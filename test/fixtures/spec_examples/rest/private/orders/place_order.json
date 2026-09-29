@@ -1,0 +1,21 @@
+{
+  "order_id": "106817811",
+  "id": "106817811",
+  "symbol": "BTCUSD",
+  "exchange": "gemini",
+  "avg_execution_price": "3632.8508430064554",
+  "side": "buy",
+  "type": "exchange limit",
+  "timestamp": "1547220404",
+  "timestampms": 1547220404836,
+  "is_live": true,
+  "is_cancelled": false,
+  "is_hidden": false,
+  "was_forced": false,
+  "executed_amount": "3.7567928949",
+  "remaining_amount": "1.2432071051",
+  "client_order_id": "20190110-4738721",
+  "options": [],
+  "price": "3633.00",
+  "original_amount": "5"
+}

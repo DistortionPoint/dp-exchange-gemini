@@ -1,0 +1,10 @@
+{
+  "request": "/v1/order/new",
+  "nonce": "<nonce>",
+  "client_order_id": "470135",
+  "symbol": "BTCUSD",
+  "amount": "5",
+  "price": "3633.00",
+  "side": "buy",
+  "type": "exchange limit"
+}

@@ -1,0 +1,41 @@
+{
+  "result": "success",
+  "orders": [
+    {
+      "clearing_id": "9LVQE9X5",
+      "counterparty_id": "YZ43LX81",
+      "symbol": "BTCEUR",
+      "side": "sell",
+      "price": 2,
+      "quantity": 10,
+      "status": "AwaitTargetConfirm",
+      "submission": 1641790800020,
+      "expiration": 1641963600000
+    },
+    {
+      "clearing_id": "2MYR07XP",
+      "order_id": "trade1SrcOrderId",
+      "counterparty_id": "KQ4P3XWE",
+      "broker_id": "WV4V1DGN",
+      "symbol": "BTCEUR",
+      "side": "buy",
+      "price": 1,
+      "quantity": 50,
+      "status": "AwaitSourceConfirm",
+      "submission": 1641790800016,
+      "expiration": 1642222800000
+    },
+    {
+      "clearing_id": "EM8WO7LQ",
+      "order_id": "trade4SrcOrderId",
+      "broker_id": "WV4V1DGN",
+      "symbol": "BTCEUR",
+      "side": "buy",
+      "price": 4,
+      "quantity": 8,
+      "status": "AwaitSourceTargetConfirm",
+      "submission": 1641790800028,
+      "expiration": 1642136400000
+    }
+  ]
+}

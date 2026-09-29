@@ -1,0 +1,29 @@
+[
+  {
+    "currency": "BTC",
+    "amount": "1154.62034001",
+    "amountNotional": "10386000.59",
+    "available": "1129.10517279",
+    "availableNotional": "10161000.71",
+    "availableForWithdrawal": "1129.10517279",
+    "availableForWithdrawalNotional": "10161000.71"
+  },
+  {
+    "currency": "USD",
+    "amount": "18722.79",
+    "amountNotional": "18722.79",
+    "available": "14481.62",
+    "availableNotional": "14481.62",
+    "availableForWithdrawal": "14481.62",
+    "availableForWithdrawalNotional": "14481.62"
+  },
+  {
+    "currency": "ETH",
+    "amount": "20124.50369697",
+    "amountNotional": "100621.31",
+    "available": "20124.50369697",
+    "availableNotional": "100621.31",
+    "availableForWithdrawal": "20124.50369697",
+    "availableForWithdrawalNotional": "100621.31"
+  }
+]

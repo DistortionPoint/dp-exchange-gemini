@@ -1,0 +1,31 @@
+{
+  "result": "success",
+  "orders": [
+    {
+      "clearing_id": "9LVQ98X5",
+      "source_counterparty_id": "R54L3DG1",
+      "source_order_id": "trade1SrcOrderId",
+      "target_counterparty_id": "KQ4P3XWE",
+      "target_order_id": "trade1TgtOrderId",
+      "symbol": "BTCEUR",
+      "source_side": "buy",
+      "price": 1,
+      "quantity": 50,
+      "status": "AwaitSourceConfirm",
+      "submission": 1641790800016,
+      "expiration": 1642222800000
+    },
+    {
+      "clearing_id": "VXQ341X4",
+      "source_counterparty_id": "R54L3DG1",
+      "source_order_id": "trade4SrcOrderId",
+      "symbol": "BTCEUR",
+      "source_side": "buy",
+      "price": 4,
+      "quantity": 8,
+      "status": "AwaitSourceTargetConfirm",
+      "submission": 1641790800028,
+      "expiration": 1642136400000
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "request": "/v1/clearing/status",
+  "nonce": "<nonce>",
+  "clearing_id": "OM9VNL1G"
+}

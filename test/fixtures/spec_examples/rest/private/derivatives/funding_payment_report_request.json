@@ -1,0 +1,4 @@
+{
+  "request": "/v1/perpetuals/fundingpaymentreport/records.json?fromDate=2024-04-10&toDate=2024-04-25&numRows=1000",
+  "nonce": "<nonce>"
+}

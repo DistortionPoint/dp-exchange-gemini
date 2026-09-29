@@ -1,0 +1,16 @@
+{
+  "quoteId": 20930,
+  "maxAgeMs": 60000,
+  "pair": "ETHUSD",
+  "price": "225.42",
+  "priceCurrency": "USD",
+  "side": "sell",
+  "quantity": "1",
+  "quantityCurrency": "ETH",
+  "fee": "2.99",
+  "feeCurrency": "USD",
+  "depositFee": "0",
+  "depositFeeCurrency": "USD",
+  "totalSpend": "1",
+  "totalSpendCurrency": "ETH"
+}

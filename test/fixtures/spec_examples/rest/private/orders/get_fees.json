@@ -1,0 +1,30 @@
+{
+  "web_maker_fee_bps": 25,
+  "web_taker_fee_bps": 35,
+  "web_auction_fee_bps": 25,
+  "api_maker_fee_bps": 0,
+  "api_taker_fee_bps": 10,
+  "api_auction_fee_bps": 10,
+  "fix_maker_fee_bps": 0,
+  "fix_taker_fee_bps": 10,
+  "fix_auction_fee_bps": 10,
+  "notional_30d_volume": 15000000,
+  "api_notional_30d_volume": 12500000,
+  "last_updated_ms": 1551371446000,
+  "date": "2019-02-28",
+  "fee_tier": {
+    "tier": "0bps",
+    "api_maker_fee_bps": 0,
+    "api_taker_fee_bps": 10
+  },
+  "notional_1d_volume": [
+    {
+      "date": "2019-02-28",
+      "notional_volume": 500000
+    },
+    {
+      "date": "2019-02-27",
+      "notional_volume": 750000
+    }
+  ]
+}

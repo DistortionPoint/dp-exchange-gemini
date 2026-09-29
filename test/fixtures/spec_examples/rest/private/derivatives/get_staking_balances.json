@@ -1,0 +1,26 @@
+[
+  {
+    "type": "Staking",
+    "currency": "MATIC",
+    "balance": 10,
+    "available": 0,
+    "availableForWithdrawal": 10,
+    "balanceByProvider": {
+      "62b21e17-2534-4b9f-afcf-b7edb609dd8d": {
+        "balance": 10
+      }
+    }
+  },
+  {
+    "type": "Staking",
+    "currency": "ETH",
+    "balance": 3,
+    "available": 0,
+    "availableForWithdrawal": 3,
+    "balanceByProvider": {
+      "62b21e17-2534-4b9f-afcf-b7edb609dd8d": {
+        "balance": 3
+      }
+    }
+  }
+]

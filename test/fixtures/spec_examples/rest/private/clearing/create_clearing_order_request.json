@@ -1,0 +1,10 @@
+{
+  "request": "/v1/clearing/new",
+  "nonce": "<nonce>",
+  "counterparty_id": "OM9VNL1G",
+  "expires_in_hrs": 24,
+  "symbol": "btcusd",
+  "amount": "100",
+  "price": "9500.00",
+  "side": "buy"
+}

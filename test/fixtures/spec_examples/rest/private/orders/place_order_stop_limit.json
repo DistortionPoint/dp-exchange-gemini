@@ -1,0 +1,20 @@
+{
+  "order_id": "7419662",
+  "id": "7419662",
+  "symbol": "BTCUSD",
+  "exchange": "gemini",
+  "avg_execution_price": "0.00",
+  "side": "buy",
+  "type": "stop-limit",
+  "timestamp": "1572378649",
+  "timestampms": 1572378649018,
+  "is_live": true,
+  "is_cancelled": false,
+  "is_hidden": false,
+  "was_forced": false,
+  "executed_amount": "0",
+  "options": [],
+  "stop_price": "10400.00",
+  "price": "10500.00",
+  "original_amount": "0.01"
+}

@@ -20,6 +20,27 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by spec-example tests that drive the vendor's own documented examples through each
+call.
+
+- `get_margin_account/2` requires and sends `symbol`, which the endpoint requires
+  (`rest.yaml:2255-2257`). It sent an empty body.
+- A cancelled order that filled in part is `:cancelled`, with the fill in
+  `filled_quantity`. It was `:filled`, which says the whole quantity traded. The vendor's
+  own `cancelledOrder` example is a 75% fill.
+- A stop-limit order reported as `"stop-limit"`, the spelling in the vendor's own response
+  example, is `:stop_limit`. Only the schema's `"exchange stop limit"` was recognised, so
+  such orders decoded as plain `:limit`.
+
+### Added
+
+- Spec-example tests: every REST endpoint and WebSocket frame this package uses, driven with
+  the vendor's documented examples (or cited schema-built instances), with request shapes
+  checked against the spec. Fixtures and their source lines are under
+  `test/fixtures/spec_examples/`.
+
 ## [0.2.85] - 2026-09-29
 
 ### Fixed

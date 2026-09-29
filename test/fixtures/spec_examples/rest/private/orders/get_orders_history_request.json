@@ -1,0 +1,7 @@
+{
+  "request": "/v1/orders/history",
+  "nonce": "<nonce>",
+  "symbol": "btcusd",
+  "timestamp": 1591084414000,
+  "limit_orders": 50
+}

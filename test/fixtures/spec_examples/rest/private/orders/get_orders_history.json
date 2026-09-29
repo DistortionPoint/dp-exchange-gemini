@@ -1,0 +1,37 @@
+[
+  {
+    "order_id": "107421205",
+    "id": "107421205",
+    "symbol": "btcusd",
+    "exchange": "gemini",
+    "avg_execution_price": "3633.00",
+    "side": "buy",
+    "type": "exchange limit",
+    "timestamp": "1547241626",
+    "timestampms": 1547241626991,
+    "is_live": false,
+    "is_cancelled": false,
+    "is_hidden": false,
+    "was_forced": false,
+    "executed_amount": "5",
+    "remaining_amount": "0",
+    "options": [],
+    "price": "3633.00",
+    "original_amount": "5",
+    "trades": [
+      {
+        "price": "3633.00",
+        "amount": "5",
+        "timestamp": 1547241627,
+        "timestampms": 1547241627000,
+        "type": "Buy",
+        "aggressor": true,
+        "fee_currency": "USD",
+        "fee_amount": "9.0825",
+        "tid": 106921823,
+        "order_id": "107421205",
+        "exchange": "gemini"
+      }
+    ]
+  }
+]

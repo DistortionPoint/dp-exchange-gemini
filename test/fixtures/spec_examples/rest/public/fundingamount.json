@@ -1,0 +1,8 @@
+{
+  "symbol": "BTCGUSDPERP",
+  "fundingDateTime": "2025-04-22T18:00:00.000Z",
+  "fundingTimestampMilliSecs": 1745344800000,
+  "nextFundingTimestamp": 1745348400000,
+  "fundingAmount": -1.50991,
+  "estimatedFundingAmount": -2.10595
+}

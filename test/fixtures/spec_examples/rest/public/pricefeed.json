@@ -1,0 +1,22 @@
+[
+  {
+    "pair": "BTCUSD",
+    "price": "9500.00",
+    "percentChange24h": "5.23"
+  },
+  {
+    "pair": "ETHUSD",
+    "price": "257.54",
+    "percentChange24h": "4.85"
+  },
+  {
+    "pair": "BCHUSD",
+    "price": "450.10",
+    "percentChange24h": "-2.91"
+  },
+  {
+    "pair": "LTCUSD",
+    "price": "79.50",
+    "percentChange24h": "7.63"
+  }
+]

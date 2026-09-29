@@ -1,0 +1,24 @@
+[
+  [
+    {
+      "symbol": "ethusd",
+      "base_currency": "ETH",
+      "notional_currency": "USD",
+      "data_date": "2019-01-10",
+      "total_volume_base": 25.5,
+      "maker_buy_sell_ratio": 0.75,
+      "buy_maker_base": 15.5,
+      "buy_maker_notional": 3875,
+      "buy_maker_count": 12,
+      "sell_maker_base": 5,
+      "sell_maker_notional": 1250,
+      "sell_maker_count": 4,
+      "buy_taker_base": 2.5,
+      "buy_taker_notional": 625,
+      "buy_taker_count": 2,
+      "sell_taker_base": 2.5,
+      "sell_taker_notional": 625,
+      "sell_taker_count": 2
+    }
+  ]
+]

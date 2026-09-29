@@ -1,0 +1,15 @@
+{
+  "orderId": 429135395,
+  "pair": "GUSDUSD",
+  "price": "1",
+  "priceCurrency": "USD",
+  "side": "buy",
+  "quantity": "1",
+  "quantityCurrency": "GUSD",
+  "totalSpend": "1",
+  "totalSpendCurrency": "USD",
+  "fee": "0",
+  "feeCurrency": "USD",
+  "depositFee": "0",
+  "depositFeeCurrency": "USD"
+}

@@ -1,0 +1,37 @@
+[
+  {
+    "providerId": "62b21e17-2534-4b9f-afcf-b7edb609dd8d",
+    "transactions": [
+      {
+        "transactionId": "MPZ7LDD8",
+        "transactionType": "Redeem",
+        "amountCurrency": "MATIC",
+        "amount": 20,
+        "dateTime": 1667418560153
+      },
+      {
+        "transactionId": "65QN4XM5",
+        "transactionType": "Deposit",
+        "amountCurrency": "MATIC",
+        "amount": 30,
+        "dateTime": 1667418287795
+      },
+      {
+        "transactionId": "YP22OK4P",
+        "transactionType": "Deposit",
+        "amountCurrency": "ETH",
+        "amount": 3,
+        "dateTime": 1667397368929
+      },
+      {
+        "transactionId": "TQN9OPN",
+        "transactionType": "Interest",
+        "amountCurrency": "MATIC",
+        "amount": 0.01,
+        "priceCurrency": "USD",
+        "priceAmount": 0.1,
+        "dateTime": 1667418287795
+      }
+    ]
+  }
+]

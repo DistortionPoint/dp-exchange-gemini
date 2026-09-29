@@ -1,0 +1,26 @@
+[
+  {
+    "type": "exchange",
+    "currency": "BTC",
+    "amount": "5.0",
+    "available": "4.5",
+    "availableForWithdrawal": "4.5",
+    "_timestamp": "2024-03-16T00:00:00.000000Z"
+  },
+  {
+    "type": "exchange",
+    "currency": "USD",
+    "amount": "15000.00",
+    "available": "5000.00",
+    "availableForWithdrawal": "5000.00",
+    "_timestamp": "2024-03-16T00:00:00.000000Z"
+  },
+  {
+    "type": "exchange",
+    "currency": "ETH",
+    "amount": "10.0",
+    "available": "10.0",
+    "availableForWithdrawal": "10.0",
+    "_timestamp": "2024-03-16T00:00:00.000000Z"
+  }
+]

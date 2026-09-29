@@ -1,0 +1,41 @@
+{
+  "results": [
+    {
+      "account": "primary",
+      "amount": "0.001",
+      "clientOrderId": "",
+      "price": "1730.95",
+      "timestampms": 1659201465069,
+      "side": "SIDE_TYPE_BUY",
+      "isAggressor": true,
+      "feeAssetCode": "ETH",
+      "feeAmount": "0.000000000000000605",
+      "orderId": 73716687406755680,
+      "exchange": "gemini",
+      "isAuctionFill": false,
+      "isClearingFill": false,
+      "symbol": "ETHUSD",
+      "tid": 144115199446910513,
+      "type": "trade"
+    },
+    {
+      "account": "primary",
+      "amount": "0.001",
+      "clientOrderId": "",
+      "price": "1679.02",
+      "timestampms": 1659201465222,
+      "side": "SIDE_TYPE_SELL",
+      "isAggressor": true,
+      "feeAssetCode": "ETH",
+      "feeAmount": "0.00000000000000000587",
+      "orderId": 73716687406755680,
+      "exchange": "gemini",
+      "isAuctionFill": false,
+      "isClearingFill": false,
+      "symbol": "ETHUSD",
+      "tid": 144115199446910494,
+      "type": "trade"
+    }
+  ],
+  "continuationToken": "daccgrp_1500611:n7126218738869976937315434496:a7126216029949884380085223424:m2:iForward"
+}

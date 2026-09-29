@@ -1,0 +1,5 @@
+{
+  "request": "/v1/notionalvolume",
+  "nonce": "<nonce>",
+  "symbol": "btcusd"
+}

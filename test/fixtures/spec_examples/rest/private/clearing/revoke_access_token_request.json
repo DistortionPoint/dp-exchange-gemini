@@ -1,0 +1,3 @@
+{
+  "request": "/v1/oauth/revokeByToken"
+}
