@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.84] - 2026-09-29
+
 ### Fixed
 
 Checked against the vendor's `rest.yaml`, fetched 2026-09-29 and now committed at
