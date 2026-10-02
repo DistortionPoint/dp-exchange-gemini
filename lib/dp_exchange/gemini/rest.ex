@@ -190,11 +190,18 @@ defmodule DpExchange.Gemini.Rest do
     with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts),
          {:ok, last} <- quoted_price(body),
          {:ok, price} <- required_decimal(last, :price) do
+      # The ticker's `volume` is "the 24 hour volume on the exchange", measured up to its
+      # own `timestamp` (`Ticker` in docs/reference/gemini/openapi/rest.yaml), so a rolling
+      # 24-hour total. No interval's volume can be derived from it — dp-exchange-core issue
+      # #42. Per-interval volume comes from the `:trades` stream.
+      volume = base_volume(body, native)
+
       {:ok,
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: price,
-         volume: base_volume(body, native),
+         volume: volume,
+         volume_window: volume && :rolling_24h,
          # Read, not required, through the same `header_time_or_nil/1` that
          # `get_top_of_book/2` has always used on this identical payload.
          # `Core.Types.Quote` enforces `[:symbol, :price, :observed_at, :provider]`, so an

@@ -86,6 +86,8 @@ defmodule DpExchange.Gemini.RestTest do
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
       assert Decimal.equal?(quote_struct.volume, Decimal.new("183.72081422"))
+      # "The 24 hour volume on the exchange": a rolling total (dp-exchange-core issue #42).
+      assert quote_struct.volume_window == :rolling_24h
     end
 
     test "a non-numeric last price refuses the quote rather than delivering price: nil" do

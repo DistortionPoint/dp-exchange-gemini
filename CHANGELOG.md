@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_price/2`'s volume now says it is a rolling 24-hour total**
+  (`volume_window: :rolling_24h`, dp_exchange_core 0.3.50, dp-exchange-core issue #42).
+  The ticker documents it as "the 24 hour volume on the exchange". Per-interval volume
+  comes from the `:trades` stream.
+
+### Fixed
+
+- **The fake's streamed `Quote` no longer carries a volume the real stream never sends.**
+  The real `bookTicker` quote has `volume: nil`, with the venue's volume arriving as
+  `Trade.quantity`. The fake reused `get_price/2`'s struct, 24-hour total included.
+
 ## [0.2.93] - 2026-10-02
 
 ### Fixed

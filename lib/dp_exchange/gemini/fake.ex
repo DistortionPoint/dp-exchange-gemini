@@ -130,6 +130,8 @@ defmodule DpExchange.Gemini.Fake do
              symbol: symbol,
              price: Decimal.new(price),
              volume: Decimal.new("183.72"),
+             # As the real `get_price/2`: the ticker's 24-hour volume.
+             volume_window: :rolling_24h,
              venue_time: @at,
              observed_at: @at,
              provider: :gemini
@@ -831,7 +833,13 @@ defmodule DpExchange.Gemini.Fake do
   # consumer's test asserting on the streamed Quote's `venue_time` would pass against this
   # fake and fail against the real venue, the exact defect `CLAUDE.md` names as the family's
   # own fail-closed rule for fakes.
-  defp streamed(%Types.Quote{} = quote_struct), do: %{quote_struct | venue_time: nil}
+  #
+  # The same holds for volume: the streamed `Quote` carries none (`Socket` builds it with
+  # `volume: nil`, the venue's volume arriving as `Trade.quantity`), where `get_price/2`'s
+  # carries the ticker's 24-hour total. Kept, the fake's stream showed a volume the real one
+  # never sends — the kind of quantity dp-exchange-core issue #42 found consumers summing.
+  defp streamed(%Types.Quote{} = quote_struct),
+    do: %{quote_struct | venue_time: nil, volume: nil, volume_window: nil}
 
   # A `Types.Trade` consistent with `WsDecode.to_trade/2`'s own shape: a real `id`
   # (`to_string_or_nil/1` never turns an absent id into `""` there, so this never does
