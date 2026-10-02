@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.94] - 2026-10-02
+
 ### Changed
 
 - **`get_price/2`'s volume now says it is a rolling 24-hour total**
