@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.93] - 2026-10-02
+
 ### Fixed
 
 - **A connection that answers pings but not subscribe requests is now detected and
