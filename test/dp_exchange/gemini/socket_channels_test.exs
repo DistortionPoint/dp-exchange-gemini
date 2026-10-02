@@ -327,6 +327,10 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
         :gen.reply(from, :ok)
         {:noreply, state}
       end
+
+      # `subscribe/3` announces each request before sending it, so the real socket can
+      # time out an unanswered one. This stub has no deadline to arm.
+      def handle_info(:awaiting_ack, state), do: {:noreply, state}
     end
 
     setup do

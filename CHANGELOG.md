@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A connection that answers pings but not subscribe requests is now detected and
+  reconnected.** On 2026-10-02 the venue closed the socket with `1012 "Server shutting
+  down"`. The reconnect succeeded and the resubscribe went out, but for three minutes 90% of
+  the subscribed pairs delivered nothing while the connection kept answering pings, so the
+  liveness check saw a healthy link and only the host noticed. The socket now gives each
+  subscribe request 15 seconds to be answered. Measured the same day on production and
+  sandbox, the venue answers every subscribe, repeats included, within about 550ms. If any is
+  still unanswered at the deadline, it raises a `:degraded` notice with
+  `details.reason: :subscribe_unanswered` and reconnects. Quiet market data alone never
+  triggers it.
+
 ## [0.2.92] - 2026-10-01
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

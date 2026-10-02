@@ -103,6 +103,28 @@ defmodule DpExchange.Gemini.Socket do
   ordinary `handle_disconnect/2` path: `:link_down`, reconnect, `:reconnected`, resend. The
   check carries this connection's ref and a stale one is not re-armed, so reconnects
   cannot stack check chains.
+
+  ## A connection that answers pings but not subscribes is not serving
+
+  The ping check above cannot see a server that is shutting down. Measured 2026-10-02 in
+  the host's log: the venue closed this socket with `1012 "Server shutting down"`, the
+  reconnect succeeded within a second, the resubscribe went out, and for three minutes 90%
+  of the subscribed pairs delivered nothing while the connection kept answering pings. Only
+  the host's own watchdog noticed. The venue's outage outlasted that window, so earlier
+  detection would not have restored data that night, but the package reported a healthy
+  link the whole time, which is the half-dead feed this family ranks worst.
+
+  The venue answers every subscribe request with `{"id":1,"status":200}`
+  (`GenericSuccessResponse` in `docs/reference/gemini/asyncapi/websocket.yaml`). Measured
+  2026-10-02 against both `ws.gemini.com` and `ws.sandbox.gemini.com`: a first subscribe, the
+  same streams again, and a mix of subscribed and new streams were each answered within about
+  550ms. A repeat is answered too, which matters because `Feed` resubscribes every 60s to
+  streams already subscribed. So `subscribe/3` tells this process a request is out, and if `@ack_timeout_ms` passes with
+  any subscribe still unanswered, it raises a `:degraded` notice
+  (`details.reason: :subscribe_unanswered`) and closes, taking the same reconnect path as a
+  silent connection. Silence in the market data alone is never the trigger, because a feed
+  watching a few illiquid pairs can be quiet for minutes. An unanswered request has no such
+  innocent reading.
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
@@ -133,6 +155,11 @@ defmodule DpExchange.Gemini.Socket do
   # See the moduledoc's "A dead connection is found by pinging it".
   @ping_every_ms 30_000
   @silence_ms 90_000
+
+  # See the moduledoc's "A connection that answers pings but not subscribes is not serving".
+  # Generous on purpose: the acks this was set against arrive in well under a second, and a
+  # false close costs a reconnect.
+  @ack_timeout_ms 15_000
 
   @base_reconnect_delay_ms 1_000
   @max_reconnect_delay_ms 30_000
@@ -321,7 +348,22 @@ defmodule DpExchange.Gemini.Socket do
   def subscribe(socket, symbols, channel \\ :book_ticker) do
     with :ok <- validate_channel(symbols, channel),
          :ok <- claim_partial_depth(socket, symbols, channel) do
-      send_rpc(socket, "subscribe", streams(symbols, channel))
+      streams = streams(symbols, channel)
+      await_ack(socket, streams)
+      send_rpc(socket, "subscribe", streams)
+    end
+  end
+
+  # Sent BEFORE the frame, from the same process, so this socket always hears that a request
+  # is out before it can hear the answer. An empty address list sends nothing and so expects
+  # nothing. A socket that cannot be found is not told: `send/2` to an unregistered name
+  # raises, and `send_rpc/3` already turns that same missing socket into a reported error.
+  defp await_ack(_socket, []), do: :ok
+
+  defp await_ack(socket, _streams) do
+    case GenServer.whereis(socket) do
+      pid when is_pid(pid) -> send(pid, :awaiting_ack)
+      _not_running -> :ok
     end
   end
 
@@ -611,7 +653,10 @@ defmodule DpExchange.Gemini.Socket do
        last_depth_update: %{},
        depth_anchored: MapSet.new(),
        partial_depth_claims: MapSet.new(),
-       last_trade_price: %{}
+       last_trade_price: %{},
+       # A request sent on the old connection is not owed an answer on this one.
+       unanswered_subscribes: 0,
+       ack_deadline: nil
      })}
   end
 
@@ -639,7 +684,49 @@ defmodule DpExchange.Gemini.Socket do
     end
   end
 
+  # See the moduledoc's "A connection that answers pings but not subscribes is not serving".
+  # One deadline covers every request outstanding when it was armed; an answer that clears
+  # them all disarms it, and a stale deadline's ref no longer matches.
+  def handle_info(:awaiting_ack, state) do
+    state = Map.update(state, :unanswered_subscribes, 1, &(&1 + 1))
+
+    if Map.get(state, :ack_deadline) do
+      {:ok, state}
+    else
+      deadline = make_ref()
+      Process.send_after(self(), {:ack_deadline, deadline}, @ack_timeout_ms)
+      {:ok, Map.put(state, :ack_deadline, deadline)}
+    end
+  end
+
+  def handle_info({:ack_deadline, deadline}, %{ack_deadline: deadline} = state) do
+    unanswered = Map.get(state, :unanswered_subscribes, 0)
+
+    notify(
+      state,
+      Notice.new(:degraded, :gemini,
+        message:
+          "#{unanswered} subscribe request(s) unanswered after #{@ack_timeout_ms}ms while " <>
+            "the connection still answers pings — closing the connection and reconnecting",
+        details: %{reason: :subscribe_unanswered, unanswered: unanswered}
+      )
+    )
+
+    {:close, %{state | ack_deadline: nil, unanswered_subscribes: 0}}
+  end
+
   def handle_info(_message, state), do: {:ok, state}
+
+  # Any answer counts, a refusal included: the question is whether the connection is being
+  # served, and a non-200 is already reported on its own by `handle_message/2`.
+  defp note_answer(%{"id" => _id, "status" => _status}, state) do
+    case Map.get(state, :unanswered_subscribes, 0) - 1 do
+      remaining when remaining > 0 -> Map.put(state, :unanswered_subscribes, remaining)
+      _none -> Map.merge(state, %{unanswered_subscribes: 0, ack_deadline: nil})
+    end
+  end
+
+  defp note_answer(_message, state), do: state
 
   @impl true
   def handle_pong(_frame, state), do: {:ok, %{state | last_heard_at: now_ms()}}
@@ -705,7 +792,7 @@ defmodule DpExchange.Gemini.Socket do
     Telemetry.link_event(:gemini, :frame, byte_size(raw))
 
     case Jason.decode(raw) do
-      {:ok, message} -> handle_message(message, state)
+      {:ok, message} -> handle_message(message, note_answer(message, state))
       {:error, _reason} -> {:ok, state}
     end
   end

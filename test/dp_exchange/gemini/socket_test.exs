@@ -339,6 +339,75 @@ defmodule DpExchange.Gemini.SocketTest do
     end
   end
 
+  describe "an unanswered subscribe — a connection that pongs but is not serving" do
+    # See the moduledoc's "A connection that answers pings but not subscribes is not
+    # serving". 2026-10-02: after a `1012 "Server shutting down"` the reconnected socket
+    # answered pings for three minutes while delivering nothing.
+    @ack %{"id" => 1, "status" => 200}
+
+    defp awaiting(state) do
+      {:ok, state} = Socket.handle_info(:awaiting_ack, state)
+      state
+    end
+
+    test "a deadline that finds a request unanswered says so and closes, so it reconnects" do
+      state = awaiting(state())
+      deadline = state.ack_deadline
+
+      assert {:close, closed} = Socket.handle_info({:ack_deadline, deadline}, state)
+      assert closed.ack_deadline == nil
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{
+                         kind: :degraded,
+                         details: %{reason: :subscribe_unanswered, unanswered: 1}
+                       }}
+    end
+
+    test "an answer disarms the deadline, so it does nothing when it fires" do
+      armed = awaiting(state())
+      deadline = armed.ack_deadline
+
+      {:ok, answered} = Socket.handle_frame({:text, Jason.encode!(@ack)}, armed)
+      assert answered.ack_deadline == nil
+
+      assert {:ok, _state} = Socket.handle_info({:ack_deadline, deadline}, answered)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+    end
+
+    test "a refusal is an answer too — it is reported as a refusal, not as silence" do
+      armed = awaiting(state())
+
+      {:ok, answered} =
+        Socket.handle_frame({:text, Jason.encode!(%{"id" => 1, "status" => 400})}, armed)
+
+      assert answered.ack_deadline == nil
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :refusal}}
+    end
+
+    test "two requests out and one answered keeps the deadline armed" do
+      armed = state() |> awaiting() |> awaiting()
+      deadline = armed.ack_deadline
+
+      {:ok, half} = Socket.handle_frame({:text, Jason.encode!(@ack)}, armed)
+      assert half.ack_deadline == deadline
+
+      assert {:close, _state} = Socket.handle_info({:ack_deadline, deadline}, half)
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{details: %{reason: :subscribe_unanswered, unanswered: 1}}}
+    end
+
+    test "a reconnect forgets what the old connection was owed" do
+      armed = awaiting(state())
+      {:ok, reconnected} = Socket.handle_connect(:conn, armed)
+
+      assert reconnected.unanswered_subscribes == 0
+      assert reconnected.ack_deadline == nil
+      assert {:ok, _state} = Socket.handle_info({:ack_deadline, armed.ack_deadline}, reconnected)
+    end
+  end
+
   describe "connection lifecycle" do
     test "only a RE-connect is reported to the feed, so it can resubscribe at once" do
       # The first connect is followed by `Feed`'s own subscribe; reporting it too would
