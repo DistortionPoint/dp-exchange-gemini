@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.96] - 2026-10-03
+
 ### Fixed
 
 - **The fake's history window is counted back from now, as the real adapter's is.** It
