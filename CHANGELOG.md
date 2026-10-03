@@ -20,6 +20,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The fake's history window is counted back from now, as the real adapter's is.** It
+  was counted back from a fixed date. So the fake's `{:range_unavailable, …}` boundary
+  drifted a day per day against the real one, and a `start:` the real adapter refuses came
+  back as candles from the fake once the calendar moved far enough. `FakeParityTest`
+  caught it on 2026-10-03.
+
 ## [0.2.95] - 2026-10-02
 
 ### Fixed

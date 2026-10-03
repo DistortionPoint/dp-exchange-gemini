@@ -897,8 +897,13 @@ defmodule DpExchange.Gemini.Fake do
     earliest(timeframe, width)
   end
 
+  # Counted back from NOW, as `Rest.range_within_window/2` counts it, never from `@at`. The
+  # venue's window is a fixed number of bars before the present, so anchoring it on a
+  # fixed date made the fake's boundary drift a day per day against the real one. A start
+  # the real adapter refused came back as candles here once the calendar passed far
+  # enough, which `FakeParityTest` caught on 2026-10-03.
   defp earliest(timeframe, width) do
-    DateTime.add(@at, -Map.fetch!(@window_bars, timeframe) * width, :second)
+    DateTime.add(DateTime.utc_now(), -Map.fetch!(@window_bars, timeframe) * width, :second)
   end
 
   # --- Declared but not yet implemented -----------------------------------

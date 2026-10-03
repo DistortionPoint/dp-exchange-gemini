@@ -1094,10 +1094,19 @@ defmodule DpExchange.Gemini.FeedTest do
       assert Feed.coverage_by_kind(feed).trades == %{"BTC-USD" => :stream}
 
       Process.exit(socket, :kill)
-      # Synchronise on the feed having processed the linked EXIT.
-      _settled = Feed.coverage(feed)
 
-      assert Feed.coverage_by_kind(feed).trades == %{}
+      # Polled, not synchronised on one `Feed.coverage/1` call. The linked EXIT reaches the
+      # feed from the dying socket while the call comes from this process, and Erlang does
+      # not order signals from different senders. The single call used to win that race
+      # under full-suite load (2026-10-03), reading coverage before the EXIT had landed.
+      assert trades_coverage_clears?(feed, 50)
+    end
+
+    defp trades_coverage_clears?(_feed, 0), do: false
+
+    defp trades_coverage_clears?(feed, tries) do
+      Feed.coverage_by_kind(feed).trades == %{} or
+        (Process.sleep(20) && trades_coverage_clears?(feed, tries - 1))
     end
 
     test "an unknown kind in :channels raises at start_link, loudly, rather than starting " <>
