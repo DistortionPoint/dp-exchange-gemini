@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.98] - 2026-10-08
+
 ### Added
 
 - **`list_instruments/1`: each symbol's trading status** (issue #4). `/v1/symbols` keeps
