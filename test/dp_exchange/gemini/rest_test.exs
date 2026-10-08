@@ -501,6 +501,81 @@ defmodule DpExchange.Gemini.RestTest do
     end
   end
 
+  describe "list_instruments/1 — status from each symbol's details (issue #4)" do
+    # `/v1/symbols` keeps closed symbols; measured 2026-10-08, `efilfil` is listed there and in
+    # `/v1/pricefeed`, and only its details say `"status":"closed"`.
+    @details %{
+      "btcusd" => %{"base_currency" => "BTC", "quote_currency" => "USD", "status" => "open"},
+      "efilfil" => %{"base_currency" => "EFIL", "quote_currency" => "FIL", "status" => "closed"},
+      "ethusd" => %{
+        "base_currency" => "ETH",
+        "quote_currency" => "USD",
+        "status" => "cancel_only"
+      },
+      "solusd" => %{"base_currency" => "SOL", "quote_currency" => "USD", "status" => "limit_only"}
+    }
+
+    defp catalogue(me) do
+      fn conn ->
+        send(me, {:path, conn.request_path})
+
+        case conn.request_path do
+          "/v1/symbols" ->
+            Req.Test.json(conn, ["btcusd", "efilfil", "ethusd", "solusd", "btcgusdperp"])
+
+          "/v1/symbols/details/" <> native ->
+            case Map.fetch(@details, native) do
+              {:ok, body} ->
+                Req.Test.json(
+                  conn,
+                  Map.merge(body, %{"symbol" => native, "product_type" => "spot"})
+                )
+
+              :error ->
+                Req.Test.json(%{conn | status: 400}, %{"reason" => "InvalidSymbol"})
+            end
+        end
+      end
+    end
+
+    test "every non-perpetual symbol, with the venue's own status mapped honestly" do
+      assert {:ok, instruments} =
+               Rest.list_instruments(plug: catalogue(self()), retry_attempts: 1)
+
+      by_symbol = Map.new(instruments, &{&1.symbol, &1})
+
+      assert by_symbol["BTC-USD"].status == :tradable
+      assert by_symbol["EFIL-FIL"].status == :delisted
+      assert by_symbol["ETH-USD"].status == :unknown
+      assert by_symbol["SOL-USD"].status == :tradable
+      assert by_symbol["EFIL-FIL"].base == "EFIL" and by_symbol["EFIL-FIL"].quote == "FIL"
+      assert by_symbol["BTC-USD"].instrument == :spot
+      refute Enum.any?(instruments, &String.contains?(&1.symbol, "PERP"))
+    end
+
+    test "symbols: details only the pairs asked for — the cheap call" do
+      assert {:ok, [instrument]} =
+               Rest.list_instruments(
+                 symbols: ["EFIL-FIL"],
+                 plug: catalogue(self()),
+                 retry_attempts: 1
+               )
+
+      assert instrument.status == :delisted
+      assert_received {:path, "/v1/symbols/details/efilfil"}
+      refute_received {:path, "/v1/symbols"}
+    end
+
+    test "a symbol whose details cannot be read fails the whole call — no silent hole" do
+      assert {:error, {:instrument_detail_failed, "NOPE-USD", _reason}} =
+               Rest.list_instruments(
+                 symbols: ["BTC-USD", "NOPE-USD"],
+                 plug: catalogue(self()),
+                 retry_attempts: 1
+               )
+    end
+  end
+
   describe "quantization/1" do
     test "keeps the price and quantity increments apart" do
       # `tick_size` is the BASE increment and `quote_increment` the PRICE increment. The

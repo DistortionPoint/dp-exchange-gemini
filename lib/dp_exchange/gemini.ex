@@ -190,11 +190,12 @@ defmodule DpExchange.Gemini do
   # Not ported yet. **The venue serves these**; this package does not implement them.
   @not_ported [
     {:get_conversion, 2},
-    {:list_portfolios, 1},
-    # 346 symbols, and the venue offers no bulk detail endpoint — one request per symbol
-    # is not a listing, it is a rate-limit incident. `get_symbols/1` gives the catalogue
-    # and `quantization/1` gives one symbol's detail on demand.
-    {:list_instruments, 1}
+    {:list_portfolios, 1}
+    # `list_instruments/1` left this list on 2026-10-08 (issue #4). `/v1/symbols` keeps
+    # closed symbols and only per-symbol details carry the status, so without it a consumer
+    # could not tell a closed pair from a live one. The cost that kept it here, one request
+    # per symbol, is now paced through the blocking limiter and avoidable with `symbols:`. See
+    # `Rest.list_instruments/1`.
   ]
 
   @unsupported @venue_does_not_serve ++ @not_ported
@@ -412,7 +413,7 @@ defmodule DpExchange.Gemini do
   def get_market_overview(opts \\ []), do: Rest.get_market_overview(with_limiter(opts))
 
   @impl true
-  def list_instruments(_opts), do: Venue.not_supported()
+  def list_instruments(opts \\ []), do: Rest.list_instruments(with_limiter(opts))
 
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()

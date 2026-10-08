@@ -20,6 +20,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`list_instruments/1`: each symbol's trading status** (issue #4). `/v1/symbols` keeps
+  closed symbols, and so does `/v1/pricefeed`, which lists all 347. On 2026-10-08 `efilfil`
+  was in both, and only its details said `"status":"closed"`. So `get_symbols/1` handed a
+  consumer EFIL-FIL as a live pair for two months. Status comes from
+  `/v1/symbols/details/{symbol}`: `open` → `:tradable`, `closed` → `:delisted`,
+  `post_only`/`limit_only` → `:tradable`, `cancel_only` and anything unrecognised →
+  `:unknown`. That is one request per symbol, because the venue has no bulk endpoint, so
+  each request waits for its limiter slot, and `symbols:` details only the pairs you name.
+  A symbol whose details cannot be read fails the whole call. It left `@not_ported`. The
+  fake implements it.
+
 ## [0.2.97] - 2026-10-05
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

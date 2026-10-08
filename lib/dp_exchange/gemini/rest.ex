@@ -335,6 +335,9 @@ defmodule DpExchange.Gemini.Rest do
   spot pairs, but this package declares `supported_instrument_types: [:spot]`, and a
   perpetual has no canonical `BASE-QUOTE` form — emitting one would invent a spot pair
   that does not exist.
+
+  **Closed symbols are included**: `/v1/symbols` keeps them, and nothing here says which
+  pairs trade (issue #4). For status, use `list_instruments/1`.
   """
   @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def get_symbols(opts) do
@@ -403,6 +406,78 @@ defmodule DpExchange.Gemini.Rest do
        }}
     end
   end
+
+  @doc """
+  Each symbol's base, quote, instrument type and **trading status**, from
+  `/v1/symbols/details/{symbol}`.
+
+  `get_symbols/1` reads `/v1/symbols`, which keeps **closed** symbols (issue #4). Measured
+  2026-10-07/08: `efilfil` is in `/v1/symbols` and in `/v1/pricefeed` (all 347 symbols are),
+  and only its details say `"status":"closed"`. A consumer building a catalogue from
+  `get_symbols/1` carried EFIL-FIL as a live pair for two months.
+
+  **One request per symbol: the venue has no bulk details endpoint.** Pass `symbols:` to
+  detail only the pairs you are deciding about. That is the cheap call, and the right one for
+  a review queue. Without it this details every non-perpetual symbol `/v1/symbols` lists,
+  about 347 requests. Each waits for its slot in the rate limiter
+  (`rate_limit_blocking: true` unless you say otherwise), so the venue's ceiling is never
+  exceeded, but the full listing spends minutes of the public budget. Call it rarely: the
+  catalogue changes slowly.
+
+  Status: `open` → `:tradable`; `closed` → `:delisted`; `post_only`/`limit_only` →
+  `:tradable` (it trades, with restrictions); `cancel_only` and anything unrecognised →
+  `:unknown`. A symbol whose details cannot be read fails the whole call. A catalogue with a
+  silent hole in it is the outcome this family refuses.
+  """
+  @spec list_instruments(keyword()) ::
+          {:ok, [DpExchange.Core.Instrument.t()]} | {:error, term()} | {:refused, term()}
+  def list_instruments(opts) do
+    opts = Keyword.put_new(opts, :rate_limit_blocking, true)
+
+    with {:ok, symbols} <- instrument_symbols(opts) do
+      Enum.reduce_while(symbols, {:ok, []}, fn symbol, {:ok, acc} ->
+        case instrument(symbol, opts) do
+          {:ok, instrument} -> {:cont, {:ok, [instrument | acc]}}
+          failure -> {:halt, {:error, {:instrument_detail_failed, symbol, failure}}}
+        end
+      end)
+      |> case do
+        {:ok, instruments} -> {:ok, Enum.reverse(instruments)}
+        error -> error
+      end
+    end
+  end
+
+  defp instrument_symbols(opts) do
+    case Keyword.get(opts, :symbols) do
+      nil -> get_symbols(opts)
+      symbols when is_list(symbols) -> {:ok, Enum.uniq(symbols)}
+    end
+  end
+
+  defp instrument(symbol, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+
+    with {:ok, raw} <- get_body("/v1/symbols/details/#{native}", opts),
+         {:ok, body} <- object(raw) do
+      {:ok,
+       DpExchange.Core.Instrument.new(
+         symbol: SymbolFormat.to_canonical_symbol(native),
+         base: body["base_currency"],
+         quote: body["quote_currency"],
+         instrument: DpExchange.Core.Instrument.instrument_from(body["product_type"]),
+         status: book_status(body["status"])
+       )}
+    end
+  end
+
+  # The venue's book statuses (`rest.yaml`: "`open`, `closed`, `cancel_only`, `post_only`,
+  # `limit_only`").
+  defp book_status("open"), do: :tradable
+  defp book_status("post_only"), do: :tradable
+  defp book_status("limit_only"), do: :tradable
+  defp book_status("closed"), do: :delisted
+  defp book_status(_cancel_only_or_unrecognised), do: :unknown
 
   # --- order book ---------------------------------------------------------
 

@@ -588,7 +588,7 @@ history, staking, positions, clearing and account administration all work once y
 this package credentials and — where it cannot be inferred — the scheme: it **signs**,
 it does not **authenticate**. What genuinely returns `{:error, :not_supported}` is the
 venue's own absence (options, watchlists, financials — see `venue_does_not_serve/0`) and
-the small remainder of this package's own backlog (`list_instruments/1`,
+the small remainder of this package's own backlog (
 `list_portfolios/1`, `get_conversion/2`), not the authenticated surface as a whole. The
 demo environment is what makes exercising any of this safely, before you point it at a
 real account.
@@ -820,10 +820,29 @@ authentication — you do", above: balances, orders, fees, transfers, trade hist
 rest of the account surface are implemented and signed on request; only obtaining,
 storing, refreshing or choosing between credentials is the host's job.
 
-`list_instruments/1` is also `:unsupported`, for a different reason: 346 symbols and no
-bulk detail endpoint means one request per symbol, which is not a listing, it is a
-rate-limit incident. Use `get_symbols/1` for the catalogue and `quantization/1` for one
-symbol's increments.
+## `get_symbols/1` includes closed pairs; `list_instruments/1` says which are trading
+
+`/v1/symbols` keeps **closed** symbols, and so does `/v1/pricefeed`. On 2026-10-08,
+`efilfil` was in both, and only its details said `"status":"closed"`. So `get_symbols/1`
+can hand you a pair the venue does not trade, and nothing in it says so.
+
+`list_instruments/1` reads each symbol's details and answers `Core.Instrument`s with a
+`status`: `open` → `:tradable`; `closed` → `:delisted`; `post_only`/`limit_only` →
+`:tradable`; `cancel_only` and anything unrecognised → `:unknown`. **It costs one request
+per symbol**, because the venue has no bulk details endpoint:
+
+```elixir
+# Cheap: just the pairs you are deciding about.
+{:ok, instruments} = DpExchange.Gemini.list_instruments(symbols: ["EFIL-FIL", "BTC-USD"])
+
+# The whole catalogue: ~347 paced requests. Run it rarely, not on a poll.
+{:ok, all} = DpExchange.Gemini.list_instruments()
+```
+
+Each request waits for its rate-limiter slot, so the venue's ceiling holds, but the full
+listing spends minutes of the public budget. A symbol whose details cannot be read fails the
+whole call (`{:error, {:instrument_detail_failed, symbol, reason}}`), so the answer never has
+a silent hole in it.
 
 ## Two session behaviours this package deliberately leaves to you
 

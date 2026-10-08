@@ -23,7 +23,7 @@ defmodule DpExchange.Gemini.FakeTest do
     test "an unsupported endpoint errors rather than returning an empty success" do
       # `{:ok, []}` for something unsupported is the silent failure: the caller gets a
       # plausible answer and never learns the question was not answered.
-      assert Fake.list_instruments([]) == {:error, :not_supported}
+      assert Fake.list_portfolios([]) == {:error, :not_supported}
       assert Fake.get_rate_limit_status(%{}, []) == {:error, :not_supported}
     end
 

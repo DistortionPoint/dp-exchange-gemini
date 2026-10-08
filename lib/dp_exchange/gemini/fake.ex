@@ -393,8 +393,35 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  # `Rest.list_instruments/1`'s shape: every listed symbol open, honouring `symbols:`, and
+  # an unlisted one failing the whole call with the venue's own `InvalidSymbol` refusal
+  # inside, as the real call does.
   @impl true
-  def list_instruments(_opts), do: Venue.not_supported()
+  def list_instruments(opts \\ []) do
+    with_injection(fn ->
+      symbols = Keyword.get(opts, :symbols) || @symbols
+
+      case Enum.find(symbols, &(&1 not in @symbols)) do
+        nil ->
+          {:ok, Enum.map(Enum.uniq(symbols), &fake_instrument/1)}
+
+        unlisted ->
+          {:error, {:instrument_detail_failed, unlisted, {:refused, :invalid_symbol}}}
+      end
+    end)
+  end
+
+  defp fake_instrument(symbol) do
+    [base, quote_asset] = String.split(symbol, "-")
+
+    DpExchange.Core.Instrument.new(
+      symbol: symbol,
+      base: base,
+      quote: quote_asset,
+      instrument: :spot,
+      status: :tradable
+    )
+  end
 
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()

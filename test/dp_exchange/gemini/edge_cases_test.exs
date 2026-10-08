@@ -340,9 +340,9 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
     end
 
     test "the two endpoints that really are unsupported say so" do
-      # Neither is about authentication: one is a listing that would cost 346 requests,
+      # Neither is about authentication: one is a portfolio listing not ported yet,
       # the other a header set the venue does not publish.
-      assert Fake.list_instruments([]) == {:error, :not_supported}
+      assert Fake.list_portfolios([]) == {:error, :not_supported}
 
       assert Fake.get_rate_limit_status(%{api_key: "k", api_secret: "s"}, []) ==
                {:error, :not_supported}
