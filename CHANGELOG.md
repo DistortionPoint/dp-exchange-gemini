@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.101] - 2026-10-10
+
 ### Fixed
 
 - **An unfilled order reported `average_price` as 0.** The venue states `"0.00"`
