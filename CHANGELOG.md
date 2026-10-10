@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.107] - 2026-10-10
+
 ### Fixed
 
 - **Documentation contradicted the code in several places, found by an audit against the
