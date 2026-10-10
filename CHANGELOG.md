@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.104] - 2026-10-10
+
 ### Fixed
 
 - **`Private` treated a 404 as a transient error.** `post/4`, `signed_get/3` and
