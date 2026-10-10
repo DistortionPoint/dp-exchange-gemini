@@ -935,6 +935,22 @@ defmodule DpExchange.Gemini.Socket do
     end
   end
 
+  # A `depthUpdate` with no `U`. Its sequence range cannot be checked, so it cannot be applied
+  # safely, and it is not a bookTicker (the guard on that clause refuses list sides). It used
+  # to fall to the catch-all and vanish: the book was then missing a diff with no notice, and
+  # the next frame showed no gap against a sequence this frame never advanced. Same outcome as
+  # a gap, same notice: discard and resubscribe.
+  defp handle_message(%{"e" => "depthUpdate"} = message, state) do
+    notify(
+      state,
+      Notice.new(:degraded, :gemini,
+        details: %{reason: "undecodable depth update", symbol: message["s"]}
+      )
+    )
+
+    {:ok, state}
+  end
+
   # A partial-depth snapshot: absolute levels and a `lastUpdateId`, which is a book — but
   # `OrderBookSnapshot` (websocket.yaml:1217-1233) carries no `s`, so this frame cannot name
   # its own symbol. Attributed only from `partial_depth_claims`, which `subscribe/3` builds:

@@ -251,6 +251,22 @@ defmodule DpExchange.Gemini.AdminTest do
       refute tokens["refresh_token"] == "old-refresh"
     end
 
+    test "a refresh is sent once: the token is single-use, so a retry would spend the old one" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :attempt)
+        Plug.Conn.resp(conn, 503, "unavailable")
+      end
+
+      # No `:retry_attempts` passed: the default would be three attempts.
+      assert {:error, _reason} =
+               Private.refresh_access_token("client-1", "old-refresh", plug: plug)
+
+      assert_receive :attempt
+      refute_receive :attempt, 200
+    end
+
     test "a confidential client's secret is sent when given" do
       me = self()
 

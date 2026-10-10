@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A market order the account holds was reported as a limit order.** `Private.to_order/1`
+  recovered the type from `stop-limit` and the execution options only, so the venue's own
+  `"type": "market buy"` (`rest.yaml:1259`), and `market sell` / `exchange market` from the
+  type enums, fell through to `:limit`. They now map to `:market`.
+- **`get_transfers/2` and `list_custody_fees/2` answered the venue's first page as the whole
+  history.** Both endpoints page at 10 by default (50 at most) with no cursor, so a ledger of
+  more than 10 rows was silently cut short. With no `:limit_transfers` / `:limit` they now ask
+  for 50 and refuse a full page with `{:error, {:history_truncated, 50}}`, as `get_orders/2`
+  and `get_trade_history/2` already do for 500. Pass a limit to take one page on purpose.
+- **`refresh_access_token/3` was retried by `Core.HttpClient`.** The refresh token is
+  single-use, so a refresh that timed out after the venue rotated it, retried with the old
+  token, came back `invalid_grant` and the new pair was lost with the response. It is sent
+  once now.
+- **A `depthUpdate` frame with no `U` vanished.** It could not be sequence-checked and was no
+  longer misread as a bookTicker, but fell to the catch-all with no notice, leaving the
+  consumer's book missing a diff. It raises the `"undecodable depth update"` `:degraded`
+  notice, as a gap does.
+
 ## [0.2.104] - 2026-10-10
 
 ### Fixed

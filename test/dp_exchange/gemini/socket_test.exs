@@ -690,6 +690,10 @@ defmodule DpExchange.Gemini.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
       refute_received {:dp_exchange, :gemini, %TopOfBook{}}
+
+      # ...and it is not dropped in silence either: the book is missing this diff.
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :degraded, details: %{reason: "undecodable depth update"}}}
     end
 
     test "a bookTicker level that is present and unreadable is not published as nil" do

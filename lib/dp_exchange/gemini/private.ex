@@ -148,6 +148,8 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  @transfers_page_max 50
+
   @doc """
   Transfers in and out of the account.
 
@@ -159,10 +161,21 @@ defmodule DpExchange.Gemini.Private do
   was a path swap and nothing more. v2 additionally accepts `network`, `account` and
   `show_completed_deposit_advances`, and each returned transfer now carries a `network`
   field naming the chain. None of that is surfaced here yet; the rows are passed through.
+
+  **A full page with no `:limit_transfers` is refused, not returned as the whole history.**
+  The venue's page is 10 rows by default and 50 at most (`rest.yaml:3267`), and it carries no
+  cursor, so the first 10 transfers were answered as the account's complete ledger while every
+  later one was dropped. With no `:limit_transfers` this asks for the maximum, 50, and a page
+  that full is `{:error, {:history_truncated, 50}}` — narrow with `:timestamp`, or pass
+  `:limit_transfers` to take exactly one page on purpose. The same rule `get_orders/2` and
+  `get_trade_history/2` apply.
   """
   @spec get_transfers(map(), keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transfers(credentials, opts) do
-    params = take_params(opts, [:limit_transfers, :currency, :timestamp])
+    params =
+      opts
+      |> take_params([:limit_transfers, :currency, :timestamp])
+      |> Map.put_new("limit_transfers", @transfers_page_max)
 
     # `Rest.list/1`, not `List.wrap/1`. The vendor's OpenAPI document gives this endpoint's
     # 200 as `type: array` of `V2Transfer` — never an object — so an object here is not a
@@ -170,9 +183,16 @@ defmodule DpExchange.Gemini.Private do
     # `dp_exchange_webull`'s `rows/1` had. `list_networks/2` keeps its `List.wrap/1` because
     # ITS documented 200 is a single object (`NetworkAssets`), which is one row honestly.
     with {:ok, body, _headers} <- post("/v2/transfers", params, credentials, opts),
-         {:ok, rows} <- Rest.list(body) do
+         {:ok, rows} <- Rest.list(body),
+         :ok <- transfers_complete(rows, Keyword.get(opts, :limit_transfers)) do
       {:ok, rows}
     end
+  end
+
+  defp transfers_complete(rows, requested_limit) do
+    if requested_limit == nil and length(rows) >= @transfers_page_max,
+      do: {:error, {:history_truncated, @transfers_page_max}},
+      else: :ok
   end
 
   @doc """
@@ -788,6 +808,16 @@ defmodule DpExchange.Gemini.Private do
   # either direction.
   defp order_type_of(%{"type" => type}) when type in ["exchange stop limit", "stop-limit"],
     do: :stop_limit
+
+  # **A market order is reported as one.** This package refuses to PLACE a market order, but
+  # the account can still hold them: the venue's own `/v1/order/status` example
+  # (`rest.yaml:1259`) returns `"type": "market buy"`, and the `type` enums list
+  # `exchange market`. Both fell through to the catch-all below and came back as `:limit`,
+  # so a history read showed an order that took whatever price was there as a limit the
+  # caller had chosen, with every other field real.
+  @market_types ["market buy", "market sell", "exchange market"]
+
+  defp order_type_of(%{"type" => type}) when type in @market_types, do: :market
 
   defp order_type_of(%{"options" => ["maker-or-cancel" | _rest]}), do: :post_only
   defp order_type_of(%{"options" => ["immediate-or-cancel" | _rest]}), do: :ioc
@@ -2244,6 +2274,12 @@ defmodule DpExchange.Gemini.Private do
   with no custody balance and an account billed nothing this period return the same thing.
 
   `opts[:since]` and `opts[:limit]` page it, under the venue's own parameter names.
+
+  **A full page with no `:limit` is refused, not returned as every fee.** The venue's page is
+  10 by default and 50 at most (`rest.yaml:3446`) with no cursor, so the first 10 charges were
+  answered as the whole history. With no `:limit` this asks for 50, and a page that full is
+  `{:error, {:history_truncated, 50}}`: narrow with `:since`, or pass `:limit` to take exactly
+  one page on purpose. See `get_transfers/2`.
   """
   @spec list_custody_fees(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -2251,10 +2287,12 @@ defmodule DpExchange.Gemini.Private do
     params =
       %{}
       |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
-      |> put_present("limit_transfers", Keyword.get(opts, :limit))
+      |> put_present("limit_transfers", Keyword.get(opts, :limit) || @transfers_page_max)
 
-    with {:ok, body, _headers} <- post("/v1/custodyaccountfees", params, credentials, opts) do
-      flattened_rows(body)
+    with {:ok, body, _headers} <- post("/v1/custodyaccountfees", params, credentials, opts),
+         {:ok, rows} <- flattened_rows(body),
+         :ok <- transfers_complete(rows, Keyword.get(opts, :limit)) do
+      {:ok, rows}
     end
   end
 
@@ -3352,7 +3390,15 @@ defmodule DpExchange.Gemini.Private do
     url = Config.opt(opts, :auth_url, "https://exchange.gemini.com") <> "/auth/token"
     headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
 
-    case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do
+    # Sent once. The refresh token is single-use (see above): a refresh that timed out after
+    # the venue rotated the token, retried with the OLD one, comes back `invalid_grant` and
+    # the new pair is lost with the response, ending the session over a transport blip.
+    # `Core.HttpClient` retries timeouts and 5xx by default, so the retry is turned off here
+    # and the failure is the caller's to handle.
+    http_opts = opts |> Keyword.put(:retry_attempts, 1) |> request_opts()
+    form_body = URI.encode_query(form)
+
+    case HttpClient.request(:post, url, headers, form_body, http_opts) do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         decoded_body(body)
 

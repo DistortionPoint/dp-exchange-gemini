@@ -688,7 +688,10 @@ from the parent entry; the transaction itself carries none.
 
 `get_transfers/2` is one exception: its filters (`currency:`, `timestamp:`,
 `limit_transfers:`) are the venue's own field names and units unchanged, not translated —
-see `Private.get_transfers/2`'s moduledoc.
+see `Private.get_transfers/2`'s moduledoc. The venue pages it at 10 by default and 50 at
+most, with no cursor, so with no `limit_transfers:` this asks for 50 and a full page is
+`{:error, {:history_truncated, 50}}` — narrow with `timestamp:`, or pass `limit_transfers:`
+to take one page on purpose. `list_custody_fees/1` follows the same rule with `limit:`.
 
 `get_transactions/1` is the other. `POST /v1/transactions` names its window parameter
 `timestamp_nanos` and takes **nanoseconds**, not the millisecond unit every other
@@ -976,6 +979,11 @@ separated only by `grant_type`.
 
 **The response carries a new refresh token and the old one stops working.** Store both. A
 caller that keeps only the access token has a session that ends at the next refresh.
+
+The refresh is sent **once**, never retried by this package: a retry after a timeout would
+present the already-rotated token and lose the new pair. If it returns `{:error, _}`, the
+outcome is unknown — try the refresh token you hold, and if the venue refuses it, the
+session needs a new consent.
 
 `revoke_access_token/1` needs an OAuth token and refuses an API key: an API-key-signed call
 there would revoke nothing and come back shaped like success.

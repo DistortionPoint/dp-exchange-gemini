@@ -722,6 +722,17 @@ defmodule DpExchange.Gemini.PrivateTest do
       end
     end
 
+    test "a market order the account holds is reported as :market, not a limit" do
+      # The vendor's own /v1/order/status example carries `"type": "market buy"`
+      # (rest.yaml:1259); the type enums also list "exchange market".
+      for type <- ["market buy", "market sell", "exchange market"] do
+        body = @order |> Map.put("type", type) |> Map.delete("price")
+
+        assert {:ok, %Order{order_type: :market, price: nil}} =
+                 Private.get_order(@credentials, "1", plug: responding(body), retry_attempts: 0)
+      end
+    end
+
     test "a stop-limit is reported as one" do
       body = Map.put(@order, "type", "exchange stop limit")
 
@@ -801,6 +812,32 @@ defmodule DpExchange.Gemini.PrivateTest do
                Private.get_transfers(@credentials,
                  currency: "BTC",
                  plug: plug,
+                 retry_attempts: 0
+               )
+    end
+
+    test "get_transfers asks for the venue's maximum page and refuses a full one" do
+      # The venue's page is 10 by default, 50 at most, with no cursor: a full page cannot be
+      # told from the whole history, so it is refused rather than answered as complete.
+      rows = for n <- 1..50, do: %{"eid" => n, "type" => "Deposit"}
+
+      assert {:error, {:history_truncated, 50}} =
+               Private.get_transfers(@credentials,
+                 plug: capturing(rows, self()),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload}
+      assert payload["limit_transfers"] == 50
+    end
+
+    test "get_transfers returns a full page the caller asked for on purpose" do
+      rows = for n <- 1..50, do: %{"eid" => n, "type" => "Deposit"}
+
+      assert {:ok, ^rows} =
+               Private.get_transfers(@credentials,
+                 limit_transfers: 50,
+                 plug: responding(rows),
                  retry_attempts: 0
                )
     end

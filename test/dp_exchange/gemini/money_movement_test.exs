@@ -683,6 +683,29 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert payload["limit_transfers"] == 25
       assert payload["timestamp"] == 1_787_936_401_000
     end
+
+    test "a full page with no :limit is refused, since the venue gives no cursor" do
+      # Default page is 10, maximum 50 (rest.yaml:3446). A full page cannot be told from the
+      # whole history, so it is not answered as one.
+      rows = for n <- 1..50, do: %{"currency" => "BTC", "amount" => "0.0001", "id" => n}
+      me = self()
+
+      assert {:error, {:history_truncated, 50}} =
+               Private.list_custody_fees(@credentials,
+                 plug: capturing(rows, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, _path}
+      assert payload["limit_transfers"] == 50
+
+      assert {:ok, ^rows} =
+               Private.list_custody_fees(@credentials,
+                 limit: 50,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "a write the venue cannot deduplicate is sent exactly once" do
