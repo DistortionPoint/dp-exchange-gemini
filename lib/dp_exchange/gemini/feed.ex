@@ -218,7 +218,7 @@ defmodule DpExchange.Gemini.Feed do
 
   alias DpExchange.Core.{Capabilities, Config, Fanout, Notice}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
-  alias DpExchange.Gemini.Socket
+  alias DpExchange.Gemini.{Socket, SymbolFormat}
 
   require Logger
 
@@ -253,16 +253,36 @@ defmodule DpExchange.Gemini.Feed do
 
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts) do
-    GenServer.call(feed, {:subscribe, symbols, Config.opt(opts, :to, self())}, @call_timeout)
+    GenServer.call(
+      feed,
+      {:subscribe, canonical(symbols), Config.opt(opts, :to, self())},
+      @call_timeout
+    )
   end
 
   @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
   def unsubscribe(feed, symbols),
-    do: GenServer.call(feed, {:unsubscribe, symbols}, @call_timeout)
+    do: GenServer.call(feed, {:unsubscribe, canonical(symbols)}, @call_timeout)
 
   @spec update_symbols(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
   def update_symbols(feed, symbols),
-    do: GenServer.call(feed, {:update_symbols, symbols}, @call_timeout)
+    do: GenServer.call(feed, {:update_symbols, canonical(symbols)}, @call_timeout)
+
+  # **Every symbol is held in its canonical spelling.** Frames are matched by the canonical
+  # symbol they decode to, and `wanted` held whatever the caller wrote. So
+  # `subscribe(["BTCUSD"])` subscribed `btcusd` on the wire and then dropped every frame for
+  # it as unwanted, because `"BTC-USD"` was not in the set.
+  defp canonical(symbols) when is_list(symbols) do
+    Enum.map(symbols, fn
+      symbol when is_binary(symbol) ->
+        symbol |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()
+
+      other ->
+        other
+    end)
+  end
+
+  defp canonical(other), do: other
 
   # NOTE — reads carry `@call_timeout` explicitly, exactly as the writes above do.
   #

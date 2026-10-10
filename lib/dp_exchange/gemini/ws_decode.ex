@@ -123,19 +123,39 @@ defmodule DpExchange.Gemini.WsDecode do
   last trade price directly". If that is the production shape, this channel was emitting
   nothing at all.
   """
-  @spec to_top_of_book(map(), String.t(), DateTime.t()) :: {:ok, TopOfBook.t()}
+  #
+  # **A price or size that is present and unreadable refuses the book.** `decimal/1` turned
+  # it into `nil`, and `TopOfBook` reads a `nil` level as "no resting order", which is a claim
+  # about the book the venue never made. An ABSENT field is still `nil`, as the type defines.
+  @spec to_top_of_book(map(), String.t(), DateTime.t()) ::
+          {:ok, TopOfBook.t()} | {:error, :unexpected_frame_shape}
   def to_top_of_book(frame, symbol, observed_at) do
-    {:ok,
-     %TopOfBook{
-       symbol: symbol,
-       bid: decimal(frame["b"]),
-       ask: decimal(frame["a"]),
-       bid_size: decimal(frame["B"]),
-       ask_size: decimal(frame["A"]),
-       venue_time: venue_time_or_nil(frame["E"]),
-       observed_at: observed_at,
-       provider: :gemini
-     }}
+    with {:ok, bid} <- stated_decimal(frame["b"]),
+         {:ok, ask} <- stated_decimal(frame["a"]),
+         {:ok, bid_size} <- stated_decimal(frame["B"]),
+         {:ok, ask_size} <- stated_decimal(frame["A"]) do
+      {:ok,
+       %TopOfBook{
+         symbol: symbol,
+         bid: bid,
+         ask: ask,
+         bid_size: bid_size,
+         ask_size: ask_size,
+         venue_time: venue_time_or_nil(frame["E"]),
+         observed_at: observed_at,
+         provider: :gemini
+       }}
+    end
+  end
+
+  # `""` is the venue's own empty side (reproduced live 2026-09-04), the same as absent.
+  defp stated_decimal(empty) when empty in [nil, ""], do: {:ok, nil}
+
+  defp stated_decimal(value) do
+    case decimal(value) do
+      nil -> {:error, :unexpected_frame_shape}
+      parsed -> {:ok, parsed}
+    end
   end
 
   # Absent and present-but-unreadable answer the same way here, deliberately: both mean this
@@ -345,9 +365,22 @@ defmodule DpExchange.Gemini.WsDecode do
   # a list is unreadable, and applying the rest of that frame would advance the book's
   # sequence past changes this package could not read — the silent version of a gap, which
   # `depth_gap?/2` exists to make loud.
+  #
+  # **Every row, too.** A side that was a list was enough, and `parsed_levels/1` then dropped
+  # a row whose price did not parse and kept one whose quantity did not as `nil`. On a delta
+  # that is the same silent gap: a dropped row is a change the consumer never applies, and a
+  # `nil` quantity is neither the venue's `"0"` (remove) nor a size. So the frame is
+  # unreadable, and `Socket` reports it as one: discard and resubscribe.
   defp readable_side(nil), do: :ok
-  defp readable_side(side) when is_list(side), do: :ok
+
+  defp readable_side(side) when is_list(side) do
+    if Enum.all?(side, &readable_row?/1), do: :ok, else: {:error, :unexpected_response_shape}
+  end
+
   defp readable_side(_unreadable), do: {:error, :unexpected_response_shape}
+
+  defp readable_row?([price, quantity]), do: decimal(price) != nil and decimal(quantity) != nil
+  defp readable_row?(_row), do: false
 
   # A level whose PRICE cannot be read is dropped rather than carried as `{nil, _}`:
   # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, `hd(bids)` landing on one

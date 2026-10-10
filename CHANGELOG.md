@@ -20,6 +20,46 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A depth resubscribe on the same connection decoded the venue's fresh snapshot as a diff.**
+  `unsubscribe/3` left the symbol anchored with its old `u`. A depth unsubscribe now forgets
+  both, so the snapshot after the resubscribe that the vendor prescribes for a gap re-anchors
+  the book.
+- **A replayed depth frame was applied and moved the sequence back.** A frame whose `u` is at
+  or before the last applied one is now dropped.
+- **A delta row with an unreadable price was dropped, and one with an unreadable quantity kept
+  as `nil`.** On a diff both are silent gaps. The frame is now unreadable and reported as one,
+  which means discard and resubscribe.
+- **A failed subscribe send closed a healthy connection 15 s later.** The ack expectation was
+  counted before the send and never withdrawn. It is now withdrawn when the frame does not go
+  out. Unsubscribe requests use their own id, so their answers no longer clear a pending
+  subscribe's deadline.
+- **`place_order/3` raised `KeyError` for a missing `:symbol`, `:quantity` or `:side`.** It now
+  returns `{:error, {:missing_field, key}}`. A placed order whose id the venue did not return
+  readably is `{:error, :order_id_not_returned}`, not `{:ok, %Order{id: nil}}`.
+- **A top-of-book side the venue stated and this package could not read became `nil`**, which
+  `TopOfBook` reads as "no resting order". REST now refuses the book. The stream sends a
+  `:data_quality` notice and still delivers the last trade. A depth frame missing its `U` is no
+  longer read as a bookTicker.
+- **The candle pre-flight ignored the bar in progress**, so a `:start` up to one bar past the
+  real edge came back short. The oldest bar is now computed from the current bar's open. A
+  `:start` or `:end` that is not a `DateTime` is refused instead of raising.
+- **Path segments were interpolated raw.** A symbol, network or ticker carrying `/` or `?`
+  changed the path, signed requests included. Each segment is now percent-encoded.
+  `list_instruments(symbols: "BTC-USD")` returns `{:error, {:invalid_option, :symbols, _}}`
+  instead of raising.
+- **`Feed` held symbols as the caller spelled them.** `subscribe(["BTCUSD"])` subscribed on
+  the wire and then dropped every frame as unwanted. Symbols are now held canonical.
+- **A venue that accepted the upgrade and closed at once was reconnected with no delay.**
+  `attempt_number` restarts at 1 after every connect. Consecutive sessions shorter than 5 s
+  now count toward the backoff.
+
+### Documentation
+
+- `Rest`'s moduledoc and `usage-rules.md` said REST `Quote.venue_time` is never `nil`. It is
+  `nil` when the `Date` header is absent or unreadable, which has been the case since 0.2.30.
+
 ## [0.2.98] - 2026-10-08
 
 ### Added

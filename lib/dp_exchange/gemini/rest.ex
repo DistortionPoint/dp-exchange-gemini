@@ -65,14 +65,13 @@ defmodule DpExchange.Gemini.Rest do
 
   This package uses the HTTP `Date` **response header** — the venue's own statement of
   when it served the answer, which bounds the quote's age and is not our clock. When that
-  header is absent the request fails with `{:error, :missing_venue_timestamp}` rather than
-  returning a quote whose freshness cannot be stated.
+  header is absent or unreadable, `venue_time` is `nil`: the traded price is still real, and
+  `observed_at` states freshness. Nothing is ever substituted into `venue_time`.
 
-  **A consequence worth stating since Core 0.2.0**: this venue's `Quote.venue_time` is
-  therefore **never `nil`**. The field is nullable across the family precisely because some
-  venues publish no time — but here, a response with no `Date` header fails the call
-  outright, so a `Quote` that reaches a caller always carries the venue's own instant. A
-  consumer writing a `nil` branch for this venue's quotes is writing dead code.
+  **`Quote.venue_time` can be `nil` here.** This moduledoc said "never `nil`" until it was
+  checked against `header_time_or_nil/1` on 2026-10-10. That stopped being true in 0.2.30,
+  when `get_price/2` stopped discarding a real traded price over a missing `Date` header. A
+  consumer needs a `nil` branch for this venue's quotes.
   """
 
   alias DpExchange.Core.{Config, HttpClient, Timeframe}
@@ -187,7 +186,7 @@ defmodule DpExchange.Gemini.Rest do
   def get_price(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts),
+    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
          {:ok, last} <- quoted_price(body),
          {:ok, price} <- required_decimal(last, :price) do
       # The ticker's `volume` is "the 24 hour volume on the exchange", measured up to its
@@ -236,19 +235,32 @@ defmodule DpExchange.Gemini.Rest do
   def get_top_of_book(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{native}", opts),
-         {:ok, body} <- object(body) do
+    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
+         {:ok, body} <- object(body),
+         # A side the venue stated and this package cannot read is refused, not `nil`:
+         # `TopOfBook` reads `nil` as "no resting order". An absent side stays `nil`.
+         {:ok, bid} <- stated_price(body["bid"]),
+         {:ok, ask} <- stated_price(body["ask"]) do
       {:ok,
        %TopOfBook{
          symbol: SymbolFormat.to_canonical_symbol(native),
-         bid: decimal(body["bid"]),
-         ask: decimal(body["ask"]),
+         bid: bid,
+         ask: ask,
          bid_size: nil,
          ask_size: nil,
          venue_time: header_time_or_nil(headers),
          observed_at: DateTime.utc_now(),
          provider: :gemini
        }}
+    end
+  end
+
+  defp stated_price(empty) when empty in [nil, ""], do: {:ok, nil}
+
+  defp stated_price(value) do
+    case decimal(value) do
+      nil -> {:error, :unexpected_response_shape}
+      price -> {:ok, price}
     end
   end
 
@@ -395,7 +407,7 @@ defmodule DpExchange.Gemini.Rest do
   def quantization(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, raw} <- get_body("/v1/symbols/details/#{native}", opts),
+    with {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
          {:ok, body} <- object(raw) do
       {:ok,
        %{
@@ -449,16 +461,19 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp instrument_symbols(opts) do
+    # Anything else was a `CaseClauseError` in the caller: `symbols: "BTC-USD"` reads as one
+    # symbol to a person and is neither a list nor absent here.
     case Keyword.get(opts, :symbols) do
       nil -> get_symbols(opts)
       symbols when is_list(symbols) -> {:ok, Enum.uniq(symbols)}
+      other -> {:error, {:invalid_option, :symbols, other}}
     end
   end
 
   defp instrument(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, raw} <- get_body("/v1/symbols/details/#{native}", opts),
+    with {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
          {:ok, body} <- object(raw) do
       {:ok,
        DpExchange.Core.Instrument.new(
@@ -507,7 +522,8 @@ defmodule DpExchange.Gemini.Rest do
     depth = Config.opt(opts, :depth, 50)
     params = [limit_bids: depth, limit_asks: depth]
 
-    with {:ok, body} <- get_body("/v1/book/#{native}", Keyword.put(opts, :params, params)),
+    with {:ok, body} <-
+           get_body("/v1/book/#{segment(native)}", Keyword.put(opts, :params, params)),
          :ok <- book_shape(body) do
       {:ok,
        %OrderBook{
@@ -565,7 +581,8 @@ defmodule DpExchange.Gemini.Rest do
     # `List.wrap(%{...})` turned an object this package could not parse into a one-row list
     # holding that object whole. The vendor's OpenAPI gives this 200 as a bare array, never
     # either.
-    with {:ok, rows} <- get_body("/v1/trades/#{native}", Keyword.put(opts, :params, params)),
+    with {:ok, rows} <-
+           get_body("/v1/trades/#{segment(native)}", Keyword.put(opts, :params, params)),
          {:ok, rows} <- list(rows) do
       rows
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
@@ -881,7 +898,7 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_funding(String.t(), keyword()) ::
           {:ok, Funding.t()} | {:error, term()} | {:refused, term()}
   def get_funding(symbol, opts) do
-    with {:ok, raw} <- get_body("/v1/fundingamount/#{symbol}", opts),
+    with {:ok, raw} <- get_body("/v1/fundingamount/#{segment(symbol)}", opts),
          {:ok, body} <- object(raw) do
       {:ok,
        %Funding{
@@ -910,7 +927,7 @@ defmodule DpExchange.Gemini.Rest do
   @spec next_funding_timestamp(String.t(), keyword()) ::
           {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
   def next_funding_timestamp(symbol, opts) do
-    with {:ok, body} <- get_body("/v1/nextfundingtimestamp/#{symbol}", opts) do
+    with {:ok, body} <- get_body("/v1/nextfundingtimestamp/#{segment(symbol)}", opts) do
       case epoch_ms(body) do
         nil -> {:error, :unexpected_response_shape}
         at -> {:ok, at}
@@ -936,7 +953,7 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_contract_stats(String.t(), keyword()) ::
           {:ok, ContractStats.t()} | {:error, term()} | {:refused, term()}
   def get_contract_stats(symbol, opts) do
-    with {:ok, raw} <- get_body("/v1/riskstats/#{symbol}", opts),
+    with {:ok, raw} <- get_body("/v1/riskstats/#{segment(symbol)}", opts),
          {:ok, body} <- object(raw) do
       {:ok,
        %ContractStats{
@@ -1338,11 +1355,29 @@ defmodule DpExchange.Gemini.Rest do
   # — not an oversight; `get_historical_prices/4` still filters their real rows against
   # `range` afterward, so a caller reaching before the actual window gets an empty list
   # rather than wrong data, just without this pre-flight refusal naming the boundary.
+  # A `:start` or `:end` that is not a `DateTime` is refused here. It reached
+  # `DateTime.compare/2` in the row filter and raised in the caller's process.
   defp range_within_window(timeframe, range) do
+    case Enum.find([:start, :end], &(not range_bound?(Keyword.get(range, &1)))) do
+      nil -> window_check(timeframe, range)
+      bad -> {:error, {:invalid_range, bad, Keyword.get(range, bad)}}
+    end
+  end
+
+  defp range_bound?(nil), do: true
+  defp range_bound?(%DateTime{}), do: true
+  defp range_bound?(_other), do: false
+
+  # The oldest bar the venue still serves opened at the start of the current bar minus
+  # `bars - 1` widths. `now - bars * width` ignored the bar in progress, so a `:start` up to
+  # one bar past the real edge passed this check and came back short, which is the silent
+  # truncation this check exists to refuse.
+  defp window_check(timeframe, range) do
     with %DateTime{} = start <- Keyword.get(range, :start),
          {:ok, bars} <- Map.fetch(@window_bars, timeframe),
          {:ok, width} <- Timeframe.seconds(timeframe) do
-      earliest = DateTime.add(DateTime.utc_now(), -bars * width, :second)
+      now = DateTime.to_unix(DateTime.utc_now())
+      earliest = DateTime.from_unix!(div(now, width) * width - (bars - 1) * width)
 
       if DateTime.compare(start, earliest) == :lt do
         {:error, {:range_unavailable, timeframe, earliest: earliest, requested: start}}
@@ -1531,4 +1566,10 @@ defmodule DpExchange.Gemini.Rest do
       :error -> Map.fetch!(@approx_sort_seconds, timeframe)
     end
   end
+
+  # One path segment, percent-encoded. Symbols, networks and tickers were interpolated raw,
+  # so a value carrying `/` or `?` changed the path or started a query, and on a signed
+  # request the venue was asked for a resource the caller never named. Every value the venue
+  # documents is unreserved already, so for them this changes nothing.
+  defp segment(value), do: value |> to_string() |> URI.encode(&URI.char_unreserved?/1)
 end

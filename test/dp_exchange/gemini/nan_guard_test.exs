@@ -24,14 +24,14 @@ defmodule DpExchange.Gemini.NaNGuardTest do
 
   describe "a NaN or Infinity from the venue is dropped, never admitted as a number" do
     for value <- @poison do
-      test "#{value} in a bookTicker bid is nil, not a Decimal" do
+      test "#{value} in a bookTicker bid refuses the book, never a Decimal and never nil" do
+        # It used to become `bid: nil` beside a real ask. `TopOfBook` reads a `nil` level
+        # as "no resting order", a claim the venue never made, so a stated but unreadable
+        # level now refuses the book (2026-10-10). `Socket` reports that as `:data_quality`.
         frame = %{"E" => "1757548800000000000", "b" => unquote(value), "a" => "100.5"}
 
-        assert {:ok, top} = WsDecode.to_top_of_book(frame, "BTC-USD", @observed_at)
-        assert top.bid == nil
-        # The rest of the frame is untouched — one poisoned field must not discard a
-        # perfectly good one beside it.
-        assert Decimal.equal?(top.ask, Decimal.new("100.5"))
+        assert {:error, :unexpected_frame_shape} =
+                 WsDecode.to_top_of_book(frame, "BTC-USD", @observed_at)
       end
     end
 

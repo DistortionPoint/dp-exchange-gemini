@@ -318,6 +318,12 @@ defmodule DpExchange.Gemini.Socket do
     if depth_snapshot?(opts), do: [snapshot: -1], else: []
   end
 
+  # Request ids. Every request was `id: 1`, so an `unsubscribe` answer was counted as a
+  # subscribe's and could clear the ack deadline while a real subscribe was still unanswered.
+  # Only answers to `@subscribe_id` are counted against it now — see `note_answer/2`.
+  @subscribe_id 1
+  @unsubscribe_id 2
+
   @doc """
   Subscribes the connection to `channel` for each symbol.
 
@@ -350,7 +356,26 @@ defmodule DpExchange.Gemini.Socket do
          :ok <- claim_partial_depth(socket, symbols, channel) do
       streams = streams(symbols, channel)
       await_ack(socket, streams)
-      send_rpc(socket, "subscribe", streams)
+
+      case send_rpc(socket, "subscribe", streams) do
+        :ok ->
+          :ok
+
+        # The frame did not go out, so no answer is coming. Left counted, the ack deadline
+        # fired 15 s later and closed a healthy connection, and every retry counted again.
+        error ->
+          withdraw_ack(socket, streams)
+          error
+      end
+    end
+  end
+
+  defp withdraw_ack(_socket, []), do: :ok
+
+  defp withdraw_ack(socket, _streams) do
+    case GenServer.whereis(socket) do
+      pid when is_pid(pid) -> send(pid, :ack_withdrawn)
+      _not_running -> :ok
     end
   end
 
@@ -379,9 +404,30 @@ defmodule DpExchange.Gemini.Socket do
   def unsubscribe(socket, symbols, channel \\ :book_ticker) do
     with :ok <- validate_channel(symbols, channel) do
       release_partial_depth(socket, symbols, channel)
+      forget_depth(socket, symbols, channel)
       send_rpc(socket, "unsubscribe", streams(symbols, channel))
     end
   end
+
+  # **A depth unsubscribe forgets the book's sequence and anchor.** The vendor's answer to a
+  # gap is "discard the book and resubscribe" (websocket.yaml:1264-1270), and a resubscribe
+  # on the same connection makes the venue send a fresh absolute snapshot. Left anchored,
+  # that snapshot was decoded as a diff, and a consumer applying it kept every stale level.
+  # Left with the old `u`, its first frame was judged against a sequence it does not continue.
+  @depth_channels [:depth, :depth_fast | WsChannels.partial_depth()]
+
+  defp forget_depth(socket, symbols, channel) when channel in @depth_channels do
+    canonical =
+      Enum.map(symbols, &SymbolFormat.to_canonical_symbol(SymbolFormat.to_exchange_symbol(&1)))
+
+    sys_replace_state(socket, fn state ->
+      state
+      |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(canonical)))
+      |> Map.update(:last_depth_update, %{}, &Map.drop(&1, canonical))
+    end)
+  end
+
+  defp forget_depth(_socket, _symbols, _channel), do: :ok
 
   # `symbols == []` against a per-symbol channel is deliberately **not** refused here: it is
   # how a caller registers as a subscriber without asking for anything yet (`Feed.subscribe/3`
@@ -550,10 +596,13 @@ defmodule DpExchange.Gemini.Socket do
         do: address
   end
 
+  defp request_id("subscribe"), do: @subscribe_id
+  defp request_id("unsubscribe"), do: @unsubscribe_id
+
   defp send_rpc(_socket, _method, []), do: :ok
 
   defp send_rpc(socket, method, params) do
-    frame = Jason.encode!(%{"method" => method, "params" => params, "id" => 1})
+    frame = Jason.encode!(%{"method" => method, "params" => params, "id" => request_id(method)})
     VendoredWebSockex.send_frame(socket, {:text, frame})
   catch
     # BOUNDARY: `WebSockex.send_frame/2` is `:gen.call` with a 5s default, and on timeout it
@@ -656,9 +705,16 @@ defmodule DpExchange.Gemini.Socket do
        last_trade_price: %{},
        # A request sent on the old connection is not owed an answer on this one.
        unanswered_subscribes: 0,
-       ack_deadline: nil
+       ack_deadline: nil,
+       # When this session came up. See `handle_disconnect/2`'s short-session backoff.
+       connected_at: now_ms()
      })}
   end
+
+  # A session shorter than this is counted as a failed connect for backoff, not a healthy
+  # session that dropped. Chosen, not measured: long enough to cover an upgrade the venue
+  # completes and then closes at once, short against any real session.
+  @short_session_ms 5_000
 
   # See the moduledoc's "A dead connection is found by pinging it". A check whose ref is not
   # this connection's belongs to one that has since dropped, and is not re-armed.
@@ -699,6 +755,9 @@ defmodule DpExchange.Gemini.Socket do
     end
   end
 
+  def handle_info(:ack_withdrawn, state),
+    do: {:ok, note_answer(%{"id" => @subscribe_id, "status" => 200}, state)}
+
   def handle_info({:ack_deadline, deadline}, %{ack_deadline: deadline} = state) do
     unanswered = Map.get(state, :unanswered_subscribes, 0)
 
@@ -719,7 +778,7 @@ defmodule DpExchange.Gemini.Socket do
 
   # Any answer counts, a refusal included: the question is whether the connection is being
   # served, and a non-200 is already reported on its own by `handle_message/2`.
-  defp note_answer(%{"id" => _id, "status" => _status}, state) do
+  defp note_answer(%{"id" => @subscribe_id, "status" => _status}, state) do
     case Map.get(state, :unanswered_subscribes, 0) - 1 do
       remaining when remaining > 0 -> Map.put(state, :unanswered_subscribes, remaining)
       _none -> Map.merge(state, %{unanswered_subscribes: 0, ack_deadline: nil})
@@ -770,7 +829,13 @@ defmodule DpExchange.Gemini.Socket do
     # `Map.get/3` rather than a pattern, so the unit tests that call this callback directly
     # with a bare `%{reason: ...}` keep describing what they mean: one healthy session
     # dropping, which still reconnects at once.
-    attempt = Map.get(status, :attempt_number, 1)
+    #
+    # **A session that dies straight after connecting counts too.** `attempt_number` starts
+    # again at 1 after every successful connect, so a venue that completes the upgrade and
+    # closes at once got an unthrottled connect, close, connect loop at 0 ms. Consecutive
+    # short sessions are counted here and fed into the same backoff.
+    {short_sessions, state} = count_short_session(state)
+    attempt = max(Map.get(status, :attempt_number, 1), short_sessions + 1)
     delay = reconnect_delay_ms(attempt)
 
     Telemetry.link_reconnect_attempt(:gemini, attempt, delay)
@@ -780,6 +845,24 @@ defmodule DpExchange.Gemini.Socket do
     if delay > 0, do: Process.sleep(delay)
 
     {:reconnect, state}
+  end
+
+  # Consecutive sessions that ended within `@short_session_ms` of connecting. Read once per
+  # session, so a run of failed reconnects (no connect between them) is not recounted; those
+  # are `attempt_number`'s to count. A session that lasted resets it.
+  defp count_short_session(state) do
+    case Map.get(state, :connected_at) do
+      nil ->
+        {Map.get(state, :short_sessions, 0), state}
+
+      at ->
+        short =
+          if now_ms() - at < @short_session_ms,
+            do: Map.get(state, :short_sessions, 0) + 1,
+            else: 0
+
+        {short, Map.merge(state, %{short_sessions: short, connected_at: nil})}
+    end
   end
 
   @impl true
@@ -900,8 +983,10 @@ defmodule DpExchange.Gemini.Socket do
   # that same construction inline, a second implementation of the same decode that could
   # drift from the one `WsChannelsTest` actually exercises directly. One decoder, called
   # once.
-  defp handle_message(%{"s" => native, "b" => _bid, "a" => _ask} = message, state)
-       when is_binary(native) and native != "" do
+  # `b` and `a` are strings on a bookTicker and LISTS on a depth frame. A depthUpdate missing
+  # its `U` fell through to here and was published as a book with `nil` sides.
+  defp handle_message(%{"s" => native, "b" => bid, "a" => ask} = message, state)
+       when is_binary(native) and native != "" and not is_list(bid) and not is_list(ask) do
     symbol = SymbolFormat.to_canonical_symbol(native)
 
     # No error branch, because there is no longer an error to branch on: a bookTicker frame
@@ -913,9 +998,21 @@ defmodule DpExchange.Gemini.Socket do
     # venue's field; `observed_at` is a different field that says what it is. What the clause
     # actually did was drop a real bid and ask, and — because `deliver_last_trade/4` sat
     # inside the success branch — the `c` last trade along with them.
-    {:ok, top} = WsDecode.to_top_of_book(message, symbol, DateTime.utc_now())
+    case WsDecode.to_top_of_book(message, symbol, DateTime.utc_now()) do
+      {:ok, top} ->
+        send(state.subscriber, {:dp_exchange, :gemini, top})
 
-    send(state.subscriber, {:dp_exchange, :gemini, top})
+      # A level the venue stated and this package could not read. Not published as `nil`,
+      # which would claim there is no resting order; the last trade is still its own fact.
+      {:error, _unreadable} ->
+        notify(
+          state,
+          Notice.new(:data_quality, :gemini,
+            details: %{reason: "unreadable bookTicker level", symbol: symbol}
+          )
+        )
+    end
+
     state = deliver_last_trade(message["c"], symbol, state)
 
     {:ok, state}
@@ -946,10 +1043,19 @@ defmodule DpExchange.Gemini.Socket do
 
   defp handle_message(_other, state), do: {:ok, state}
 
+  # A frame ending at or before what was already applied is a replay, not news. Applied, it
+  # re-applied old changes and set `last_depth_update` BACK, so the frame after it was
+  # judged against the replay instead of the book.
   defp deliver_depth_update(message, symbol, state) do
     last_by_symbol = Map.get(state, :last_depth_update, %{})
-    last_applied = Map.get(last_by_symbol, symbol)
 
+    case {message["u"], Map.get(last_by_symbol, symbol)} do
+      {u, applied} when is_integer(u) and is_integer(applied) and u <= applied -> {:ok, state}
+      {_u, applied} -> apply_depth_update(message, symbol, state, last_by_symbol, applied)
+    end
+  end
+
+  defp apply_depth_update(message, symbol, state, last_by_symbol, last_applied) do
     if WsDecode.depth_gap?(message, last_applied) do
       # The vendor's rule: discard the book and resubscribe. A consumer that keeps applying
       # after a gap holds a book that is silently wrong from here on, with every price real.

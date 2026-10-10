@@ -248,8 +248,10 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert Decimal.equal?(quantity, Decimal.new("1.5"))
       assert MapSet.member?(new_state.depth_anchored, "BTC-USD")
 
-      # The SECOND frame for the same symbol is an ordinary diff.
-      assert {:ok, _state} = Socket.handle_frame(frame(@diff), new_state)
+      # The SECOND frame for the same symbol is an ordinary diff. It continues the sequence:
+      # the same frame again would be a replay, which is now dropped.
+      next = %{@diff | "U" => 16, "u" => 17}
+      assert {:ok, _state} = Socket.handle_frame(frame(next), new_state)
       assert_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
     end
 

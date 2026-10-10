@@ -197,13 +197,18 @@ defmodule DpExchange.Gemini.Private do
              Map.get(request, :order_type, :limit),
              Map.get(request, :time_in_force, :gtc)
            ),
-         {:ok, price} <- required_price(request) do
+         {:ok, price} <- required_price(request),
+         # Named refusals, not `Map.fetch!/2`: a `KeyError` raised in the caller's process on
+         # a money-moving call, where every other missing field is an `{:error, _}`.
+         {:ok, symbol} <- required_field(request, :symbol),
+         {:ok, quantity} <- required_field(request, :quantity),
+         {:ok, side} <- required_field(request, :side) do
       params =
         %{
-          "symbol" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
-          "amount" => decimal_string(Map.fetch!(request, :quantity)),
+          "symbol" => SymbolFormat.to_exchange_symbol(symbol),
+          "amount" => decimal_string(quantity),
           "price" => decimal_string(price),
-          "side" => to_string(Map.fetch!(request, :side)),
+          "side" => to_string(side),
           "type" => type,
           "options" => options
         }
@@ -212,7 +217,7 @@ defmodule DpExchange.Gemini.Private do
         |> maybe_put("account", Keyword.get(opts, :account))
 
       with {:ok, body, _headers} <- post_once("/v1/order/new", params, credentials, opts) do
-        to_order(body)
+        placed(to_order(body))
       end
     end
   end
@@ -792,8 +797,25 @@ defmodule DpExchange.Gemini.Private do
     if positive?(body["executed_amount"]), do: :partially_filled, else: :open
   end
 
+  # Neither live nor cancelled. With a fill it is `:filled`; with none, `:pending`, accepted
+  # and not yet booked. Reviewed 2026-10-10 against the suggestion that this is a rejected
+  # order: the venue answers a rejection with an error, not an order body, so a body here is
+  # an order it accepted. Not `:open`, which would claim it is resting on the book.
   defp status_of(body) do
     if positive?(body["executed_amount"]), do: :filled, else: :pending
+  end
+
+  # A placed order with no readable id is not `{:ok, _}`: the caller cannot cancel, track or
+  # reconcile an order it cannot name. The order may well be live, so this says so rather than
+  # reporting a failure: `get_orders` is how to find it.
+  defp placed({:ok, %Order{id: nil}}), do: {:error, :order_id_not_returned}
+  defp placed(result), do: result
+
+  defp required_field(request, key) do
+    case Map.get(request, key) do
+      nil -> {:error, {:missing_field, key}}
+      value -> {:ok, value}
+    end
   end
 
   defp positive?(nil), do: false
@@ -1357,7 +1379,8 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, symbol, side} <- instant_pair(from, to, opts) do
       params = %{"amount" => decimal_string(amount), "side" => side}
 
-      with {:ok, body, headers} <- post_once("/v1/wrap/#{symbol}", params, credentials, opts) do
+      with {:ok, body, headers} <-
+             post_once("/v1/wrap/#{segment(symbol)}", params, credentials, opts) do
         to_conversion(body, from, to, :settled, headers)
       end
     end
@@ -1424,7 +1447,7 @@ defmodule DpExchange.Gemini.Private do
         credentials = Keyword.get(opts, :credentials, %{})
 
         with {:ok, body, _headers} <-
-               signed_get("/v2/networks/#{network}/assets", credentials, opts) do
+               signed_get("/v2/networks/#{segment(network)}/assets", credentials, opts) do
           {:ok, List.wrap(body)}
         end
     end
@@ -1433,7 +1456,7 @@ defmodule DpExchange.Gemini.Private do
   def list_networks(asset, opts) do
     credentials = Keyword.get(opts, :credentials, %{})
 
-    with {:ok, body, _headers} <- signed_get("/v2/network/#{asset}", credentials, opts) do
+    with {:ok, body, _headers} <- signed_get("/v2/network/#{segment(asset)}", credentials, opts) do
       {:ok, List.wrap(body)}
     end
   end
@@ -1479,7 +1502,7 @@ defmodule DpExchange.Gemini.Private do
       timestamp = DateTime.to_unix(at, :millisecond)
 
       with {:ok, body, _headers} <-
-             signed_get("/v2/fxrate/#{native}/#{timestamp}", credentials, opts) do
+             signed_get("/v2/fxrate/#{segment(native)}/#{segment(timestamp)}", credentials, opts) do
         to_fx_rate(body, native, at)
       end
     end
@@ -1547,7 +1570,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("legacy", Keyword.get(opts, :legacy))
 
     with {:ok, body, _headers} <-
-           post("/v1/deposit/#{network}/newAddress", params, credentials, opts),
+           post("/v1/deposit/#{segment(network)}/newAddress", params, credentials, opts),
          # An object, or a refusal — `body["address"]` on a list raises. See
          # `Rest.object/1`.
          {:ok, body} <- Rest.object(body),
@@ -1594,7 +1617,7 @@ defmodule DpExchange.Gemini.Private do
 
       network ->
         with {:ok, body, _headers} <-
-               post("/v1/approvedAddresses/account/#{network}", %{}, credentials, opts),
+               post("/v1/approvedAddresses/account/#{segment(network)}", %{}, credentials, opts),
              {:ok, rows} <- approved_rows(body) do
           to_approved_addresses(rows, network)
         end
@@ -1701,7 +1724,12 @@ defmodule DpExchange.Gemini.Private do
       ticker = String.downcase(asset)
 
       with {:ok, body, _headers} <-
-             post("/v2/withdraw/#{network}/#{ticker}/feeEstimate", params, credentials, opts),
+             post(
+               "/v2/withdraw/#{segment(network)}/#{segment(ticker)}/feeEstimate",
+               params,
+               credentials,
+               opts
+             ),
            {:ok, body} <- Rest.object(body) do
         {:ok,
          %{
@@ -1788,7 +1816,12 @@ defmodule DpExchange.Gemini.Private do
       ticker = String.downcase(asset)
 
       with {:ok, body, _headers} <-
-             post("/v2/withdraw/#{network}/#{ticker}", params, credentials, opts) do
+             post(
+               "/v2/withdraw/#{segment(network)}/#{segment(ticker)}",
+               params,
+               credentials,
+               opts
+             ) do
         to_withdrawal(body, transfer_id, {asset, network, address, amount, memo})
       end
     end
@@ -1996,7 +2029,7 @@ defmodule DpExchange.Gemini.Private do
       # is not known to be safe, and an OAuth request carries no nonce to be refused on
       # replay either. See `post_once/4`.
       with {:ok, body, _headers} <-
-             post_once("/v1/account/transfer/#{currency}", params, credentials, opts) do
+             post_once("/v1/account/transfer/#{segment(currency)}", params, credentials, opts) do
         {:ok, body}
       end
     end
@@ -2030,7 +2063,7 @@ defmodule DpExchange.Gemini.Private do
     # and here it can, from the payload this module builds itself. Recorded so the
     # next sweep does not flatten all three into one rule.
     with {:ok, body, _headers} <-
-           post("/v1/approvedAddresses/#{network}/request", params, credentials, opts) do
+           post("/v1/approvedAddresses/#{segment(network)}/request", params, credentials, opts) do
       {:ok, body}
     end
   end
@@ -2047,7 +2080,7 @@ defmodule DpExchange.Gemini.Private do
   def remove_approved_address(network, address, credentials, opts) do
     with {:ok, body, _headers} <-
            post(
-             "/v1/approvedAddresses/#{network}/remove",
+             "/v1/approvedAddresses/#{segment(network)}/remove",
              %{"address" => address},
              credentials,
              opts
@@ -3764,4 +3797,10 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp decimal(_other), do: nil
+
+  # One path segment, percent-encoded. Symbols, networks and tickers were interpolated raw,
+  # so a value carrying `/` or `?` changed the path or started a query, and on a signed
+  # request the venue was asked for a resource the caller never named. Every value the venue
+  # documents is unreserved already, so for them this changes nothing.
+  defp segment(value), do: value |> to_string() |> URI.encode(&URI.char_unreserved?/1)
 end

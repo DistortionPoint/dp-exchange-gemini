@@ -253,15 +253,16 @@ answer for a period the venue does not serve.
 **There is nothing to paginate.** `max_candles_per_request` is `nil`, not a number — one
 call is the whole history the venue offers at that width. Do not build a paging loop.
 
-## `Quote.venue_time` is the venue's HTTP `Date` — and on this venue it is never `nil`
+## `Quote.venue_time` is the venue's HTTP `Date`, or `nil`
 
 Neither Gemini ticker publishes a quote time. `/v1/pubticker` has one, but it sits
 **inside the `volume` object** — it stamps the 24-hour volume window and lags about a
 minute. `/v2/ticker` has none at all.
 
-This package uses the venue's `Date` response header, and returns
-`{:error, :missing_venue_timestamp}` when it is absent. It never substitutes the local
-clock, which is what makes a stale quote indistinguishable from a live one.
+This package uses the venue's `Date` response header. When it is absent or not a GMT date,
+`venue_time` is `nil` and the quote is still returned: the traded price is real, and
+`observed_at` states freshness. It never substitutes the local clock, which is what makes a
+stale quote indistinguishable from a live one. Write a `nil` branch.
 
 If you need sub-second freshness, use `subscribe/2` — the `TopOfBook` it delivers carries a
 real nanosecond event time per update. The `Quote` `subscribe/2` also delivers, on a frame
@@ -269,15 +270,13 @@ that carries a last trade, does not — see the correction below the `venue_time
 the top of this file: the vendor documents no trade time for it, so it is `nil`
 unconditionally, on this transport as much as any other.
 
-**Since 0.2.0 this has a consequence worth knowing, scoped to `get_price/2` (REST)**: this
-venue's REST `Quote.venue_time` is **never `nil`**. The field is nullable across the family
-precisely because some venues publish no time for some frames — but here a response without
-a `Date` header fails the call outright, so a `Quote` `get_price/2` returns always carries
-the venue's own instant. A `nil` branch for THIS call's quotes is dead code — but the
-streamed last-trade `Quote` is a different call with a different rule, and its `venue_time`
-is `nil` every time, not dead code at all.
+This section used to say REST `Quote.venue_time` is never `nil` and that a response without
+a `Date` header fails the call. Neither has been true since 0.2.30, as the top of this file
+says. This section was corrected on 2026-10-10. The streamed last-trade `Quote` is `nil`
+every time, because the vendor documents no trade time for it.
 
-`get_order_book/2` is the same. The **stream** is where `nil` appears: a partial-depth
+`get_order_book/2`'s `venue_time` is always `nil` (see the top of this file). On the
+**stream**, a partial-depth
 snapshot (`@depth5`/`@depth10`/`@depth20`) carries `venue_time: nil`, because the vendor's
 own AsyncAPI requires only `[lastUpdateId, bids, asks]` for `OrderBookSnapshot` where
 `BookTicker` requires an `E`. Deltas and `bookTicker`'s own `TopOfBook` do carry a real

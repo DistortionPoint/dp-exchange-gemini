@@ -132,6 +132,29 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert :sys.get_state(socket_pid).depth_snapshot? == true
   end
 
+  test "a depth unsubscribe forgets the symbol's anchor and sequence, so a resubscribe re-anchors" do
+    # The vendor's answer to a gap is to resubscribe, and the venue then sends a fresh
+    # absolute snapshot. Left anchored, that snapshot was decoded as a diff.
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port) ++ [channels: [:depth]])
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    :sys.replace_state(socket_pid, fn state ->
+      Map.merge(state, %{
+        depth_anchored: MapSet.new(["BTC-USD", "ETH-USD"]),
+        last_depth_update: %{"BTC-USD" => 12, "ETH-USD" => 40}
+      })
+    end)
+
+    _sent = Socket.unsubscribe(socket_pid, ["BTC-USD"], :depth)
+    state = :sys.get_state(socket_pid)
+
+    assert state.depth_anchored == MapSet.new(["ETH-USD"])
+    assert state.last_depth_update == %{"ETH-USD" => 40}
+  end
+
   test "no :channels means no snapshot parameter and depth_snapshot? stays falsy" do
     {listen_socket, port} = listen()
     serve(listen_socket, [&upgrade/1])

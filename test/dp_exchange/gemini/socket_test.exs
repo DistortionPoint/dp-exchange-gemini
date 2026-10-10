@@ -630,4 +630,89 @@ defmodule DpExchange.Gemini.SocketTest do
       refute log =~ "btcusd"
     end
   end
+
+  describe "fail-closed edges found in review (2026-10-10)" do
+    defp depth_frame(overrides) do
+      Map.merge(
+        %{
+          "e" => "depthUpdate",
+          "E" => 1_787_936_147_810_330_084,
+          "s" => "btcusd",
+          "U" => 11,
+          "u" => 12,
+          "b" => [["77845.79", "0.5"]],
+          "a" => []
+        },
+        overrides
+      )
+    end
+
+    test "a depth frame ending at or before what was applied is a replay and is dropped" do
+      applied = Map.put(state(), :last_depth_update, %{"BTC-USD" => 12})
+
+      assert {:ok, after_replay} =
+               Socket.handle_frame({:text, Jason.encode!(depth_frame(%{"U" => 9}))}, applied)
+
+      refute_received {:dp_exchange, :gemini, _payload}
+      assert after_replay.last_depth_update == %{"BTC-USD" => 12}
+    end
+
+    test "a delta row this package cannot read makes the frame unreadable, not a dropped row" do
+      frame = depth_frame(%{"b" => [["77845.79", "not-a-size"]]})
+
+      assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+
+      refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.OrderBookDelta{}}
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :degraded, details: %{reason: "undecodable depth update"}}}
+    end
+
+    test "a depth frame missing its U is never read as a bookTicker" do
+      frame = depth_frame(%{}) |> Map.delete("U")
+
+      assert {:ok, _state} = Socket.handle_frame({:text, Jason.encode!(frame)}, state())
+      refute_received {:dp_exchange, :gemini, %TopOfBook{}}
+    end
+
+    test "a bookTicker level that is present and unreadable is not published as nil" do
+      assert {:ok, _state} = deliver(%{@book_ticker | "b" => "garbage"})
+
+      refute_received {:dp_exchange, :gemini, %TopOfBook{}}
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{
+                         kind: :data_quality,
+                         details: %{reason: "unreadable bookTicker level"}
+                       }}
+    end
+
+    test "a subscribe whose frame never went out withdraws its ack expectation" do
+      {:ok, armed} = Socket.handle_info(:awaiting_ack, state())
+      assert {:ok, withdrawn} = Socket.handle_info(:ack_withdrawn, armed)
+
+      assert withdrawn.unanswered_subscribes == 0
+      assert withdrawn.ack_deadline == nil
+    end
+
+    test "an unsubscribe's answer does not count as a subscribe's" do
+      {:ok, armed} = Socket.handle_info(:awaiting_ack, state())
+
+      {:ok, after_unsubscribe_ack} =
+        Socket.handle_frame({:text, Jason.encode!(%{"id" => 2, "status" => 200})}, armed)
+
+      assert after_unsubscribe_ack.unanswered_subscribes == 1
+      assert after_unsubscribe_ack.ack_deadline == armed.ack_deadline
+    end
+
+    test "a session that drops right after connecting backs off instead of reconnecting at once" do
+      just_connected = Map.put(state(), :connected_at, System.monotonic_time(:millisecond))
+
+      {elapsed_us, {:reconnect, after_drop}} =
+        :timer.tc(fn -> Socket.handle_disconnect(%{reason: :closed}, just_connected) end)
+
+      assert elapsed_us >= 1_000_000
+      assert after_drop.short_sessions == 1
+    end
+  end
 end
