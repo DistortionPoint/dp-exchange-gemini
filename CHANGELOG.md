@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.99] - 2026-10-10
+
 ### Fixed
 
 - **A depth resubscribe on the same connection decoded the venue's fresh snapshot as a diff.**
