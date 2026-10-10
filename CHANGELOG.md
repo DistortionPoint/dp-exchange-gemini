@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.105] - 2026-10-10
+
 ### Fixed
 
 - **A market order the account holds was reported as a limit order.** `Private.to_order/1`
