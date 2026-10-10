@@ -975,8 +975,9 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert payload["timestamp"] == 1_787_936_401_000
     end
 
-    test "no filters means no filters — the venue's own defaults apply" do
-      # A page size chosen here would silently become the caller's answer.
+    test "no filters means no filters, except the page size, which is the maximum" do
+      # The venue's default page of 50 silently became the whole history, so the documented
+      # maximum is asked for, and a full page is refused as truncated (2026-10-10).
       me = self()
 
       assert {:ok, _orders} =
@@ -987,7 +988,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                )
 
       assert_receive {:payload, payload}
-      refute Map.has_key?(payload, "limit_orders")
+      assert payload["limit_orders"] == 500
       refute Map.has_key?(payload, "symbol")
       refute Map.has_key?(payload, "timestamp")
     end

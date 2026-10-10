@@ -217,7 +217,12 @@ defmodule DpExchange.Gemini.Private do
         |> maybe_put("account", Keyword.get(opts, :account))
 
       with {:ok, body, _headers} <- post_once("/v1/order/new", params, credentials, opts) do
-        placed(to_order(body))
+        # A placed order whose id the venue did not return readably stays
+        # `{:ok, %Order{id: nil}}`. It was made `{:error, :order_id_not_returned}` on
+        # 2026-10-10 and reverted the same day: the venue accepted the order, an error reads
+        # as "nothing was placed", and since this venue's `client_order_id` is no idempotency
+        # key, a caller retrying on it places a second order. Coinbase keeps the same rule.
+        to_order(body)
       end
     end
   end
@@ -265,7 +270,8 @@ defmodule DpExchange.Gemini.Private do
       end
 
     with {:ok, rows, _headers} <- post(path, params, credentials, opts),
-         {:ok, rows} <- list_rows(rows) do
+         {:ok, rows} <- list_rows(rows),
+         :ok <- complete_page(rows, path == "/v1/orders/history", opts) do
       rows
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
         case to_order(row) do
@@ -280,11 +286,28 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # **A full page with no `:limit` is refused, not returned as the whole history.** Both
+  # history endpoints answered one page, the venue's default of 50 rows, and every row past
+  # it was dropped while the call reported success. The vendor's own paging recipe for
+  # `/v1/orders/history` (rest.yaml:1436-1443) contradicts itself on direction and has not
+  # been probed, so this does not walk pages on a guess. It asks for the documented maximum,
+  # 500, and a page that full says there may be more: narrow with `:since`, or pass `:limit`
+  # to take exactly one page on purpose.
+  @history_page_max 500
+
   defp history_params(opts) do
     %{}
     |> put_present("symbol", symbol_param(Keyword.get(opts, :symbol)))
-    |> put_present("limit_orders", Keyword.get(opts, :limit))
+    |> put_present("limit_orders", Keyword.get(opts, :limit) || @history_page_max)
     |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
+  end
+
+  defp complete_page(_rows, false, _opts), do: :ok
+
+  defp complete_page(rows, true, opts) do
+    if Keyword.get(opts, :limit) == nil and length(rows) >= @history_page_max,
+      do: {:error, {:history_truncated, @history_page_max}},
+      else: :ok
   end
 
   defp symbol_param(nil), do: nil
@@ -411,11 +434,14 @@ defmodule DpExchange.Gemini.Private do
         "symbol",
         requested_symbol && SymbolFormat.to_exchange_symbol(requested_symbol)
       )
-      |> put_present("limit_trades", Keyword.get(opts, :limit))
+      |> put_present("limit_trades", Keyword.get(opts, :limit) || @history_page_max)
       |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
 
+    # See `complete_page/3`: one page of the venue's default 50 was answered as the whole
+    # trade history.
     with {:ok, rows, _headers} <- post("/v1/mytrades", params, credentials, opts),
-         {:ok, rows} <- list_rows(rows) do
+         {:ok, rows} <- list_rows(rows),
+         :ok <- complete_page(rows, true, opts) do
       to_fills(rows, requested_symbol)
     end
   end
@@ -717,9 +743,14 @@ defmodule DpExchange.Gemini.Private do
        stop_price: decimal(body["stop_price"]),
        status: status_of(body),
        filled_quantity: decimal(body["executed_amount"]),
-       average_price: decimal(body["avg_execution_price"]),
+       # The venue states `"0.00"` for an order with nothing executed (rest.yaml:847,1369).
+       # That is no average, not a fill at zero, which a notional computed from it reads.
+       average_price:
+         if(positive?(body["executed_amount"]), do: decimal(body["avg_execution_price"])),
        created_at: epoch_ms(body["timestampms"]),
-       updated_at: epoch_ms(body["timestampms"]),
+       # The order status body has one time, its placement. Repeated here it claimed the
+       # order had not changed since, through every fill; `nil` says the venue did not say.
+       updated_at: nil,
        provider: :gemini
      }}
   end
@@ -801,15 +832,16 @@ defmodule DpExchange.Gemini.Private do
   # and not yet booked. Reviewed 2026-10-10 against the suggestion that this is a rejected
   # order: the venue answers a rejection with an error, not an order body, so a body here is
   # an order it accepted. Not `:open`, which would claim it is resting on the book.
+  #
+  # `:filled` only when the whole amount executed, the check the cancelled clause already
+  # makes. Any fill made it `:filled`, so `:filled` did not mean `filled_quantity == quantity`.
   defp status_of(body) do
-    if positive?(body["executed_amount"]), do: :filled, else: :pending
+    cond do
+      fully_filled?(body["executed_amount"], body["original_amount"]) -> :filled
+      positive?(body["executed_amount"]) -> :partially_filled
+      true -> :pending
+    end
   end
-
-  # A placed order with no readable id is not `{:ok, _}`: the caller cannot cancel, track or
-  # reconcile an order it cannot name. The order may well be live, so this says so rather than
-  # reporting a failure: `get_orders` is how to find it.
-  defp placed({:ok, %Order{id: nil}}), do: {:error, :order_id_not_returned}
-  defp placed(result), do: result
 
   defp required_field(request, key) do
     case Map.get(request, key) do

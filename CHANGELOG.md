@@ -20,6 +20,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An unfilled order reported `average_price` as 0.** The venue states `"0.00"`
+  (rest.yaml:847,1369). A notional computed from it read a fill at zero. It is now `nil`
+  until something executes.
+- **An order neither live nor cancelled was `:filled` on any fill.** It is now `:filled` only
+  when the whole amount executed, and `:partially_filled` otherwise.
+- **`updated_at` repeated the placement time.** The order status body carries one time, and
+  repeating it claimed the order had not changed through every fill. It is now `nil`.
+- **Order and trade history answered one page of the venue's default 50 as the whole
+  history.** Both now ask for the documented maximum of 500. With no `:limit`, a full page
+  is `{:error, {:history_truncated, 500}}`, because the vendor's paging recipe contradicts
+  itself and has not been probed. Narrow with `:since`, or pass `:limit` for one page.
+- **The fake defaulted a missing quantity and side to "1" and `:buy`.** It now refuses each
+  by name, as the real path does.
+
+### Reverted
+
+- A placed order whose id the venue did not return readably is `{:ok, %Order{id: nil}}`
+  again, not `{:error, :order_id_not_returned}` as in 0.2.99. The venue accepted the order,
+  and an error reads as "nothing was placed". Because this venue's `client_order_id` is no
+  idempotency key, a caller retrying on it places a second order.
+
 ## [0.2.100] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

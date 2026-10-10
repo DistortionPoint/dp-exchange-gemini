@@ -503,6 +503,9 @@ defmodule DpExchange.Gemini.Fake do
                Map.get(request, :time_in_force, :gtc)
              ),
            :ok <- priced(request),
+           # The real `Private.place_order/3` refuses each by name. The fake defaulted them
+           # to "1" and `:buy`, so a consumer's suite passed an order the venue never sees.
+           :ok <- named_fields(request, [:symbol, :quantity, :side]),
            :ok <- listed(Map.get(request, :symbol)) do
         {:ok, order(request)}
       end
@@ -695,6 +698,13 @@ defmodule DpExchange.Gemini.Fake do
   # in the parity sweep.
   defp not_listed(symbol) do
     {:refused, {:unknown_reason, "'#{symbol}' does not have available data yet"}}
+  end
+
+  defp named_fields(request, fields) do
+    case Enum.find(fields, &is_nil(Map.get(request, &1))) do
+      nil -> :ok
+      field -> {:error, {:missing_field, field}}
+    end
   end
 
   defp order(request) do
