@@ -20,6 +20,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Private` treated a 404 as a transient error.** `post/4`, `signed_get/3` and
+  `signed_get_bytes/3` refused only 400/401/403, so the `404 NotFound` that `rest.yaml`
+  documents on order and account endpoints came back as `{:error, {:exchange_error, ...}}`,
+  the shape reserved for retryable failures, while `Rest` already refused its own 404s. It is
+  now `{:refused, reason}`, decoded by the same `Rest.refusal_reason/1`.
+- **A depth snapshot with an unreadable row was delivered with a gap.**
+  `WsDecode.to_order_book/3`, `to_order_book_from_depth_update/3` and `Rest.get_order_book/2`
+  dropped a row whose price did not parse, kept one whose quantity did not as `{price, nil}`,
+  and dropped non-pair rows. They now refuse the whole frame
+  (`{:error, :unexpected_response_shape}`), as diffs already did; `Socket` raises its existing
+  `:degraded` notice for a streamed snapshot.
+- **An undecodable trade frame vanished without a notice.** `Socket` now raises a
+  `:data_quality` notice (`"undecodable trade"`) when the symbol or the print cannot be read,
+  as it does for depth and bookTicker frames.
+- **`get_historical_prices/4` and `get_trades/2` echoed the caller's symbol spelling**, and
+  the candle path interpolated the native symbol unescaped. They now return the canonical
+  symbol and build the path with `segment/1`, like `get_order_book/2` and `get_price/2`.
+- **A perpetual's symbol was mangled on the way back.** `get_price/2`, `get_top_of_book/2`
+  and `get_order_book/2` reported `"BTC-GUSD-PERP"` as `"BTCGUSD-PERP"`, which maps to a
+  different native symbol. A perpetual now reports the symbol asked, uppercased, since it
+  has no canonical form; a spot pair still reports its canonical one.
+
+### Documentation
+
+- `Socket`'s moduledoc and `usage-rules.md` state that a depth sequence gap raises exactly one
+  `:degraded` notice and then advances, so the consumer must act on that first notice.
+
 ## [0.2.103] - 2026-10-10
 
 ### Fixed

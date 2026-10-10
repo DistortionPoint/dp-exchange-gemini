@@ -182,6 +182,23 @@ defmodule DpExchange.Gemini.WsDecode do
           {:ok, OrderBook.t()} | {:error, :unexpected_response_shape}
   def to_order_book(%{"bids" => bids, "asks" => asks} = frame, symbol, observed_at)
       when is_list(bids) and is_list(asks) do
+    # All-or-error. Found 2026-10-10 by reading `parsed_levels/1`: a snapshot row with an
+    # unreadable price was dropped and one with an unreadable quantity kept as `{price, nil}`,
+    # so a damaged frame was delivered as a complete book with every other value real. Diffs
+    # already refuse through `readable_side/1`; a snapshot holds itself to the same rule, and
+    # `Socket` reports the refusal as its existing `:degraded` notice.
+    with :ok <- readable_side(bids), :ok <- readable_side(asks) do
+      build_snapshot(frame, bids, asks, symbol, observed_at)
+    end
+  end
+
+  # **Both sides are required.** The venue's AsyncAPI requires `bids` and `asks` on
+  # `OrderBookSnapshot`, so a side that is `null` or not a list is not an empty side. It used
+  # to become one: `levels/2` answered `[]` for it, and the frame was delivered as a whole
+  # book in which nobody was bidding, with every other value real.
+  def to_order_book(_frame, _symbol, _observed_at), do: {:error, :unexpected_response_shape}
+
+  defp build_snapshot(frame, bids, asks, symbol, observed_at) do
     {:ok,
      %OrderBook{
        symbol: symbol,
@@ -205,12 +222,6 @@ defmodule DpExchange.Gemini.WsDecode do
        provider: :gemini
      }}
   end
-
-  # **Both sides are required.** The venue's AsyncAPI requires `bids` and `asks` on
-  # `OrderBookSnapshot`, so a side that is `null` or not a list is not an empty side. It used
-  # to become one: `levels/2` answered `[]` for it, and the frame was delivered as a whole
-  # book in which nobody was bidding, with every other value real.
-  def to_order_book(_frame, _symbol, _observed_at), do: {:error, :unexpected_response_shape}
 
   @doc """
   Whether applying `frame` to a book last updated at `last_applied` would skip updates.
@@ -254,6 +265,18 @@ defmodule DpExchange.Gemini.WsDecode do
           {:ok, OrderBook.t()} | {:error, :unexpected_response_shape}
   def to_order_book_from_depth_update(%{"b" => bids, "a" => asks} = frame, symbol, observed_at)
       when is_list(bids) and is_list(asks) do
+    # All-or-error, as `to_order_book/3`: an unreadable row refuses the frame (2026-10-10).
+    with :ok <- readable_side(bids), :ok <- readable_side(asks) do
+      build_depth_anchor(frame, bids, asks, symbol, observed_at)
+    end
+  end
+
+  # Same rule as `to_order_book/3`: both sides are required, and one that is `null` or not a
+  # list is not an empty side.
+  def to_order_book_from_depth_update(_frame, _symbol, _observed_at),
+    do: {:error, :unexpected_response_shape}
+
+  defp build_depth_anchor(frame, bids, asks, symbol, observed_at) do
     {:ok,
      %OrderBook{
        symbol: symbol,
@@ -265,11 +288,6 @@ defmodule DpExchange.Gemini.WsDecode do
        provider: :gemini
      }}
   end
-
-  # Same rule as `to_order_book/3`: both sides are required, and one that is `null` or not a
-  # list is not an empty side.
-  def to_order_book_from_depth_update(_frame, _symbol, _observed_at),
-    do: {:error, :unexpected_response_shape}
 
   @doc """
   The bid and ask changes in a differential depth frame, as `{price, quantity}` levels.
@@ -382,6 +400,9 @@ defmodule DpExchange.Gemini.WsDecode do
   defp readable_row?([price, quantity]), do: decimal(price) != nil and decimal(quantity) != nil
   defp readable_row?(_row), do: false
 
+  # Found 2026-10-10: every caller now runs `readable_side/1` first, so the drop and the nil
+  # below cannot occur on a frame that reaches here; they stay as the last line of defence.
+  #
   # A level whose PRICE cannot be read is dropped rather than carried as `{nil, _}`:
   # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, `hd(bids)` landing on one
   # hands a consumer a best bid of `nil`, and a nil price cannot be sorted against a real one

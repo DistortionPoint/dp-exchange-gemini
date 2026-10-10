@@ -640,6 +640,17 @@ defmodule DpExchange.Gemini.PrivateTest do
                )
     end
 
+    test "a 404 is a refusal too, as it is on the public GETs" do
+      # `rest.yaml` documents `404 NotFound` on the order and account endpoints.
+      body = %{"result" => "error", "reason" => "NotFound"}
+
+      assert {:refused, {:unknown_reason, "NotFound"}} =
+               Private.get_balances(@credentials,
+                 plug: responding(body, status: 404),
+                 retry_attempts: 0
+               )
+    end
+
     test "a 500 stays an error the caller may retry" do
       assert {:error, _reason} =
                Private.get_balances(@credentials,

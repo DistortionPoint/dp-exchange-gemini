@@ -197,7 +197,7 @@ defmodule DpExchange.Gemini.Rest do
 
       {:ok,
        %Quote{
-         symbol: SymbolFormat.to_canonical_symbol(native),
+         symbol: reported_symbol(symbol, native),
          price: price,
          volume: volume,
          volume_window: volume && :rolling_24h,
@@ -243,7 +243,7 @@ defmodule DpExchange.Gemini.Rest do
          {:ok, ask} <- stated_price(body["ask"]) do
       {:ok,
        %TopOfBook{
-         symbol: SymbolFormat.to_canonical_symbol(native),
+         symbol: reported_symbol(symbol, native),
          bid: bid,
          ask: ask,
          bid_size: nil,
@@ -296,12 +296,16 @@ defmodule DpExchange.Gemini.Rest do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
+    # Found 2026-10-10 by reading the call sites: this echoed the caller's symbol string and
+    # interpolated `native` raw, where `get_order_book/2` and `get_price/2` return the
+    # canonical symbol and `segment/1` the path. Two spellings of one pair in one family.
+    canonical = reported_symbol(symbol, native)
 
     with {:ok, path, time_frame} <- candles_path(native, timeframe),
          :ok <- range_within_window(timeframe, range),
-         {:ok, body} <- get_body("#{path}/#{native}/#{time_frame}", opts),
+         {:ok, body} <- get_body("#{path}/#{segment(native)}/#{time_frame}", opts),
          {:ok, rows} <- list(body) do
-      with {:ok, candles} <- rows_to_candles(rows, symbol, timeframe) do
+      with {:ok, candles} <- rows_to_candles(rows, canonical, timeframe) do
         {:ok,
          candles
          |> Enum.filter(&within?(&1, range))
@@ -524,10 +528,12 @@ defmodule DpExchange.Gemini.Rest do
 
     with {:ok, body} <-
            get_body("/v1/book/#{segment(native)}", Keyword.put(opts, :params, params)),
-         :ok <- book_shape(body) do
+         :ok <- book_shape(body),
+         :ok <- readable_book_side(body["bids"]),
+         :ok <- readable_book_side(body["asks"]) do
       {:ok,
        %OrderBook{
-         symbol: SymbolFormat.to_canonical_symbol(native),
+         symbol: reported_symbol(symbol, native),
          bids: levels(body["bids"], :desc),
          asks: levels(body["asks"], :asc),
          venue_time: nil,
@@ -568,6 +574,8 @@ defmodule DpExchange.Gemini.Rest do
           {:ok, [Trade.t()]} | {:error, term()} | {:refused, term()}
   def get_trades(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
+    # Canonical, not the caller's spelling — see `get_historical_prices/4` (2026-10-10).
+    canonical = reported_symbol(symbol, native)
 
     params =
       []
@@ -586,7 +594,7 @@ defmodule DpExchange.Gemini.Rest do
          {:ok, rows} <- list(rows) do
       rows
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-        case to_trade(row, symbol) do
+        case to_trade(row, canonical) do
           {:ok, trade} -> {:cont, {:ok, [trade | acc]}}
           error -> {:halt, error}
         end
@@ -1313,6 +1321,22 @@ defmodule DpExchange.Gemini.Rest do
   defp book_shape(%{"bids" => _bids, "asks" => _asks}), do: {:error, :unexpected_response_shape}
   defp book_shape(_other), do: {:error, :unexpected_response_shape}
 
+  # All-or-error. Found 2026-10-10: `levels/2` dropped a row with an unreadable price and kept
+  # one with an unreadable amount as `{price, nil}`, so a damaged reply became a complete-
+  # looking book. The websocket arm refuses the same way (`WsDecode.to_order_book/3`).
+  defp readable_book_side(nil), do: :ok
+
+  defp readable_book_side(rows) when is_list(rows) do
+    if Enum.all?(rows, &readable_book_row?/1),
+      do: :ok,
+      else: {:error, :unexpected_response_shape}
+  end
+
+  defp readable_book_row?(%{"price" => price, "amount" => amount}),
+    do: decimal(price) != nil and decimal(amount) != nil
+
+  defp readable_book_row?(_row), do: false
+
   defp levels(nil, _direction), do: []
 
   # Sorted, and levels with an unreadable price dropped — the REST arm of the fix
@@ -1572,4 +1596,17 @@ defmodule DpExchange.Gemini.Rest do
   # request the venue was asked for a resource the caller never named. Every value the venue
   # documents is unreserved already, so for them this changes nothing.
   defp segment(value), do: value |> to_string() |> URI.encode(&URI.char_unreserved?/1)
+
+  # The symbol a returned struct names. A spot pair reports its canonical `BASE-QUOTE`. A
+  # perpetual reports the caller's symbol, uppercased, because `SymbolFormat` deliberately
+  # gives a perpetual no canonical form (see its moduledoc): `to_canonical_symbol/1` of
+  # `"btcgusd-perp"` is `"BTCGUSD-PERP"`, a symbol that maps back to `"btcgusdperp"`, not the
+  # one asked. Found 2026-10-10 when canonicalising candles broke the vendor's own perpetual
+  # example, and the same mangling was already on `get_price/2`, `get_top_of_book/2` and
+  # `get_order_book/2` for a perpetual.
+  defp reported_symbol(symbol, native) do
+    if SymbolFormat.perpetual?(native),
+      do: String.upcase(symbol),
+      else: SymbolFormat.to_canonical_symbol(native)
+  end
 end

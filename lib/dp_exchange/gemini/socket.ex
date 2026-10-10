@@ -80,6 +80,16 @@ defmodule DpExchange.Gemini.Socket do
   more than one, which should not be reachable through `subscribe/3` but is not assumed
   impossible — is claimed raises a `:degraded` notice rather than vanishing.
 
+  ## A depth gap raises one notice, and the consumer must act on that one
+
+  A `depthUpdate` whose `U` skips ahead of the last applied `u` raises a `:degraded` notice
+  (`details.reason: "depth sequence gap"`) and then **advances** the per-symbol sequence past
+  the gap. The next frame shows no gap, so the notice does not repeat. A consumer that waits
+  for a second one is applying diffs to a book that is wrong from the gap onward, with every
+  price real: the first notice is the instruction to discard that symbol's book and
+  resubscribe. An undecodable trade frame likewise raises one `:data_quality` notice
+  (`"undecodable trade"`) per frame, rather than being dropped in silence.
+
   ## Event time is nanoseconds
 
   The `E` field is **nanoseconds** since the epoch, not milliseconds. The difference is a
@@ -1112,19 +1122,42 @@ defmodule DpExchange.Gemini.Socket do
   defp decode_depth_frame(message, symbol, state),
     do: {WsDecode.to_order_book_delta(message, symbol), state}
 
+  # Both undecodable-trade paths raise a `:data_quality` notice. Found 2026-10-10 by reading
+  # the clauses: `{:error, _} -> :ok` and `:error -> {:ok, state}` dropped a trade with no
+  # word, while depth and bookTicker frames in the same state raise one. A subscriber who
+  # sees prints stop cannot tell "quiet market" from "frames this package cannot read". No
+  # latch, matching bookTicker's own notice: one notice per unreadable frame.
   defp deliver_trade(message, state) do
     case symbol_of(message) do
-      {:ok, symbol} -> deliver_trade(message, symbol, state)
-      :error -> {:ok, state}
+      {:ok, symbol} ->
+        deliver_trade(message, symbol, state)
+
+      :error ->
+        notify(
+          state,
+          Notice.new(:data_quality, :gemini,
+            details: %{reason: "undecodable trade", symbol: message["s"]}
+          )
+        )
+
+        {:ok, state}
     end
   end
 
   defp deliver_trade(message, symbol, state) do
     case WsDecode.to_trade(message, symbol) do
-      {:ok, trade} -> send(state.subscriber, {:dp_exchange, :gemini, trade})
-      # An undated print cannot be placed on a tape. Silence beats a trade at the wrong
-      # moment.
-      {:error, _reason} -> :ok
+      {:ok, trade} ->
+        send(state.subscriber, {:dp_exchange, :gemini, trade})
+
+      # An undated print cannot be placed on a tape, so it is not delivered; it is not
+      # dropped in silence either.
+      {:error, _reason} ->
+        notify(
+          state,
+          Notice.new(:data_quality, :gemini,
+            details: %{reason: "undecodable trade", symbol: symbol}
+          )
+        )
     end
 
     {:ok, state}

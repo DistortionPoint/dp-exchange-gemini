@@ -143,15 +143,13 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
                Rest.get_price("BTC-USD", plug: json(%{}, 404), retry_attempts: 0)
     end
 
-    test "a 404 on a private call is still an error — unmeasured, so unchanged" do
-      # Unlike the public GETs above, no live measurement backs a 404 shape for this
-      # venue's authenticated POSTs, and guessing one is the mistake this family's own
-      # conventions rule out. `Private`'s status list stays 400/401/403 until a 404 is
-      # actually observed here.
-      assert {:error, {:exchange_error, :gemini, message}} =
+    test "a 404 on a private call is a refusal, consistent with the public GETs" do
+      # Found 2026-10-10. This used to assert the opposite ("unmeasured, so unchanged"), but
+      # `rest.yaml` documents `404 NotFound` on the order and account endpoints, and
+      # `Rest` already refuses its own 404s. A transient-shaped error for a permanent answer
+      # looks retryable forever.
+      assert {:refused, :refused} =
                Private.get_balances(@credentials, plug: json(%{}, 404), retry_attempts: 0)
-
-      assert message =~ "404"
     end
   end
 

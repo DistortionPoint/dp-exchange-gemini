@@ -197,7 +197,7 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
       assert {:ok, [%{id: nil}]} = Rest.get_trades("BTC-USD", dated([trade]))
     end
 
-    test "a catalogue row naming no pair, or a book level that is not an object, is skipped" do
+    test "a row naming no pair is skipped; a book level that is not an object refuses the book" do
       rows = [%{"pair" => "BTCUSD", "price" => "1"}, %{"pair" => %{}}, %{}]
       assert {:ok, overview} = Rest.get_market_overview(dated(rows))
       assert map_size(overview) == 1
@@ -207,9 +207,12 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
         "asks" => [[%{}]]
       }
 
-      assert {:ok, %{bids: [{bid, _size}], asks: []}} =
-               Rest.get_order_book("BTC-USD", dated(book))
+      # Found 2026-10-10: a book level that is not an object used to be skipped, delivering
+      # a book with a gap. The whole book is refused instead.
+      assert {:error, :unexpected_response_shape} = Rest.get_order_book("BTC-USD", dated(book))
 
+      ok_book = %{"bids" => [%{"price" => "2", "amount" => "1"}], "asks" => []}
+      assert {:ok, %{bids: [{bid, _size}]}} = Rest.get_order_book("BTC-USD", dated(ok_book))
       assert Decimal.equal?(bid, 2)
     end
 

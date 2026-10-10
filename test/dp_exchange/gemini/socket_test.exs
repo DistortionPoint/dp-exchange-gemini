@@ -281,6 +281,23 @@ defmodule DpExchange.Gemini.SocketTest do
     test "a trade with no symbol is dropped, not delivered for the symbol \"\"" do
       assert {:ok, _state} = deliver(Map.delete(@trade_frame, "s"))
       refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Trade{}}
+
+      # Found 2026-10-10: the drop used to be silent.
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :data_quality, details: %{reason: "undecodable trade"}}}
+    end
+
+    test "a trade whose price or time cannot be read raises a notice instead of vanishing" do
+      for bad <- [%{@trade_frame | "p" => "garbage"}, Map.delete(@trade_frame, "E")] do
+        assert {:ok, _state} = deliver(bad)
+        refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Trade{}}
+
+        assert_received {:dp_exchange, :gemini,
+                         %Notice{
+                           kind: :data_quality,
+                           details: %{reason: "undecodable trade", symbol: "BTC-USD"}
+                         }}
+      end
     end
 
     test "a non-string symbol does not raise" do

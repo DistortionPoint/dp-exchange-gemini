@@ -222,17 +222,26 @@ defmodule DpExchange.Gemini.WsChannelsTest do
                ["102.25", "103.00", "104.75"]
     end
 
-    test "a level whose price cannot be read is dropped, not carried as {nil, nil}" do
-      # `@type level :: {Decimal.t(), Decimal.t()}` — a nil price is outside it, and
-      # `hd(bids)` landing on one hands a consumer a best bid of `nil`. `dp_exchange_schwab`
-      # and `dp_exchange_webull` both filter these out of their own book decoders with
-      # `not is_nil(price)`; this copy did not.
-      frame = %{"bids" => [["100.00", "1"], ["NaN", "2"], ["not-a-price", "3"]], "asks" => []}
+    test "a snapshot with an unreadable row is refused whole, not delivered with a gap" do
+      # Found 2026-10-10. A row with an unreadable price used to be dropped and one with an
+      # unreadable quantity kept as `{price, nil}`: a damaged frame delivered as a complete
+      # book. Diffs already refused; snapshots now do too.
+      bad_price = %{"bids" => [["100.00", "1"], ["NaN", "2"], ["not-a-price", "3"]], "asks" => []}
+      bad_quantity = %{"bids" => [["100.00", "garbage"]], "asks" => []}
+      not_a_pair = %{"bids" => [["100.00", "1"], ["100.50"]], "asks" => []}
+      bad_ask = %{"bids" => [], "asks" => [["x", "1"]]}
 
-      assert {:ok, book} = WsDecode.to_order_book(frame, "BTC-USD", @observed)
+      for frame <- [bad_price, bad_quantity, not_a_pair, bad_ask] do
+        assert {:error, :unexpected_response_shape} =
+                 WsDecode.to_order_book(frame, "BTC-USD", @observed)
+      end
+    end
 
-      assert [{price, _quantity}] = book.bids
-      assert Decimal.equal?(price, Decimal.new("100.00"))
+    test "a depth-update anchor with an unreadable row is refused whole" do
+      frame = %{"E" => 1_787_936_147_000_000_000, "u" => 42, "b" => [["x", "1"]], "a" => []}
+
+      assert {:error, :unexpected_response_shape} =
+               WsDecode.to_order_book_from_depth_update(frame, "BTC-USD", @observed)
     end
 
     test "a DELTA keeps the venue's own order, which the snapshot must not" do

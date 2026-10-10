@@ -52,10 +52,11 @@ assume the venue's own row order means anything.
 
 Two consequences:
 
-* **A level whose price this package cannot read is dropped**, not passed on as a `nil`
-  price. `level/0` is `{Decimal.t(), Decimal.t()}`, and `hd(bids)` must be able to answer
-  with a real number. A level with a readable price but no size keeps a `nil` size — that is
-  a real shape, not an unreadable one.
+* **A snapshot with a row this package cannot read is refused whole**, not delivered with
+  the row dropped or kept as `{price, nil}`. `get_order_book/2` answers
+  `{:error, :unexpected_response_shape}`; a streamed snapshot raises a `:degraded` notice
+  and is not delivered. A damaged book that looks complete is worse than no book, and
+  diffs already refused the same way. A side the venue states as absent is still empty.
 * **A streamed DELTA is the exception and is deliberately unsorted.** `OrderBookDelta` is
   passed through in the venue's own order, because its entries are changes to apply in
   sequence and re-ordering them would invent an order the venue never sent. The struct name
@@ -299,6 +300,14 @@ Where the venue's refusal body is not JSON at all — measured on `/v2/candles`'
 plain text rather than the usual `{"reason": …}` shape — the text itself is the reason:
 `{:refused, {:unknown_reason, "Supplied value 'X' is not a valid symbol"}}`, not a bare
 `{:refused, :refused}` that throws the venue's own words away.
+
+**Private (authenticated) calls refuse on 404 too**, as they do on 400, 401 and 403:
+`rest.yaml` documents `404 NotFound` on the order and account endpoints, so an unknown
+order or account is `{:refused, reason}`, permanent for the request as sent, never the
+retryable `{:error, {:exchange_error, …}}` shape.
+
+`get_historical_prices/4` and `get_trades/2` return the **canonical** symbol (`"BTC-USD"`)
+whatever spelling you passed, as `get_order_book/2` and `get_price/2` always did.
 
 ### A refusal carries the venue's sentence, not only its category
 
@@ -1101,3 +1110,16 @@ Treat the other two as a feed your supervision tree has to bring back.
 this package opens, unless a call passes its own `:url`, to that address instead of the
 venue. Unset, the venue is the default. It exists so a test suite never dials the live venue
 by accident, and it is equally usable for a proxy.
+
+## A depth sequence gap raises one notice, and it will not repeat
+
+When a `depthUpdate` frame skips ahead of the last applied update, the socket raises a
+single `:degraded` notice (`details.reason: "depth sequence gap"`, with the `symbol`) and
+then **advances** its per-symbol sequence past the gap. The next frame therefore shows no
+gap, and no second notice follows. **Act on that first notice**: discard your local book for
+that symbol and resubscribe (or refetch with `get_order_book/2`). Waiting for the notice to
+repeat leaves you applying diffs to a book that is wrong from the gap onward, with every
+price real.
+
+Likewise an undecodable trade frame raises a `:data_quality` notice
+(`details.reason: "undecodable trade"`) instead of vanishing; one notice per frame.

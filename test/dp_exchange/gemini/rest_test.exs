@@ -58,6 +58,13 @@ defmodule DpExchange.Gemini.RestTest do
       assert quote_struct.symbol == "BTC-USD"
     end
 
+    test "a perpetual reports the symbol asked, not a mangled canonical (found 2026-10-10)" do
+      # `to_canonical_symbol("btcgusd-perp")` is "BTCGUSD-PERP", which maps back to
+      # "btcgusdperp". A perpetual has no canonical form, so the symbol asked is the answer.
+      assert {:ok, %Types.Quote{symbol: "BTC-GUSD-PERP"}} =
+               Rest.get_price("btc-gusd-perp", plug: responding(@ticker), retry_attempts: 0)
+    end
+
     test "the book side comes back from get_top_of_book/2, not on the Quote" do
       # One payload, two facts. `Core.Types.Quote` has no bid or ask to put them on, which
       # is what stops a caller reading a resting order as a traded price.
@@ -471,22 +478,47 @@ defmodule DpExchange.Gemini.RestTest do
                ["77792.92", "77793.40"]
     end
 
-    test "a level whose price cannot be read is dropped, not carried as {nil, nil}" do
-      # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, and `hd(bids)` landing
-      # on one hands a caller a best bid of nil.
-      body = %{
-        "bids" => [
-          %{"price" => "77792.91", "amount" => "1", "timestamp" => "1787936377"},
-          %{"price" => "NaN", "amount" => "2", "timestamp" => "1787936377"}
-        ],
-        "asks" => []
+    test "a book with an unreadable level is refused whole, not returned with a gap" do
+      # Found 2026-10-10: an unreadable price used to be dropped and an unreadable amount
+      # kept as `{price, nil}`, so a damaged reply looked like a complete book.
+      good = %{"price" => "77792.91", "amount" => "1", "timestamp" => "1787936377"}
+
+      for bad <- [
+            %{"price" => "NaN", "amount" => "2"},
+            %{"price" => "77792.50", "amount" => "garbage"},
+            "not-a-row"
+          ] do
+        body = %{"bids" => [good, bad], "asks" => []}
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+      end
+    end
+
+    test "get_historical_prices and get_trades answer with the canonical symbol" do
+      # Found 2026-10-10: both echoed the caller's spelling while `get_order_book/2` and
+      # `get_price/2` canonicalised.
+      candles = [[1_787_935_740_000, 77_986.74, 77_995.93, 77_908.94, 77_941.47, 0.0]]
+
+      assert {:ok, [candle]} =
+               Rest.get_historical_prices("btcusd", "1m", [],
+                 plug: responding(candles),
+                 retry_attempts: 0
+               )
+
+      assert candle.symbol == "BTC-USD"
+
+      trade = %{
+        "timestamp" => 1_547_146_811,
+        "timestampms" => 1_547_146_811_357,
+        "tid" => 1,
+        "price" => "3610.85",
+        "amount" => "0.27",
+        "type" => "buy"
       }
 
-      assert {:ok, book} =
-               Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
-
-      assert [{price, _size}] = book.bids
-      assert Decimal.equal?(price, Decimal.new("77792.91"))
+      assert {:ok, [%{symbol: "BTC-USD"}]} =
+               Rest.get_trades("btcusd", plug: responding([trade]), retry_attempts: 0)
     end
 
     test "a book with no level timestamps still succeeds, with venue_time nil" do

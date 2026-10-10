@@ -512,7 +512,7 @@ defmodule DpExchange.Gemini.Private do
 
       # Permanent for the request as sent. A caller refreshes a token and calls again —
       # that is a different request, not a retry of this one.
-      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
@@ -612,7 +612,7 @@ defmodule DpExchange.Gemini.Private do
       when status in 200..299 ->
         with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
-      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
@@ -641,7 +641,7 @@ defmodule DpExchange.Gemini.Private do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 
-      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
