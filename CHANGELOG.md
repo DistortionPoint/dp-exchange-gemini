@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.103] - 2026-10-10
+
 ### Fixed
 
 - **`Feed`'s call timeout was shorter than its own worst case.** With `:trades` on,
