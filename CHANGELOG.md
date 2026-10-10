@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.106] - 2026-10-10
+
 ### Fixed
 
 - **A socket that crashed on connect was redialled at once, forever.** `Feed` redialled
