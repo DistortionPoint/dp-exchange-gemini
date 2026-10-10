@@ -20,6 +20,10 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.100] - 2026-10-10
+
+_No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
+
 ## [0.2.99] - 2026-10-10
 
 ### Fixed
