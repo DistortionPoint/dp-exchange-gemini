@@ -5,7 +5,7 @@
 > This package has **never run in production.** It is published early and openly so it
 > can be used and reported on, not because it is finished.
 >
-> - **The API may change without a major version.** Pin three-part (`~> 0.1.0`).
+> - **The API may change without a major version.** Pin three-part (`~> 0.2.106` or later).
 > - **Verification is uneven, and the gaps are on the expensive side.** The conformance
 >   suite passes against a fake, and against Gemini's live public endpoints.
 >   **Order placement and authenticated flows are thinly covered.** No test in this repo
@@ -19,18 +19,18 @@ same facade every venue in the family exposes.
 
 ## What this package covers
 
-88 callbacks, of which **63 are declared `:experimental`** and 25 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
+88 callbacks, of which **64 are declared `:experimental`** and 24 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
 
-Asset classes: **crypto**. Streamed kinds: **quotes, top of book** — everything else pulls only.
+Asset classes: **crypto**. Streamed kinds: **quotes, top of book, trades** (`:trades` is opt-in via `Feed`'s `channels:`) — everything else pulls only.
 
-Of the 25 unsupported endpoints, **22 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/gemini/negative-claims.md`, which records the source and date behind every one.
+Of the 24 unsupported endpoints, **22 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/gemini/negative-claims.md`, which records the source and date behind every one.
 
 ## Installation
 
 ```elixir
 def deps do
   [
-    {:dp_exchange_gemini, "~> 0.1.0"}
+    {:dp_exchange_gemini, "~> 0.2.106"}
   ]
 end
 ```

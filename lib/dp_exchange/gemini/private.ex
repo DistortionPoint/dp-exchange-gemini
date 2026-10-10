@@ -48,7 +48,7 @@ defmodule DpExchange.Gemini.Private do
   | `time_in_force` | Gemini option | Meaning |
   |---|---|---|
   | `:gtc` (default) | none | fills what it can, rests the remainder on the book |
-  | `:post_only` / `:maker_or_cancel` | `maker-or-cancel` | adds liquidity only, cancels if it would take |
+  | (none — an ORDER TYPE: `order_type: :post_only`, alias `:maker_or_cancel`) | `maker-or-cancel` | adds liquidity only, cancels if it would take |
   | `:ioc` | `immediate-or-cancel` | takes what it can, cancels the rest |
   | `:fok` | `fill-or-kill` | fills entirely or cancels entirely |
 

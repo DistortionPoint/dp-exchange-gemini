@@ -210,9 +210,11 @@ kind". No per-connection stream limit is documented for `wss://ws.gemini.com`; a
 `:trades` doubles the streams this one socket carries per symbol, not the number of
 sockets — this package still shards nothing.
 
-## Seven candle widths, and the venue's own documentation names three of them wrong
+## Nine candle widths, and the venue's own documentation names three of them wrong
 
-Canonical widths this package serves: **`1m 5m 15m 30m 1h 6h 1d`**. The shared vocabulary
+Canonical widths this package serves: **`1m 5m 15m 30m 1h 6h 1d 1w 1M`** (`1w` and `1M`, the
+venue's own `1mo`, joined 2026-09-08 and are not window-checked: a `:start` older than their
+window returns an empty list, not `{:error, {:range_unavailable, …}}`). The shared vocabulary
 also models `2h`, `4h` and `12h`; Gemini serves none of them, and asking is an error
 rather than the nearest width.
 
@@ -222,7 +224,8 @@ this package sends those — you pass the canonical form and never see this. Mea
 2026-08-28; the venue names its own accepted set in the 400 body:
 
 ```
-time_frame expects one of the following: [1m, 5m, 15m, 30m, 1hr, 6hr, 1day]
+time_frame expects one of the following: [1m, 5m, 15m, 30m, 1hr, 6hr, 1day]   (as of 2026-08-28;
+it named `1w` and `1mo` as well by 2026-09-08)
 ```
 
 ## The candle window is fixed, and your range bounds do not reach the venue

@@ -152,7 +152,7 @@ defmodule DpExchange.Gemini.FakeTest do
       # The real venue's `bookTicker` `c` carries no trade time (websocket.yaml:1254-1256),
       # so `Socket.deliver_last_trade/3` sends `venue_time: nil` unconditionally on the
       # stream — a different fact from `get_price/2`'s REST `Quote`, whose `venue_time` is
-      # the venue's `Date` header and genuinely never `nil`. Reusing `get_price/2`'s struct
+      # the venue's `Date` header (the fake always supplies one). Reusing `get_price/2`'s struct
       # unmodified on the stream would answer `venue_time: @at` here and `nil` against the
       # real venue — "differently capable", which this fake must never be.
       assert {:ok, %Quote{venue_time: rest_time}} = Fake.get_price("BTC-USD")

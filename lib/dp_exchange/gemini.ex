@@ -32,11 +32,12 @@ defmodule DpExchange.Gemini do
   range afterward, so a range outside the true window still comes back empty rather than
   wrong, just without the named boundary. See `DpExchange.Gemini.Rest`'s moduledoc.
 
-  **`Quote.venue_time` comes from the venue's clock, or the call fails — so on this venue it
-  is never `nil`.** Neither Gemini ticker publishes a quote time: `/v1/pubticker`'s only
+  **`Quote.venue_time` comes from the venue's clock, or it is `nil` — a consumer needs a
+  `nil` branch.** Neither Gemini ticker publishes a quote time: `/v1/pubticker`'s only
   timestamp stamps its 24-hour volume window, about a minute stale. This package uses the
-  venue's HTTP `Date` header and returns `{:error, :missing_venue_timestamp}` when it is
-  absent. It never substitutes the local clock.
+  venue's HTTP `Date` header; when that is absent or unreadable the real traded price is
+  still returned with `venue_time: nil`, and `observed_at` states freshness. It never
+  substitutes the local clock.
 
   **Gemini publishes no rate-limit headers.** Measured 2026-08-28: a response carries
   `date`, `x-request-id` and `x-envoy-upstream-service-time`, and nothing else. It does
@@ -86,7 +87,8 @@ defmodule DpExchange.Gemini do
 
   ## Gemini serves no market orders, and this package will not invent one
 
-  `capabilities/0` declares `supported_order_types: [:limit, :stop_limit]`. The venue's own
+  `capabilities/0` declares `supported_order_types: [:limit, :stop_limit, :post_only, :ioc,
+  :fok]` (the last three are Gemini execution options on a limit order). The venue's own
   reasoning: market orders "provide you with no price protection". Its documented
   workaround is an immediate-or-cancel order "coupled with an aggressive limit price" —
   and **that price is not one a package may choose for you.** How aggressive is a question
@@ -169,8 +171,10 @@ defmodule DpExchange.Gemini do
     {:preview_order, 3},
     {:preview_replace, 4},
     {:replace_order, 4},
-    # **The venue carries no positions to close.** Gemini's perpetuals surface is separate
-    # and this package does not reach it; on spot there is no position, only a balance.
+    # **The venue publishes no close-position endpoint.** `/v1/positions` reads perpetual
+    # positions (`get_positions/1`), but nothing in the specification closes one; a caller
+    # closes by placing the offsetting order, which is its decision (price, size). On spot
+    # there is no position, only a balance.
     {:close_position, 3},
     # **This venue runs no auctions and publishes no footprints.** A crypto book trades
     # continuously — there is no opening or closing auction to have an imbalance in — and
@@ -886,17 +890,13 @@ defmodule DpExchange.Gemini do
   # the answer a caller can act on.
   defp credentials(opts), do: Keyword.get(opts, :credentials, %{})
 
-  # --- Declared but not yet implemented -----------------------------------
+  # --- Perpetuals, staking, conversions and account administration -------------
   #
-  # Core 0.1.16 widened the facade to the surface the venues actually publish. Gemini
-  # publishes most of what follows — staking, positions, funding, conversions, admin — and
-  # each is a Phase 3–13 item in the coverage plan.
-  #
-  # They answer `{:error, :not_supported}` and are declared `:unsupported` in
-  # `capabilities/0`, so a consumer routing on the declaration is told the truth. **The
+  # Everything below is implemented and declared `:experimental`; only the callbacks listed in
+  # `@unsupported` answer `{:error, :not_supported}` and are declared `:unsupported`. **The
   # declaration is what a caller reads; a stub that claimed otherwise would be the lie.**
-  # Conformance assertion 12 checks the two agree in both directions, which is what stops
-  # one being updated without the other.
+  # Conformance checks the two agree in both directions, which is what stops one being
+  # updated without the other.
 
   @doc """
   Open positions on the perpetuals book.

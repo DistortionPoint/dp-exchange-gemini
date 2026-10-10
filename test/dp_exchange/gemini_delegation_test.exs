@@ -185,8 +185,18 @@ defmodule DpExchange.GeminiDelegationTest do
       # staleness window, so `coverage/1` answered `:stream` for it indefinitely.
       feed = Process.whereis(opts[:feed])
       :ok = Gemini.update_symbols(["BTC-USD"], feed: opts[:feed])
-      :ok = Gemini.subscribe_notices(feed: opts[:feed], to: self())
-      :ok = Gemini.unsubscribe(["BTC-USD"], feed: opts[:feed])
+
+      # Register this process as a quote subscriber without dialling a venue: `subscribe/2`
+      # would open a real socket. Without a subscriber the `refute_received` below could
+      # never fail, whatever the feed did with the late frame.
+      #
+      # `test_pid` is bound HERE: the function below runs inside the feed process, where
+      # `self()` is the feed itself.
+      test_pid = self()
+
+      :sys.replace_state(feed, fn state ->
+        %{state | subscribers: MapSet.put(state.subscribers, test_pid)}
+      end)
 
       late = %Quote{
         symbol: "BTC-USD",
@@ -196,6 +206,12 @@ defmodule DpExchange.GeminiDelegationTest do
         provider: :gemini
       }
 
+      # Control: while the symbol is wanted, the same frame IS delivered to this process.
+      send(feed, {:dp_exchange, :gemini, late})
+      _settled = Gemini.coverage(feed: opts[:feed])
+      assert_received {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}
+
+      :ok = Gemini.unsubscribe(["BTC-USD"], feed: opts[:feed])
       send(feed, {:dp_exchange, :gemini, late})
 
       assert Gemini.coverage(feed: opts[:feed]) == %{}

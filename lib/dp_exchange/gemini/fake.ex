@@ -919,10 +919,10 @@ defmodule DpExchange.Gemini.Fake do
   defp subscribed_top_of_book, do: Process.get(@top_of_book_key, MapSet.new())
 
   # `get_price/2`'s `Quote` is the REST shape — `venue_time` is the venue's `Date` header
-  # and is genuinely never `nil` there (see `usage-rules.md`'s "Quote.venue_time is the
-  # venue's HTTP Date"). The STREAMED `Quote` is a different fact from a different
-  # transport: it comes off a `bookTicker` frame's `c`, which the vendor's own AsyncAPI
-  # documents no trade time for at all (websocket.yaml:1254-1256), so
+  # when it sends a readable one, else `nil` (see `usage-rules.md`'s "Quote.venue_time is the
+  # venue's HTTP Date"); the fake always answers with the header present. The STREAMED
+  # `Quote` is a different fact from a different transport: it comes off a `bookTicker`
+  # frame's `c`, which the vendor's own AsyncAPI documents no trade time for at all (websocket.yaml:1254-1256), so
   # `DpExchange.Gemini.Socket` delivers it with `venue_time: nil` unconditionally — see
   # `Socket.deliver_last_trade/3`. Reusing `get_price/2`'s struct unmodified here answered
   # `venue_time: @at` on the stream, which is not "less capable than the real adapter", the

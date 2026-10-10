@@ -25,7 +25,7 @@ defmodule DpExchange.Gemini.Rest do
   | `1mo` | ~115 | ~9.6 years |
 
   So a range is honoured by **filtering here**, and a range the window cannot cover is an
-  **error** rather than a short answer for the five widths above whose window this package
+  **error** rather than a short answer for the seven widths above whose window this package
   can compute — see the next section for why `1w` and `1mo` are the two exceptions.
   Handing back 364 daily bars to a caller who asked for five years is the family's named
   failure mode in its quietest form: every value real, only the meaning wrong.
@@ -176,10 +176,9 @@ defmodule DpExchange.Gemini.Rest do
   # --- quotes -------------------------------------------------------------
 
   @doc """
-  Best bid, best ask and last trade for one symbol.
-
-  Timestamped from the venue's `Date` response header — see the module doc for why not
-  from the payload.
+  The last traded price for one symbol, as a `Quote`. Bid and ask are `get_top_of_book/2`.
+  `venue_time` is the venue's `Date` response header, or `nil` — see the module doc for why
+  not from the payload.
   """
   @spec get_price(String.t(), keyword()) ::
           {:ok, Quote.t()} | {:error, term()} | {:refused, term()}
@@ -364,7 +363,7 @@ defmodule DpExchange.Gemini.Rest do
   Every spot symbol the venue lists, canonical.
 
   Perpetuals are excluded. They are real instruments and the venue lists them alongside
-  spot pairs, but this package declares `supported_instrument_types: [:spot]`, and a
+  spot pairs, but this is the spot catalogue (perpetuals have their own endpoints), and a
   perpetual has no canonical `BASE-QUOTE` form — emitting one would invent a spot pair
   that does not exist.
 
@@ -1297,8 +1296,8 @@ defmodule DpExchange.Gemini.Rest do
 
   defp message_from(_no_message), do: nil
 
-  # The venue's own clock, from the response it served. Absent, and the request fails —
-  # a quote whose freshness cannot be stated must not be returned.
+  # The venue's own clock, from the response it served. Absent, this returns an error and
+  # callers that can tolerate it (`header_time_or_nil/1`) turn that into `nil`.
   # Req hands headers back as a map of lowercase name to a LIST of values; a raw client
   # hands back a list of two-tuples with the venue's own casing. Both shapes appear here,
   # and reading only one of them is how a header goes silently missing.

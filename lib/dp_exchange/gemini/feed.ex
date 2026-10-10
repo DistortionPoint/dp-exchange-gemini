@@ -16,7 +16,7 @@ defmodule DpExchange.Gemini.Feed do
   ## Coverage by kind is tracked from the struct that arrived, never from the channel
 
   `delivering_by_kind` buckets the same observed-arrival fact `coverage/1` reports, split
-  by which of `Core.Types.Quote` or `Core.Types.TopOfBook` a message actually was;
+  by which of `Core.Types.Quote`, `Core.Types.TopOfBook` or `Core.Types.Trade` a message was;
   `coverage/1`'s own map is now derived from it, so the two cannot drift apart. The kind
   comes from a pattern match on the struct itself — never from the `wanted` set, a
   channel address, or anything this module ever asked for — because intent standing in
@@ -113,7 +113,9 @@ defmodule DpExchange.Gemini.Feed do
   at once, not a partial set the way a per-shard venue's would), a `:link_down`
   `Core.Notice` reports it,
   and `resubscribe/1` — the same function the periodic timer already calls — attempts an
-  immediate reconnect and resend of `wanted` rather than waiting out the next
+  immediate reconnect and resend of `wanted` (for the first crash in a run; a crash within
+  30s of the previous one waits, doubling from 1s to 30s, so a socket that dies on connect is
+  not redialled in a tight loop) rather than waiting out the next
   `@resubscribe_interval_ms` tick.
 
   ## The resubscribe timer's own failure path was silent — until now

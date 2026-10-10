@@ -669,7 +669,10 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, {:dp_exchange, :gemini, :reconnected, spawn(fn -> :ok end)})
 
-      refute_receive {:frame_sent, _frame}, 50
+      # The call queues behind the message above, so the feed has handled it (and sent
+      # whatever it was going to send) before this reads the mailbox.
+      _settled = Feed.coverage(feed)
+      refute_received {:frame_sent, _frame}
       assert Process.alive?(feed)
     end
 
@@ -691,7 +694,10 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      refute_receive {:frame_sent, _frame}, 50
+      # The call queues behind the message above, so the feed has handled it (and sent
+      # whatever it was going to send) before this reads the mailbox.
+      _settled = Feed.coverage(feed)
+      refute_received {:frame_sent, _frame}
       assert Process.alive?(feed)
     end
 
@@ -743,7 +749,10 @@ defmodule DpExchange.Gemini.FeedTest do
       # once on the transition INTO failure, never once per tick while it continues.
       send(feed, :resubscribe)
       send(feed, :resubscribe)
-      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
+      # A call queues behind both `:resubscribe` messages, so by the time it answers the feed
+      # has processed them and any notice they would emit is already in this mailbox.
+      _settled = Feed.coverage(feed)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
 
     test "a resubscribe that recovers after a latched failure emits an info notice, once" do
@@ -774,7 +783,8 @@ defmodule DpExchange.Gemini.FeedTest do
       # A further successful resubscribe must not re-emit the recovery notice — it
       # already fired on the transition back out, and the latch reads `:ok` again.
       send(feed, :resubscribe)
-      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
+      _settled = Feed.coverage(feed)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
 
     test "an ordinary successful resubscribe, never having failed, emits no notice at all" do
@@ -786,7 +796,8 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, :resubscribe)
 
       assert_receive {:frame_sent, %{"method" => "subscribe"}}
-      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
+      _settled = Feed.coverage(feed)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
 
     test "a resubscribe with nothing wanted touches neither the wire nor the failure latch" do
@@ -796,7 +807,8 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 100
+      _settled = Feed.coverage(feed)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
   end
 
@@ -930,9 +942,10 @@ defmodule DpExchange.Gemini.FeedTest do
       #
       # The blocker runs INSIDE the feed process: `:sys.replace_state/2` applies its function
       # there, so the sleep occupies the feed exactly as a slow callback would, and the call
-      # under test queues behind it on the real mailbox. Six seconds is chosen to sit between
-      # the two timeouts: comfortably past the five-second default that used to fire, and
-      # nowhere near the fifteen the call is now allowed.
+      # under test queues behind it on the real mailbox. Eight seconds is chosen to sit
+      # between the two timeouts: past the five-second default that used to fire, with three
+      # seconds of margin for a loaded scheduler, and well short of the fifteen the call is
+      # now allowed.
       #
       # A `GenServer.call/3` timeout exits in the CALLER, so before the fix this test would
       # not have failed an assertion — it would have killed the test process with
@@ -952,7 +965,7 @@ defmodule DpExchange.Gemini.FeedTest do
           feed,
           fn state ->
             send(test_pid, blocked)
-            Process.sleep(6_000)
+            Process.sleep(8_000)
             state
           end,
           30_000

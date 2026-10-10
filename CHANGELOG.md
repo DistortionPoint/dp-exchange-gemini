@@ -20,6 +20,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Documentation contradicted the code in several places, found by an audit against the
+  code.** The `DpExchange.Gemini` moduledoc said `Quote.venue_time` is never `nil` and that a
+  missing `Date` header returns `{:error, :missing_venue_timestamp}`; `get_price/2` has
+  returned the price with `venue_time: nil` since 0.2.30 (`Rest.get_price/2`'s `@doc` also
+  still described bid and ask on the `Quote`). The same moduledoc declared
+  `supported_order_types: [:limit, :stop_limit]`; `capabilities/0` also declares `:post_only`,
+  `:ioc` and `:fok`, and `Private`'s order-type table listed `:post_only` as a
+  `time_in_force`, which is refused (`{:unsupported_time_in_force, :post_only}`; it is an
+  order type). `usage-rules.md` still headed its candle section "Seven candle widths" and
+  omitted `1w` and `1M`. The README's counts were off by one (64 `:experimental` and 24
+  `:unsupported`, not 63 and 25), it omitted the opt-in `:trades` stream, and it told
+  consumers to pin `~> 0.1.0`, which cannot resolve a `0.2.x` release. No behaviour changed.
+
 ## [0.2.106] - 2026-10-10
 
 ### Fixed
