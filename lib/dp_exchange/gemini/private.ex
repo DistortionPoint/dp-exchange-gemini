@@ -212,17 +212,16 @@ defmodule DpExchange.Gemini.Private do
   @spec place_order(map(), map(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
-    with {:ok, {type, options}} <-
-           order_wire(
-             Map.get(request, :order_type, :limit),
-             Map.get(request, :time_in_force, :gtc)
-           ),
-         {:ok, price} <- required_price(request),
-         # Named refusals, not `Map.fetch!/2`: a `KeyError` raised in the caller's process on
-         # a money-moving call, where every other missing field is an `{:error, _}`.
-         {:ok, symbol} <- required_field(request, :symbol),
-         {:ok, quantity} <- required_field(request, :quantity),
-         {:ok, side} <- required_field(request, :side) do
+    with {:ok, terms} <- order_terms(request) do
+      %{
+        type: type,
+        options: options,
+        price: price,
+        symbol: symbol,
+        quantity: quantity,
+        side: side
+      } = terms
+
       params =
         %{
           "symbol" => SymbolFormat.to_exchange_symbol(symbol),
@@ -244,6 +243,44 @@ defmodule DpExchange.Gemini.Private do
         # key, a caller retrying on it places a second order. Coinbase keeps the same rule.
         to_order(body)
       end
+    end
+  end
+
+  @doc """
+  Whether `request` would be sent by `place_order/3`, checked without sending it.
+
+  This is the validation `place_order/3` runs before it signs anything — the order type and
+  time in force, then the price, then `:symbol`, `:quantity` and `:side` — in that order and
+  with those error shapes. It is exposed so `DpExchange.Gemini.Fake` refuses with this exact
+  function rather than a second copy of the rules.
+  """
+  @spec validate_order(map()) :: :ok | {:error, term()}
+  def validate_order(request) do
+    with {:ok, _terms} <- order_terms(request), do: :ok
+  end
+
+  # The values `place_order/3` sends, or the first refusal. Named refusals, not
+  # `Map.fetch!/2`: a `KeyError` raised in the caller's process on a money-moving call, where
+  # every other missing field is an `{:error, _}`.
+  defp order_terms(request) do
+    with {:ok, {type, options}} <-
+           order_wire(
+             Map.get(request, :order_type, :limit),
+             Map.get(request, :time_in_force, :gtc)
+           ),
+         {:ok, price} <- required_price(request),
+         {:ok, symbol} <- required_field(request, :symbol),
+         {:ok, quantity} <- required_field(request, :quantity),
+         {:ok, side} <- required_field(request, :side) do
+      {:ok,
+       %{
+         type: type,
+         options: options,
+         price: price,
+         symbol: symbol,
+         quantity: quantity,
+         side: side
+       }}
     end
   end
 
@@ -381,10 +418,18 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp cancel_scope(:session), do: {:ok, "/v1/order/cancel/session"}
-  defp cancel_scope(:account), do: {:ok, "/v1/order/cancel/all"}
-  defp cancel_scope(nil), do: {:error, :scope_required}
-  defp cancel_scope(other), do: {:error, {:unsupported_scope, other}}
+  @doc """
+  The endpoint a `cancel_all_orders/2` scope names, or the refusal for one it does not.
+
+  Checked before anything is signed, so a call with no scope is `{:error, :scope_required}`
+  whether or not it carries credentials. Exposed so `DpExchange.Gemini.Fake` refuses with
+  this function in the same order.
+  """
+  @spec cancel_scope(term()) :: {:ok, String.t()} | {:error, term()}
+  def cancel_scope(:session), do: {:ok, "/v1/order/cancel/session"}
+  def cancel_scope(:account), do: {:ok, "/v1/order/cancel/all"}
+  def cancel_scope(nil), do: {:error, :scope_required}
+  def cancel_scope(other), do: {:error, {:unsupported_scope, other}}
 
   defp cancel_all_result(%{"details" => details}) when is_map(details) do
     with {:ok, cancelled} <- ids(details["cancelledOrders"]),
@@ -1187,6 +1232,20 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  @doc """
+  Whether `id` and `opts` carry everything `commit_conversion/2` sends, checked without
+  sending it.
+
+  The five terms the quote was made at (`:symbol`, `:side`, `:amount`, `:price`, `:fee`) first,
+  as `{:error, {:missing_option, missing}}`, then the quote id, as
+  `{:error, {:invalid_quote_id, id}}`. Exposed so `DpExchange.Gemini.Fake` refuses with this
+  exact function, in the same order, rather than a second copy of the rules.
+  """
+  @spec validate_commit_terms(term(), keyword()) :: :ok | {:error, term()}
+  def validate_commit_terms(id, opts) do
+    with {:ok, _params} <- execute_params(id, opts), do: :ok
+  end
+
   # The venue needs the same symbol, side and spend it quoted against, alongside the id —
   # `/v1/instant/execute` does not take the quote id alone. A caller holding the
   # `Conversion` this package returned has all of them, so they come from `opts` and a
@@ -1262,7 +1321,18 @@ defmodule DpExchange.Gemini.Private do
   defp quote_id_integer(id) when is_integer(id), do: {:ok, id}
   defp quote_id_integer(id), do: {:error, {:invalid_quote_id, id}}
 
-  defp instant_pair(from, to, opts) do
+  @doc """
+  The venue symbol and side a conversion between `from` and `to` is made at.
+
+  From `opts[:symbol]` and `opts[:side]` when both are given (`:buy` or `:sell`); one without
+  the other is `{:error, {:missing_option, [:symbol, :side]}}`; neither derives them from the
+  assets and refuses with `{:error, {:ambiguous_conversion, from, to}}` when that is not
+  determinable. Checked before anything is signed. Exposed so `DpExchange.Gemini.Fake`
+  refuses with this function in the same order.
+  """
+  @spec instant_pair(String.t(), String.t(), keyword()) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
+  def instant_pair(from, to, opts) do
     case {Keyword.get(opts, :symbol), Keyword.get(opts, :side)} do
       {nil, nil} ->
         derive_instant_pair(from, to)
@@ -1554,13 +1624,15 @@ defmodule DpExchange.Gemini.Private do
 
   `at` is the instant, sent as milliseconds.
   """
-  @spec get_fx_rate(String.t(), DateTime.t(), keyword()) ::
+  @spec get_fx_rate(String.t(), DateTime.t() | term(), keyword()) ::
           {:ok, FxRate.t()} | {:error, term()} | {:refused, term()}
+  def get_fx_rate(_pair, at, _opts) when not is_struct(at, DateTime),
+    do: validate_fx_instant(at)
+
   def get_fx_rate(pair, %DateTime{} = at, opts) do
-    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
     credentials = Keyword.get(opts, :credentials, %{})
 
-    with :ok <- fx_pair(native) do
+    with {:ok, native} <- validate_fx_pair(pair) do
       timestamp = DateTime.to_unix(at, :millisecond)
 
       with {:ok, body, _headers} <-
@@ -1570,8 +1642,32 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp fx_pair(pair) when pair in @fx_pairs, do: :ok
-  defp fx_pair(pair), do: {:error, {:unsupported_fx_pair, pair}}
+  @doc """
+  Whether `at` is an instant `get_fx_rate/3` can ask about: a `DateTime`. Anything else —
+  a `NaiveDateTime` with no zone, a `Date`, a unix integer — is
+  `{:error, {:invalid_fx_instant, at}}`. It raised `FunctionClauseError` in the caller's
+  process; `DpExchange.Gemini.Fake` runs the same check.
+  """
+  @spec validate_fx_instant(term()) :: :ok | {:error, {:invalid_fx_instant, term()}}
+  def validate_fx_instant(%DateTime{}), do: :ok
+  def validate_fx_instant(at), do: {:error, {:invalid_fx_instant, at}}
+
+  @doc """
+  The venue's spelling of `pair` (`EUR-USD` and `eurusd` are both `EURUSD`), or
+  `{:error, {:unsupported_fx_pair, native}}` for one of the fourteen it does not serve.
+
+  Checked before anything is signed. Exposed so `DpExchange.Gemini.Fake` refuses with this
+  function in the same order.
+  """
+  @spec validate_fx_pair(term()) ::
+          {:ok, String.t()} | {:error, {:unsupported_fx_pair, String.t()}}
+  def validate_fx_pair(pair) do
+    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
+
+    if native in @fx_pairs,
+      do: {:ok, native},
+      else: {:error, {:unsupported_fx_pair, native}}
+  end
 
   defp to_fx_rate(%{"rate" => rate} = body, native, _requested_at) do
     with {:ok, parsed_rate} <- required_decimal(rate, :rate),

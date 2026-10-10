@@ -439,21 +439,65 @@ defmodule DpExchange.Gemini.FakeTest do
 
     test "committing needs the terms the venue quoted against" do
       assert {:error, {:missing_option, [:symbol, :side, :amount, :price, :fee]}} =
-               Fake.commit_conversion("q-1", credentials: @credentials)
+               Fake.commit_conversion("1234", credentials: @credentials)
     end
 
+    @terms [
+      symbol: "BTC-USD",
+      side: :buy,
+      amount: Decimal.new("1"),
+      price: Decimal.new("40000"),
+      fee: Decimal.new("2.50"),
+      credentials: @credentials
+    ]
+
     test "a committed conversion is settled" do
-      assert {:ok, conversion} =
-               Fake.commit_conversion("q-1",
-                 symbol: "BTC-USD",
-                 side: :buy,
-                 amount: Decimal.new("1"),
-                 price: Decimal.new("40000"),
-                 fee: Decimal.new("2.50"),
-                 credentials: @credentials
-               )
+      assert {:ok, conversion} = Fake.commit_conversion("1234", @terms)
 
       assert conversion.status == :settled
+    end
+
+    test "a term that is nil or blank is missing, as the real package counts it" do
+      # `Keyword.has_key?/2` said `price: nil` was given, and the fake committed a conversion
+      # the real package refuses before it signs anything.
+      assert {:error, {:missing_option, [:price, :fee]}} =
+               Fake.commit_conversion("1234", Keyword.merge(@terms, price: nil, fee: " "))
+    end
+
+    test "a quote id that is not the venue's integer is refused, as the real package refuses it" do
+      assert {:error, {:invalid_quote_id, "q-1"}} = Fake.commit_conversion("q-1", @terms)
+    end
+
+    test "a half-given direction is refused as the real package refuses it" do
+      assert {:error, {:missing_option, [:symbol, :side]}} =
+               Fake.quote_conversion("USD", "BTC", Decimal.new("1"),
+                 symbol: "BTC-USD",
+                 credentials: @credentials
+               )
+    end
+
+    test "what the real package refuses before it signs is refused before the credential" do
+      # Nothing is signed for a request that is wrong on its face, so a caller with neither a
+      # credential nor a valid request is told about the request, as `Private` tells them.
+      assert {:error, {:ambiguous_conversion, "USD", "BTC"}} =
+               Fake.quote_conversion("USD", "BTC", Decimal.new("1"), [])
+
+      assert {:error, {:missing_option, _terms}} = Fake.commit_conversion("1234", [])
+      assert {:error, :scope_required} = Fake.cancel_all_orders(%{}, [])
+      assert {:error, {:missing_field, :price}} = Fake.place_order(%{}, %{}, [])
+
+      assert {:error, {:unsupported_fx_pair, "XYZUSD"}} =
+               Fake.get_fx_rate("XYZ-USD", ~U[2026-01-02 00:00:00Z])
+
+      assert {:error, {:invalid_fx_instant, nil}} = Fake.get_fx_rate("XYZ-USD", nil)
+      assert {:error, {:missing_option, :network}} = Fake.list_approved_addresses([])
+      assert {:error, {:missing_option, :address}} = Fake.estimate_withdrawal_fee("ETH", "x", 1)
+      assert {:error, :memo_required} = Fake.withdraw("ETH", "x", 1, "a", memo_required: true)
+      assert {:error, {:unsupported_country, "GB"}} = Fake.add_payment_method(%{}, country: "GB")
+      assert {:error, {:missing_option, :from}} = Fake.transfer_internal("BTC", 1, [], [])
+      assert {:error, {:missing_option, :since}} = Fake.get_staking_rewards()
+      assert {:error, :missing_provider_id} = Fake.stake("ETH", Decimal.new("1"))
+      assert {:error, :nothing_to_rename} = Fake.rename_account("id", nil, [])
     end
 
     test "convert/4 settles in one step and holds no rate" do
@@ -473,7 +517,8 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:error, {:missing_credentials, :gemini}} =
                Fake.convert("GUSD", "USD", Decimal.new("1"), symbol: "GUSD-USD", side: :sell)
 
-      assert {:error, {:missing_credentials, :gemini}} = Fake.commit_conversion("q-1", [])
+      assert {:error, {:missing_credentials, :gemini}} =
+               Fake.commit_conversion("1234", Keyword.delete(@terms, :credentials))
     end
   end
 
@@ -775,10 +820,156 @@ defmodule DpExchange.Gemini.FakeTest do
 
     test "the account-scoped staking reads still need credentials" do
       assert {:error, {:missing_credentials, :gemini}} = Fake.get_staking_balances()
-      assert {:error, {:missing_credentials, :gemini}} = Fake.get_staking_rewards()
+
+      assert {:error, {:missing_credentials, :gemini}} =
+               Fake.get_staking_rewards(since: ~U[2026-08-01 00:00:00Z])
+
       assert {:error, {:missing_credentials, :gemini}} = Fake.get_staking_history()
-      assert {:error, {:missing_credentials, :gemini}} = Fake.stake("ETH", Decimal.new("1"))
-      assert {:error, {:missing_credentials, :gemini}} = Fake.unstake("ETH", Decimal.new("1"))
+
+      assert {:error, {:missing_credentials, :gemini}} =
+               Fake.stake("ETH", Decimal.new("1"), provider_id: "provider-a")
+
+      assert {:error, {:missing_credentials, :gemini}} =
+               Fake.unstake("ETH", Decimal.new("1"), provider_id: "provider-a")
+    end
+  end
+
+  describe "every spelling of a symbol the real package resolves is resolved here" do
+    # `Rest` and `Private` send `to_exchange_symbol/1` and report `to_canonical_symbol/1`, so
+    # `btcusd`, `BTCUSD` and `BTC-USD` are one request. The fake looked the caller's spelling
+    # up verbatim and refused the other two as unlisted, with a refusal the venue never sent.
+    test "REST reads answer under the canonical symbol" do
+      for spelling <- ["btcusd", "BTCUSD", "btc-usd", "BTC-USD"] do
+        assert {:ok, %Quote{symbol: "BTC-USD"}} = Fake.get_price(spelling)
+        assert {:ok, %{symbol: "BTC-USD"}} = Fake.get_top_of_book(spelling)
+        assert {:ok, %OrderBook{symbol: "BTC-USD"}} = Fake.get_order_book(spelling)
+        assert {:ok, [%{symbol: "BTC-USD"}]} = Fake.get_historical_prices(spelling, "1d")
+        assert {:ok, [_trade | _rest]} = Fake.get_trades(spelling)
+        assert {:ok, %{status: "open"}} = Fake.quantization(spelling)
+      end
+    end
+
+    test "a placed order is for the canonical symbol" do
+      request = %{symbol: "solrlusd", side: :buy, quantity: "1", price: "100"}
+
+      assert {:ok, %Types.Order{symbol: "SOL-RLUSD"}} =
+               Fake.place_order(@credentials, request, [])
+    end
+
+    test "list_instruments/1 reads symbols: as the real function does" do
+      assert {:ok, [%{symbol: "BTC-USD"}]} =
+               Fake.list_instruments(symbols: ["BTC-USD", "btcusd"])
+
+      assert {:error, {:invalid_option, :symbols, "BTC-USD"}} =
+               Fake.list_instruments(symbols: "BTC-USD")
+    end
+
+    test "a subscription by any spelling is delivered and covered under the canonical one" do
+      assert :ok = Fake.subscribe(["BTCUSD", "btc-usd", "SOLRLUSD"], to: self())
+      assert_receive {:dp_exchange, :gemini, %{symbol: "BTC-USD"}}
+      assert_receive {:dp_exchange, :gemini, %{symbol: "SOL-RLUSD"}}
+      assert Fake.coverage() == %{"BTC-USD" => :stream, "SOL-RLUSD" => :stream}
+
+      assert :ok = Fake.unsubscribe(["btcusd"])
+      assert Fake.coverage() == %{"SOL-RLUSD" => :stream}
+    end
+
+    test "symbols that are not a list of strings are refused, as the real feed refuses them" do
+      assert {:error, {:invalid_symbols, "BTC-USD"}} = Fake.subscribe("BTC-USD", to: self())
+      assert {:error, {:invalid_symbols, [:btc_usd]}} = Fake.update_symbols([:btc_usd])
+      assert {:error, {:invalid_symbols, [nil]}} = Fake.unsubscribe([nil])
+      assert Fake.coverage() == %{}
+    end
+  end
+
+  describe "the asset direction of list_networks/2 is signed, as the real one is" do
+    test "it refuses without a credential" do
+      assert {:error, {:missing_credentials, :gemini}} = Fake.list_networks("USDC", [])
+    end
+
+    test "and answers with one" do
+      assert {:ok, [%{"asset" => "USDC"}]} =
+               Fake.list_networks("USDC", credentials: @credentials)
+    end
+  end
+
+  describe "a placed order is described the way the venue describes it back" do
+    @order %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
+
+    test "the type is recovered from the execution option, not echoed from the request" do
+      for {order_type, time_in_force, expected} <- [
+            {:maker_or_cancel, :gtc, :post_only},
+            {:post_only, :gtc, :post_only},
+            {:limit, :ioc, :ioc},
+            {:ioc, :gtc, :ioc},
+            {:limit, :fok, :fok},
+            {:stop_limit, :gtc, :stop_limit},
+            {:limit, :gtc, :limit}
+          ] do
+        request = Map.merge(@order, %{order_type: order_type, time_in_force: time_in_force})
+
+        assert {:ok, %Types.Order{order_type: ^expected}} =
+                 Fake.place_order(@credentials, request, [])
+      end
+    end
+
+    test "a stop price travels back on the order" do
+      request = Map.merge(@order, %{order_type: :stop_limit, stop_price: "99"})
+
+      assert {:ok, %Types.Order{stop_price: stop_price}} =
+               Fake.place_order(@credentials, request, [])
+
+      assert Decimal.equal?(stop_price, Decimal.new("99"))
+    end
+  end
+
+  describe "a candle request is refused as Rest refuses it, in Rest's order" do
+    test "the width and the range are checked before the symbol" do
+      assert {:error, {:unsupported_timeframe, "2h"}} =
+               Fake.get_historical_prices("NOPE-USD", "2h")
+
+      assert {:error, {:invalid_range, :start, "yesterday"}} =
+               Fake.get_historical_prices("NOPE-USD", "1d", start: "yesterday")
+    end
+
+    test "the window's edge is the real one, a bar in from now minus the whole window" do
+      # The real window ends at the START of the current bar and reaches back `bars - 1`
+      # widths; `now - bars * width` sat a whole bar further out, so a start in that gap was
+      # served here and refused there.
+      #
+      # `now` is read here and again inside the fake, so a run straddling 00:00 UTC would
+      # compute two different edges. Within ten seconds of midnight, wait it out first.
+      to_midnight = 86_400 - rem(DateTime.to_unix(DateTime.utc_now()), 86_400)
+      if to_midnight <= 10, do: Process.sleep((to_midnight + 1) * 1_000)
+
+      now = DateTime.to_unix(DateTime.utc_now())
+      edge = DateTime.from_unix!(div(now, 86_400) * 86_400 - 363 * 86_400)
+      inside = DateTime.add(edge, 1, :second)
+      outside = DateTime.add(edge, -1, :second)
+
+      assert {:ok, [_candle]} = Fake.get_historical_prices("BTC-USD", "1d", start: inside)
+
+      assert {:error, {:range_unavailable, "1d", earliest: ^edge, requested: ^outside}} =
+               Fake.get_historical_prices("BTC-USD", "1d", start: outside)
+    end
+  end
+
+  describe "a master key that names the account by id has named it" do
+    test "rename_account/3 is not refused MissingAccounts" do
+      master = Map.put(@credentials, :key_scope, :master)
+
+      assert {:ok, %{"name" => "Desk", "account" => "bot-one"}} =
+               Fake.rename_account("bot-one", "Desk", credentials: master)
+    end
+
+    test "a shortname change reports the new shortname, a name change the new name" do
+      assert {:ok, %{"account" => "bot-two"} = changed} =
+               Fake.rename_account("bot-one", nil,
+                 shortname: "bot-two",
+                 credentials: @credentials
+               )
+
+      refute Map.has_key?(changed, "name")
     end
   end
 

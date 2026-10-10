@@ -94,6 +94,41 @@ defmodule DpExchange.Gemini.SideBySideTest do
     end
   end
 
+  describe "streaming calls follow the environment, as REST and the limiter do" do
+    # The facade's default feed was the literal production one, so under `:sandbox` REST went
+    # to demo while `subscribe/2`, `coverage/1` and `subscribe_notices/1` still addressed the
+    # production feed whenever one was running: demo and live in one call path, silently.
+    defp notice_subscribers(feed), do: :sys.get_state(feed).notice_subscribers
+
+    test "a per-call :sandbox reaches the sandbox feed and leaves production alone" do
+      {_production, _sandbox} = start_both()
+
+      assert :ok = Gemini.subscribe_notices(environment: :sandbox, to: self())
+
+      assert MapSet.member?(notice_subscribers(DpExchange.Gemini.SandboxFeed), self())
+      refute MapSet.member?(notice_subscribers(DpExchange.Gemini.Feed), self())
+    end
+
+    test "a per-process :sandbox does the same, with no option on the call" do
+      {_production, _sandbox} = start_both()
+      Config.put_override(:environment, :sandbox)
+
+      assert :ok = Gemini.subscribe_notices(to: self())
+
+      assert MapSet.member?(notice_subscribers(DpExchange.Gemini.SandboxFeed), self())
+      refute MapSet.member?(notice_subscribers(DpExchange.Gemini.Feed), self())
+    end
+
+    test "production stays the default" do
+      {_production, _sandbox} = start_both()
+
+      assert :ok = Gemini.subscribe_notices(to: self())
+
+      assert MapSet.member?(notice_subscribers(DpExchange.Gemini.Feed), self())
+      refute MapSet.member?(notice_subscribers(DpExchange.Gemini.SandboxFeed), self())
+    end
+  end
+
   describe "per-process selection, for a host running strategies on demo in some processes" do
     test "one process can be on demo while another is on production" do
       # `Core.Config` resolves per process, so this is not a global switch. A strategy

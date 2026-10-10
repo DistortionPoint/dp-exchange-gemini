@@ -885,6 +885,39 @@ defmodule DpExchange.Gemini.FeedTest do
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
                      2_000
     end
+
+    test "a crash hard on the heels of another waits before redialling" do
+      # A socket that crashed on connect was redialled at once, crashed, and was redialled
+      # again: a connect storm with no delay in it. The second crash of a run waits 1s.
+      feed = start_feed(url: "ws://127.0.0.1:1/nowhere")
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      socket = :sys.get_state(feed).socket
+      Process.unlink(socket)
+      link_socket_into_feed(feed, socket)
+
+      # As if the previous socket had crashed a moment ago.
+      :sys.replace_state(feed, fn state ->
+        Map.put(state, :crash_run, {1, System.monotonic_time(:millisecond)})
+      end)
+
+      Process.exit(socket, :kill)
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 500
+      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 700
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
+                     3_000
+    end
+
+    test "the redial delay doubles through a run and is capped" do
+      assert Feed.crash_redial_delay(1) == 0
+      assert Feed.crash_redial_delay(2) == 1_000
+      assert Feed.crash_redial_delay(3) == 2_000
+      assert Feed.crash_redial_delay(50) == 30_000
+    end
   end
 
   describe "subscribe_notices/2 survives a busy feed" do
@@ -1173,6 +1206,35 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, :resubscribe)
       assert_receive {:frame_sent, %{"method" => "subscribe"}}
       refute_received {:frame_sent, %{"method" => "unsubscribe"}}
+    end
+  end
+
+  describe "a symbol list the feed cannot hold" do
+    # `Feed` is one shared, named process. A raise inside it (`MapSet.new/1` on a string,
+    # `Socket.streams/2` on an atom) crashed it, and its supervisor restarted it from the
+    # static options it started with: every other consumer's subscription gone for one
+    # caller's typo.
+    test "is refused in the caller and leaves the feed, and what it holds, alone" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      monitor = Process.monitor(feed)
+
+      assert {:error, {:invalid_symbols, "BTC-USD"}} = Feed.subscribe(feed, "BTC-USD", to: self())
+
+      assert {:error, {:invalid_symbols, [:btc_usd, nil]}} =
+               Feed.subscribe(feed, ["ETH-USD", :btc_usd, nil], to: self())
+
+      assert {:error, {:invalid_symbols, [""]}} = Feed.update_symbols(feed, [""])
+      assert {:error, {:invalid_symbols, [1]}} = Feed.unsubscribe(feed, [1])
+
+      refute_receive {:DOWN, ^monitor, :process, _pid, _reason}, 50
+      assert :sys.get_state(feed).wanted == MapSet.new(["BTC-USD"])
+    end
+
+    test "canonical_symbols/1 spells every pair one way, once" do
+      assert {:ok, ["BTC-USD", "SOL-RLUSD"]} =
+               Feed.canonical_symbols(["btcusd", "BTC-USD", "SOLRLUSD"])
     end
   end
 end

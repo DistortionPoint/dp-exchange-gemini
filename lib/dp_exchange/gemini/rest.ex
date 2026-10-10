@@ -314,6 +314,22 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
+  @doc """
+  Whether a spot candle request for `timeframe` and `range` is one the venue's fixed window
+  can answer, checked without sending it.
+
+  The width first (`{:error, {:unsupported_timeframe, timeframe}}`), then the range's bounds
+  (`{:error, {:invalid_range, bound, value}}`), then the window itself
+  (`{:error, {:range_unavailable, timeframe, earliest: _, requested: _}}`) — the refusals
+  `get_historical_prices/4` makes before it reaches the network, in that order. Exposed so
+  `DpExchange.Gemini.Fake` refuses with this exact function rather than a second copy of the
+  window arithmetic, which is how its boundary once sat a bar away from the real one.
+  """
+  @spec validate_history(String.t(), keyword()) :: :ok | {:error, term()}
+  def validate_history(timeframe, range) do
+    with {:ok, _time_frame} <- time_frame(timeframe), do: range_within_window(timeframe, range)
+  end
+
   # **Perpetuals have their own candles endpoint, and it serves 1m only.**
   #
   #     spot         /v2/candles/{symbol}/{width}              the full width vocabulary
@@ -465,13 +481,42 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp instrument_symbols(opts) do
-    # Anything else was a `CaseClauseError` in the caller: `symbols: "BTC-USD"` reads as one
-    # symbol to a person and is neither a list nor absent here.
-    case Keyword.get(opts, :symbols) do
-      nil -> get_symbols(opts)
-      symbols when is_list(symbols) -> {:ok, Enum.uniq(symbols)}
-      other -> {:error, {:invalid_option, :symbols, other}}
+    case requested_instrument_symbols(Keyword.get(opts, :symbols)) do
+      {:ok, nil} -> get_symbols(opts)
+      other -> other
     end
+  end
+
+  @doc """
+  The symbols `list_instruments/1` was asked to detail — `{:ok, nil}` when `:symbols` was
+  not given (meaning every listed non-perpetual symbol), otherwise the canonical spellings,
+  each once.
+
+  **Deduplicated by canonical spelling, not by what the caller typed.** `["BTC-USD",
+  "btcusd"]` is one pair, and de-duplicating the raw strings detailed it twice — two
+  requests spent against the public budget and two identical instruments returned.
+
+  Anything that is not a list of strings was a `CaseClauseError` or a `FunctionClauseError`
+  in the caller (`symbols: "BTC-USD"` reads as one symbol to a person); it is
+  `{:error, {:invalid_option, :symbols, value}}`. Exposed so `DpExchange.Gemini.Fake` refuses
+  with this function rather than a second copy of the rule.
+  """
+  @spec requested_instrument_symbols(term()) ::
+          {:ok, [String.t()] | nil} | {:error, {:invalid_option, :symbols, term()}}
+  def requested_instrument_symbols(nil), do: {:ok, nil}
+
+  def requested_instrument_symbols(symbols) when is_list(symbols) do
+    if Enum.all?(symbols, &is_binary/1) do
+      {:ok, symbols |> Enum.map(&canonical_symbol/1) |> Enum.uniq()}
+    else
+      {:error, {:invalid_option, :symbols, symbols}}
+    end
+  end
+
+  def requested_instrument_symbols(other), do: {:error, {:invalid_option, :symbols, other}}
+
+  defp canonical_symbol(symbol) do
+    symbol |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()
   end
 
   defp instrument(symbol, opts) do

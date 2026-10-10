@@ -20,6 +20,68 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A socket that crashed on connect was redialled at once, forever.** `Feed` redialled
+  every crashed socket immediately, so a socket that died on connect (a frame it could not
+  survive, a refused handshake) was a connect storm with no delay in it. The first crash in
+  a run still redials at once; a crash within 30s of the last waits, doubling from 1s to
+  30s.
+- **`get_fx_rate/3` raised on an instant that is not a `DateTime`.** A `NaiveDateTime`,
+  `Date` or integer raised `FunctionClauseError` in the caller's process. It is now
+  `{:error, {:invalid_fx_instant, at}}` via `Private.validate_fx_instant/1`, which `Fake`
+  also runs.
+
+- **Streaming calls addressed the production feed under `environment: :sandbox`.** The
+  facade's default feed was the literal `Feed`, while REST and the limiter follow the
+  environment. With a production tree running, `subscribe/2`, `unsubscribe/2`,
+  `update_symbols/2`, `coverage/1`, `coverage_by_kind/1` and `subscribe_notices/1` called with
+  `environment: :sandbox` (or from a process on `Config.put_override(:environment, :sandbox)`,
+  which `usage-rules.md` promises sends "everything it spawns" to demo) went to the live feed
+  while the same process's `get_price/2` went to demo. The default is now
+  `Supervisor.feed_name/1`, environment-derived like the others; an explicit `:feed` still
+  wins.
+- **A symbol list that was not a list of strings crashed the shared feed.** `subscribe/2`,
+  `unsubscribe/2` and `update_symbols/2` passed whatever they were given into the named `Feed`
+  process, where `MapSet.new/1` raised on `subscribe("BTC-USD")` and `Socket.streams/2` raised
+  on `[:btc_usd]` or `[nil]`. The raise crashed `Feed`, and its supervisor restarted it from its
+  static options: every other consumer's subscription, subscriber and delivery record gone for
+  one caller's typo. Refused in the caller now, as `{:error, {:invalid_symbols, offenders}}`,
+  with spellings canonicalised and de-duplicated (`Feed.canonical_symbols/1`).
+- **`list_instruments/1` detailed one pair twice.** `symbols: ["BTC-USD", "btcusd"]` was
+  de-duplicated on the raw strings, so one pair cost two requests and came back as two identical
+  instruments. De-duplicated by canonical spelling; a `symbols:` that is not a list of strings
+  (`[nil]`) is `{:error, {:invalid_option, :symbols, _}}` rather than a `FunctionClauseError`.
+- **`Fake` refused what the real package refuses in a different order, and accepted what it
+  refuses.** Each is the same defect, the fake and the real path disagreeing about what is
+  checked before a request is signed:
+  - the credential was asked for first everywhere, where `Private` refuses a malformed request
+    before it signs anything: `place_order/3` (type, price, `:symbol`/`:quantity`/`:side`),
+    `cancel_all_orders/2` (`:scope_required`), `get_fx_rate/3` (`:unsupported_fx_pair`),
+    `quote_conversion/4`, `convert/4` and `commit_conversion/2` (direction and terms),
+    `withdraw/5` (`:memo_required`), `estimate_withdrawal_fee/4` (`:address`),
+    `list_approved_addresses/1` (`:network`), `add_payment_method/2` (country),
+    `transfer_internal/4` (`:from`/`:to`), `get_staking_rewards/1` (`:since`) and
+    `stake/3`/`unstake/3` (`:provider_id`). The validation is now the real functions
+    (`Private.validate_order/1`, `cancel_scope/1`, `validate_fx_pair/1`, `instant_pair/3`,
+    `validate_commit_terms/2`), not second copies;
+  - `list_networks/2` answered the asset direction with no credential ("the public
+    direction"); the real call is signed in both directions;
+  - `get_historical_prices/4` checked the symbol before the width and range, ran its own copy of
+    the window arithmetic a bar away from the real edge, and had no `:invalid_range`. It now
+    calls `Rest.validate_history/2`;
+  - `commit_conversion/2` took `price: nil` as given and never checked the quote id, and a
+    half-given `symbol:`/`side:` pair passed `quote_conversion/4`;
+  - a symbol was looked up verbatim, so `get_price("btcusd")`, `"BTCUSD"` and every other
+    spelling the real package resolves to `BTC-USD` were refused as unlisted, and
+    `subscribe(["BTCUSD"])` upper-cased to a symbol the fake does not carry and delivered
+    nothing where the real feed delivers `BTC-USD`;
+  - a placed order echoed the request's `order_type`, so `:maker_or_cancel` came back as an
+    atom no real order carries and `time_in_force: :ioc` on a limit order came back `:limit`; it
+    now reports `:post_only`/`:ioc`/`:fok` as `Private.to_order/1` does, and carries `stop_price`;
+  - `rename_account/3` ignored `id` as the account a master key names, and succeeded when
+    nothing was to change (`:nothing_to_rename`).
+
 ## [0.2.105] - 2026-10-10
 
 ### Fixed

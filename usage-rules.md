@@ -468,10 +468,13 @@ two budgets. Sharing one bucket means demo strategy testing spends the budget li
 depends on — and you find out when a real order gets a 429, at an arbitrary later moment,
 with nothing pointing back at the demo traffic that caused it.
 
-Address a specific tree by naming it:
+Address a specific tree by naming it, or by the environment — the streaming calls
+(`subscribe/2`, `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `subscribe_notices/1`)
+default to the feed the environment names, exactly as REST and the limiter do:
 
 ```elixir
 :ok = DpExchange.Gemini.subscribe(["BTC-USD"], feed: DpExchange.Gemini.SandboxFeed, to: self())
+:ok = DpExchange.Gemini.subscribe(["BTC-USD"], environment: :sandbox, to: self())
 {:ok, q} = DpExchange.Gemini.get_price("BTC-USD", environment: :sandbox)
 ```
 
@@ -854,6 +857,20 @@ Each request waits for its rate-limiter slot, so the venue's ceiling holds, but 
 listing spends minutes of the public budget. A symbol whose details cannot be read fails the
 whole call (`{:error, {:instrument_detail_failed, symbol, reason}}`), so the answer never has
 a silent hole in it.
+
+`symbols:` is read by the pair, not by what you typed: `["BTC-USD", "btcusd"]` is one request
+and one instrument. A value that is not a list of strings (`symbols: "BTC-USD"`, `[nil]`) is
+`{:error, {:invalid_option, :symbols, value}}`.
+
+## A symbol list that is not a list of strings is refused, not sent to the feed
+
+`subscribe/2`, `unsubscribe/2` and `update_symbols/2` answer
+`{:error, {:invalid_symbols, offenders}}` for a list holding anything but non-blank strings,
+and for a value that is not a list at all (`subscribe("BTC-USD")`). Spellings are
+canonicalised and de-duplicated first, so `["btcusd", "BTC-USD"]` is one symbol. Nothing is
+subscribed on an error. This used to raise inside the shared feed process, which crashed it
+and, on its restart from the static options, dropped every other consumer's subscription.
+`DpExchange.Gemini.Fake` answers the same.
 
 ## Two session behaviours this package deliberately leaves to you
 

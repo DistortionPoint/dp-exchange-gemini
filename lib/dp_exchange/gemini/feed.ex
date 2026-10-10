@@ -258,36 +258,61 @@ defmodule DpExchange.Gemini.Feed do
 
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts) do
-    GenServer.call(
-      feed,
-      {:subscribe, canonical(symbols), Config.opt(opts, :to, self())},
-      @call_timeout
-    )
+    with {:ok, symbols} <- canonical_symbols(symbols) do
+      GenServer.call(
+        feed,
+        {:subscribe, symbols, Config.opt(opts, :to, self())},
+        @call_timeout
+      )
+    end
   end
 
   @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
-  def unsubscribe(feed, symbols),
-    do: GenServer.call(feed, {:unsubscribe, canonical(symbols)}, @call_timeout)
-
-  @spec update_symbols(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
-  def update_symbols(feed, symbols),
-    do: GenServer.call(feed, {:update_symbols, canonical(symbols)}, @call_timeout)
-
-  # **Every symbol is held in its canonical spelling.** Frames are matched by the canonical
-  # symbol they decode to, and `wanted` held whatever the caller wrote. So
-  # `subscribe(["BTCUSD"])` subscribed `btcusd` on the wire and then dropped every frame for
-  # it as unwanted, because `"BTC-USD"` was not in the set.
-  defp canonical(symbols) when is_list(symbols) do
-    Enum.map(symbols, fn
-      symbol when is_binary(symbol) ->
-        symbol |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()
-
-      other ->
-        other
-    end)
+  def unsubscribe(feed, symbols) do
+    with {:ok, symbols} <- canonical_symbols(symbols),
+         do: GenServer.call(feed, {:unsubscribe, symbols}, @call_timeout)
   end
 
-  defp canonical(other), do: other
+  @spec update_symbols(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
+  def update_symbols(feed, symbols) do
+    with {:ok, symbols} <- canonical_symbols(symbols),
+         do: GenServer.call(feed, {:update_symbols, symbols}, @call_timeout)
+  end
+
+  @doc """
+  The canonical, de-duplicated spelling this feed holds `symbols` in, or the refusal for a
+  value it cannot hold.
+
+  **Every symbol is held in its canonical spelling.** Frames are matched by the canonical
+  symbol they decode to, and `wanted` held whatever the caller wrote. So
+  `subscribe(["BTCUSD"])` subscribed `btcusd` on the wire and then dropped every frame for
+  it as unwanted, because `"BTC-USD"` was not in the set.
+
+  **Anything that is not a list of non-blank strings is refused here, in the caller.** It
+  used to be passed into the `Feed` process, where `MapSet.new/1` raised on `"BTC-USD"` (a
+  string where a list was meant) and `Socket.streams/2` raised on `:btc_usd` or `nil`. A
+  `Feed` is one shared, named process: the raise crashed it, and its supervisor restarted it
+  from the static options it was started with — taking every other consumer's subscription,
+  subscriber and delivery record with it, for one caller's typo.
+
+  Exposed so `DpExchange.Gemini.Fake` canonicalises and refuses exactly as the real feed does.
+  """
+  @spec canonical_symbols(term()) :: {:ok, [String.t()]} | {:error, {:invalid_symbols, term()}}
+  def canonical_symbols(symbols) when is_list(symbols) do
+    case Enum.reject(symbols, &(is_binary(&1) and String.trim(&1) != "")) do
+      [] ->
+        {:ok, symbols |> Enum.map(&canonical_symbol/1) |> Enum.uniq()}
+
+      invalid ->
+        {:error, {:invalid_symbols, invalid}}
+    end
+  end
+
+  def canonical_symbols(other), do: {:error, {:invalid_symbols, other}}
+
+  defp canonical_symbol(symbol) do
+    symbol |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()
+  end
 
   # NOTE — reads carry `@call_timeout` explicitly, exactly as the writes above do.
   #
@@ -548,6 +573,11 @@ defmodule DpExchange.Gemini.Feed do
     {:noreply, isolate_crashed_socket(state, reason)}
   end
 
+  # The delayed redial `isolate_crashed_socket/2` schedules once crashes come in a run. A
+  # socket some other path already dialled in the meantime makes this a no-op.
+  def handle_info(:redial_after_crash, %{socket: nil} = state),
+    do: {:noreply, resubscribe(state)}
+
   def handle_info(_other, state), do: {:noreply, state}
 
   # Unconditional: sent whether or not a reconnect actually happened, because a socket
@@ -740,8 +770,49 @@ defmodule DpExchange.Gemini.Feed do
     # `resubscribe/1` — the identical function the periodic timer calls — reconnects and
     # resends `wanted` right away if anything is still wanted, rather than leaving this
     # feed silent until the next `@resubscribe_interval_ms` tick (60s by default).
-    resubscribe(state)
+    #
+    # **Right away only for the first crash in a run.** Found 2026-10-10 by reading this
+    # function: a socket that crashed on connect (a frame it cannot survive, a venue
+    # rejecting the handshake) was redialled at once, crashed, and was redialled again —
+    # a connect storm with no delay anywhere in it. A crash within `@crash_run_ms` of the
+    # last one now waits, doubling from `@crash_base_delay_ms` to `@crash_max_delay_ms`.
+    {run, state} = crash_run(state)
+
+    case crash_redial_delay(run) do
+      0 ->
+        resubscribe(state)
+
+      delay ->
+        Process.send_after(self(), :redial_after_crash, delay)
+        state
+    end
   end
+
+  @crash_run_ms 30_000
+  @crash_base_delay_ms 1_000
+  @crash_max_delay_ms 30_000
+
+  # `{length of the current run of crashes, state}`. A crash more than `@crash_run_ms`
+  # after the previous one starts a new run of 1. Read with `Map.get/3` so a state built
+  # before this field existed (or by a test) starts a run.
+  defp crash_run(state) do
+    now = System.monotonic_time(:millisecond)
+
+    run =
+      case Map.get(state, :crash_run) do
+        {count, last_at} when now - last_at < @crash_run_ms -> count + 1
+        _none_or_stale -> 1
+      end
+
+    {run, Map.put(state, :crash_run, {run, now})}
+  end
+
+  @doc false
+  @spec crash_redial_delay(pos_integer()) :: non_neg_integer()
+  def crash_redial_delay(1), do: 0
+
+  def crash_redial_delay(run),
+    do: min(@crash_base_delay_ms * Integer.pow(2, min(run - 2, 5)), @crash_max_delay_ms)
 
   # The one crash-level event this module could not report before: every other notice
   # this module can send is a reply to a caller's own `subscribe/3`/`unsubscribe/2`

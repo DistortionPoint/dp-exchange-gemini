@@ -786,7 +786,14 @@ defmodule DpExchange.Gemini do
   def subscribe_notices(opts \\ []),
     do: feed_call(fn -> Feed.subscribe_notices(feed(opts), opts) end, {:error, :feed_not_started})
 
-  defp feed(opts), do: Config.opt(opts, :feed, Feed)
+  # **The default follows the environment, as the limiter and the REST URL do.** This was the
+  # literal `Feed`, so under `environment: :sandbox` (per call, or per process through
+  # `Config.put_override(:environment, :sandbox)`, which the documentation promises sends
+  # "everything it spawns" to demo) REST went to demo and every streaming call —
+  # `subscribe/2`, `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `subscribe_notices/1` —
+  # still addressed the PRODUCTION feed when one was running: demo and live in one call
+  # path, with nothing to say so. An explicit `:feed` still wins, for `Config` overrides too.
+  defp feed(opts), do: Config.opt(opts, :feed, DpExchange.Gemini.Supervisor.feed_name(opts))
 
   defp alive?(name) when is_atom(name), do: is_pid(GenServer.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)

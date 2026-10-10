@@ -606,6 +606,29 @@ defmodule DpExchange.Gemini.RestTest do
                  retry_attempts: 1
                )
     end
+
+    test "symbols: two spellings of one pair are detailed once, not twice" do
+      # De-duplicating the raw strings detailed `EFIL-FIL` and `efilfil` separately: two
+      # requests against the public budget, and two identical instruments back.
+      assert {:ok, [instrument]} =
+               Rest.list_instruments(
+                 symbols: ["EFIL-FIL", "efilfil", "EFILFIL"],
+                 plug: catalogue(self()),
+                 retry_attempts: 1
+               )
+
+      assert instrument.symbol == "EFIL-FIL"
+      assert_received {:path, "/v1/symbols/details/efilfil"}
+      refute_received {:path, "/v1/symbols/details/efilfil"}
+    end
+
+    test "symbols: that is not a list of strings is refused, not a crash in the caller" do
+      assert {:error, {:invalid_option, :symbols, "BTC-USD"}} =
+               Rest.list_instruments(symbols: "BTC-USD", plug: catalogue(self()))
+
+      assert {:error, {:invalid_option, :symbols, [nil]}} =
+               Rest.list_instruments(symbols: [nil], plug: catalogue(self()))
+    end
   end
 
   describe "quantization/1" do
