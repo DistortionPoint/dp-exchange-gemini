@@ -177,21 +177,39 @@ defmodule DpExchange.Gemini.FakeTest do
   end
 
   describe "coverage_by_kind/1" do
-    test "reports what it pushed under :quotes, and declares the rest honestly empty" do
-      # `subscribe/2` above always pushes a `Types.Quote` — never a `Types.TopOfBook` —
-      # so this fake is honestly quotes-only for that kind. Every declared key still
-      # appears, empty where nothing of that kind was observed, rather than being
-      # omitted: an omitted key would read as "this fake doesn't know the kind", where an
-      # empty map reads as what is true here — declared, nothing observed. `:trades`
-      # stays empty here specifically because this call did not ask for it — see the
-      # `:channels` describe block below for the case where it does.
+    test "reports what it pushed under each kind, and declares the rest honestly empty" do
+      # The default channels are the real Feed's, `[:quotes, :top_of_book]`, so a `Quote`
+      # and a `TopOfBook` are both pushed. It used to push only the `Quote`. Every declared
+      # key still appears, empty where nothing of that kind was observed: `:trades` stays
+      # empty because this call did not ask for it.
       :ok = Fake.subscribe(["BTC-USD", "NOPE-USD"], to: self())
+
+      assert_received {:dp_exchange, :gemini, %DpExchange.Core.Types.TopOfBook{symbol: "BTC-USD"}}
 
       assert Fake.coverage_by_kind() == %{
                quotes: %{"BTC-USD" => :stream},
-               top_of_book: %{},
+               top_of_book: %{"BTC-USD" => :stream},
                trades: %{}
              }
+    end
+
+    test "update_symbols pushes for a symbol it adds, so coverage is never intent alone" do
+      :ok = Fake.update_symbols(["ETH-USD"])
+
+      assert_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Quote{symbol: "ETH-USD"}}
+      assert Fake.coverage() == %{"ETH-USD" => :stream}
+    end
+
+    test "subscribe does not consume a failure queued for get_price" do
+      DpExchange.Core.FakeInjection.queue_failures(:gemini, [{:error, :queued}])
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
+
+      assert {:error, :queued} = Fake.get_price("BTC-USD")
+    end
+
+    test "subscribe_notices registers and sends nothing, as the real Feed does" do
+      assert :ok = Fake.subscribe_notices(to: self())
+      refute_received {:dp_exchange, :gemini, %DpExchange.Core.Notice{}}
     end
 
     test "the union of its symbols across kinds matches coverage/1's keys exactly" do

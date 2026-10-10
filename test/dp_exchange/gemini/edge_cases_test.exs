@@ -430,10 +430,10 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert Fake.coverage() == %{"BTC-USD" => :stream}
     end
 
-    test "notices reach a notice subscriber" do
+    test "registering for notices sends none, as the real Feed sends none" do
       :ok = Fake.subscribe_notices(to: self())
 
-      assert_receive {:dp_exchange, :gemini, %DpExchange.Core.Notice{kind: :link_up}}
+      refute_receive {:dp_exchange, :gemini, %DpExchange.Core.Notice{}}, 50
     end
 
     test "the market overview covers every symbol it lists" do

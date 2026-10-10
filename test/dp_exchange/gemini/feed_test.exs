@@ -1137,4 +1137,42 @@ defmodule DpExchange.Gemini.FeedTest do
       assert message =~ ":channels"
     end
   end
+
+  describe "found 2026-10-10" do
+    test "a wire unsubscribe that failed is retried on the next tick" do
+      # It was forgotten: `wanted` narrowed, and the venue kept streaming the symbol to this
+      # connection until it next reconnected.
+      socket = always_fails_socket(self())
+      feed = start_feed(socket: socket)
+
+      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      assert {:error, :send_timeout} = Feed.unsubscribe(feed, ["BTC-USD"])
+      assert_receive {:frame_sent, %{"method" => "unsubscribe"}}
+
+      send(feed, :resubscribe)
+
+      assert_receive {:frame_sent,
+                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
+
+      refute_receive {:frame_sent, %{"method" => "subscribe"}}, 100
+    end
+
+    test "a symbol wanted again is not unsubscribed by an old retry" do
+      socket = always_fails_socket(self())
+      feed = start_feed(socket: socket)
+
+      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      Feed.unsubscribe(feed, ["BTC-USD"])
+      assert_receive {:frame_sent, %{"method" => "unsubscribe"}}
+      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      send(feed, :resubscribe)
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      refute_received {:frame_sent, %{"method" => "unsubscribe"}}
+    end
+  end
 end

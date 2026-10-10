@@ -173,7 +173,7 @@ defmodule DpExchange.Gemini.Feed do
   `Socket.start_link/1` now sets `:socket_connect_timeout` and `:socket_recv_timeout`
   explicitly, chosen against that same budget rather than left to `websockex`'s general-
   purpose defaults: 3_000ms connect + 2_000ms recv + 5_000ms for the one frame send that
-  follows is 10_000ms, leaving 5_000ms — a third of `@call_timeout` — for the GenServer
+  follows is 10_000ms, leaving the rest of `@call_timeout` for the GenServer
   call's own overhead. Both remain overridable through the `opts` `Socket.start_link/1`
   already accepts, for a deployment whose real connect time needs more room than this
   package's own budget assumed — `Feed.start_link/1`'s own `opts` forward
@@ -223,11 +223,16 @@ defmodule DpExchange.Gemini.Feed do
   require Logger
 
   # WebSockex's own send window, which is not configurable. `update_symbols/2` can send an
-  # unsubscribe *and* a subscribe, so one call can wait out two windows; the third is
-  # headroom, because a `GenServer.call` timing out first would surface a slow socket as a
-  # caller-side exit instead of the `{:error, :send_timeout}` that says "retry the batch".
+  # unsubscribe *and* a subscribe on each socket channel, and with `:trades` on there are two
+  # (`active_socket_channels/1`): four windows. The fifth is headroom, because a
+  # `GenServer.call` timing out first would surface a slow socket as a caller-side exit
+  # instead of the `{:error, :send_timeout}` that says "retry the batch". It was three, set
+  # before `:trades` existed, so a slow socket with trades on exited the caller at 15s of a
+  # possible 20s (found 2026-10-10). A first subscribe's connect (3s + 2s, see the moduledoc)
+  # plus its two frames is 15s, inside the same bound.
   @frame_window_ms 5_000
-  @call_timeout @frame_window_ms * 3
+  @max_socket_channels 2
+  @call_timeout @frame_window_ms * (2 * @max_socket_channels + 1)
 
   # What `:channels` defaults to when a caller says nothing — exactly this feed's
   # behaviour before `:trades` existed as a kind. See the moduledoc's "`channels:`"
@@ -356,6 +361,9 @@ defmodule DpExchange.Gemini.Feed do
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
+       # Symbols whose wire unsubscribe failed, retried on the next resubscribe tick. Cleared
+       # by any new connection, which carries no subscriptions. See `retry_unsubscribe/2`.
+       unsubscribe_pending: MapSet.new(),
        # True between the socket's `:link_down` and its `:reconnected`. Nothing is sent to it
        # meanwhile — see the moduledoc's "A socket that is reconnecting is not sent to".
        link_down?: false,
@@ -406,7 +414,8 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
-    {:reply, when_linked(state, &unsubscribe_channels(&1, symbols, state)), drop(state, symbols)}
+    result = when_linked(state, &unsubscribe_channels(&1, symbols, state))
+    {:reply, result, state |> drop(symbols) |> unsubscribe_later(result, symbols)}
   end
 
   def handle_call({:update_symbols, symbols}, _from, state) do
@@ -415,8 +424,9 @@ defmodule DpExchange.Gemini.Feed do
     removed = wanted |> then(&MapSet.difference(state.wanted, &1)) |> MapSet.to_list()
 
     state = %{state | wanted: wanted, delivering_by_kind: narrow_delivery(state, symbols)}
+    result = apply_delta(state, added, removed)
 
-    {:reply, apply_delta(state, added, removed), state}
+    {:reply, result, unsubscribe_later(state, result, removed)}
   end
 
   def handle_call(:coverage, _from, state) do
@@ -526,7 +536,7 @@ defmodule DpExchange.Gemini.Feed do
   # a second timer chain beside the first. A report from a socket that is no longer
   # `state.socket` falls through to the catch-all.
   def handle_info({:dp_exchange, :gemini, :reconnected, socket}, %{socket: socket} = state) do
-    {:noreply, resubscribe(%{state | link_down?: false})}
+    {:noreply, resubscribe(%{state | link_down?: false, unsubscribe_pending: MapSet.new()})}
   end
 
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
@@ -551,6 +561,8 @@ defmodule DpExchange.Gemini.Feed do
   # forever, since a socket this module never dialled has nothing for `Process.alive?/1`
   # to even check.
   defp resubscribe(%{socket: socket} = state) when is_pid(socket) do
+    state = retry_unsubscribe(socket, state)
+
     if Process.alive?(socket) and not state.link_down? and MapSet.size(state.wanted) > 0 do
       case subscribe_channels(socket, MapSet.to_list(state.wanted), state) do
         :ok ->
@@ -639,6 +651,7 @@ defmodule DpExchange.Gemini.Feed do
   # `@trade` too when `:trades` is in `state.channels`. See the moduledoc's "`channels:`"
   # section: Gemini has no separate channel for `:quotes`/`:top_of_book`, so those two
   # never change which `Socket` channels get used, only `:trades` does.
+  # At most `@max_socket_channels`, which `@call_timeout` is sized against.
   defp active_socket_channels(state) do
     if :trades in state.channels, do: [:book_ticker, :trade], else: [:book_ticker]
   end
@@ -714,7 +727,14 @@ defmodule DpExchange.Gemini.Feed do
   # being narrowed symbol-by-symbol the way `drop/2` narrows it for an ordinary
   # unsubscribe.
   defp isolate_crashed_socket(state, reason) do
-    state = %{state | socket: nil, delivering_by_kind: empty_delivery(), link_down?: false}
+    state = %{
+      state
+      | socket: nil,
+        delivering_by_kind: empty_delivery(),
+        link_down?: false,
+        unsubscribe_pending: MapSet.new()
+    }
+
     notify_socket_crashed(state, reason)
 
     # `resubscribe/1` — the identical function the periodic timer calls — reconnects and
@@ -742,6 +762,35 @@ defmodule DpExchange.Gemini.Feed do
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
+  end
+
+  # **A wire unsubscribe that failed is retried, not forgotten.** `wanted` was narrowed
+  # either way, so nothing reached the consumer, but the venue kept streaming the symbol to
+  # this connection until it next reconnected, and nothing ever sent the unsubscribe again.
+  # Found 2026-10-10.
+  defp unsubscribe_later(state, :ok, _symbols), do: state
+
+  defp unsubscribe_later(state, {:error, _reason}, symbols),
+    do: %{
+      state
+      | unsubscribe_pending: MapSet.union(state.unsubscribe_pending, MapSet.new(symbols))
+    }
+
+  # A symbol wanted again since is left subscribed: retrying its old unsubscribe would undo
+  # the newer subscribe.
+  defp retry_unsubscribe(socket, state) do
+    pending = MapSet.difference(state.unsubscribe_pending, state.wanted)
+
+    cond do
+      MapSet.size(pending) == 0 or state.link_down? or not Process.alive?(socket) ->
+        %{state | unsubscribe_pending: pending}
+
+      unsubscribe_channels(socket, MapSet.to_list(pending), state) == :ok ->
+        %{state | unsubscribe_pending: MapSet.new()}
+
+      true ->
+        %{state | unsubscribe_pending: pending}
+    end
   end
 
   defp drop(state, symbols) do

@@ -61,7 +61,7 @@ defmodule DpExchange.Gemini.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Notice, Timeframe, Types, Venue}
+  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Timeframe, Types, Venue}
   alias DpExchange.Gemini.{Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
@@ -87,6 +87,7 @@ defmodule DpExchange.Gemini.Fake do
   # `subscribe/2` calls, and the two facts must not collapse into one set the way a single
   # boolean would.
   @trades_key {__MODULE__, :trades}
+  @top_of_book_key {__MODULE__, :top_of_book}
 
   # Bars the real venue serves per width, so the fake refuses the same ranges it does.
   @window_bars %{
@@ -121,52 +122,56 @@ defmodule DpExchange.Gemini.Fake do
   def capabilities, do: DpExchange.Gemini.capabilities()
 
   @impl true
-  def get_price(symbol, _opts \\ []) do
-    with_injection(symbol, fn ->
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          {:ok,
-           %Types.Quote{
-             symbol: symbol,
-             price: Decimal.new(price),
-             volume: Decimal.new("183.72"),
-             # As the real `get_price/2`: the ticker's 24-hour volume.
-             volume_window: :rolling_24h,
-             venue_time: @at,
-             observed_at: @at,
-             provider: :gemini
-           }}
+  def get_price(symbol, _opts \\ []), do: with_injection(symbol, fn -> fake_quote(symbol) end)
 
-        :error ->
-          not_listed(symbol)
-      end
-    end)
+  # Outside `with_injection/2`, so `subscribe/2` builds its push without consuming a failure
+  # a test queued for `get_price/2` — the stream never touches the REST endpoint it would
+  # otherwise have stood in for.
+  defp fake_quote(symbol) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        {:ok,
+         %Types.Quote{
+           symbol: symbol,
+           price: Decimal.new(price),
+           volume: Decimal.new("183.72"),
+           # As the real `get_price/2`: the ticker's 24-hour volume.
+           volume_window: :rolling_24h,
+           venue_time: @at,
+           observed_at: @at,
+           provider: :gemini
+         }}
+
+      :error ->
+        not_listed(symbol)
+    end
   end
 
   @impl true
-  def get_top_of_book(symbol, _opts \\ []) do
-    with_injection(symbol, fn ->
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          {:ok,
-           %Types.TopOfBook{
-             symbol: symbol,
-             # A spread around the fake's price. The bid is deliberately *not* equal to the
-             # price: a test that passes only when they coincide is not testing the split
-             # this type exists to enforce.
-             bid: Decimal.sub(Decimal.new(price), Decimal.new("0.31")),
-             ask: Decimal.add(Decimal.new(price), Decimal.new("0.69")),
-             bid_size: nil,
-             ask_size: nil,
-             venue_time: @at,
-             observed_at: @at,
-             provider: :gemini
-           }}
+  def get_top_of_book(symbol, _opts \\ []),
+    do: with_injection(symbol, fn -> fake_top_of_book(symbol) end)
 
-        :error ->
-          not_listed(symbol)
-      end
-    end)
+  defp fake_top_of_book(symbol) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        {:ok,
+         %Types.TopOfBook{
+           symbol: symbol,
+           # A spread around the fake's price. The bid is deliberately *not* equal to the
+           # price: a test that passes only when they coincide is not testing the split
+           # this type exists to enforce.
+           bid: Decimal.sub(Decimal.new(price), Decimal.new("0.31")),
+           ask: Decimal.add(Decimal.new(price), Decimal.new("0.69")),
+           bid_size: nil,
+           ask_size: nil,
+           venue_time: @at,
+           observed_at: @at,
+           provider: :gemini
+         }}
+
+      :error ->
+        not_listed(symbol)
+    end
   end
 
   @impl true
@@ -746,14 +751,7 @@ defmodule DpExchange.Gemini.Fake do
     channels = Config.opt(opts, :channels, @default_channels)
     wanted = Enum.filter(symbols, &(&1 in @symbols))
 
-    for symbol <- wanted do
-      case get_price(symbol, []) do
-        {:ok, quote_struct} -> send(target, {:dp_exchange, :gemini, streamed(quote_struct)})
-        _refused -> :ok
-      end
-
-      if :trades in channels, do: send(target, {:dp_exchange, :gemini, trade_for(symbol)})
-    end
+    push(wanted, target, channels)
 
     # **Added to, never replacing.** This was the identical line `update_symbols/2`
     # carries below — the two callbacks were byte-for-byte the same function — so a
@@ -769,6 +767,10 @@ defmodule DpExchange.Gemini.Fake do
     # just subscribe the new list. Two callbacks the contract distinguishes,
     # implemented as one function, is the tell.
     Process.put(__MODULE__, MapSet.union(subscribed(), MapSet.new(wanted)))
+
+    if :top_of_book in channels do
+      Process.put(@top_of_book_key, MapSet.union(subscribed_top_of_book(), MapSet.new(wanted)))
+    end
 
     # Unioned the same way, and only for symbols this very call actually pushed a trade
     # for — a symbol subscribed earlier WITHOUT `:trades` does not retroactively gain
@@ -787,6 +789,7 @@ defmodule DpExchange.Gemini.Fake do
     dropped = MapSet.new(symbols)
     Process.put(__MODULE__, MapSet.difference(subscribed(), dropped))
     Process.put(@trades_key, MapSet.difference(subscribed_trades(), dropped))
+    Process.put(@top_of_book_key, MapSet.difference(subscribed_top_of_book(), dropped))
     :ok
   end
 
@@ -794,11 +797,46 @@ defmodule DpExchange.Gemini.Fake do
   def update_symbols(symbols, _opts \\ []) do
     symbols = canonical_case(symbols)
     wanted = MapSet.new(Enum.filter(symbols, &(&1 in @symbols)))
+
+    # **A symbol this adds is pushed for, as `subscribe/2` pushes.** It used to be put
+    # straight into the covered set with nothing sent, so `coverage/1` answered `:stream`
+    # for a symbol that had delivered nothing, the intent-for-evidence substitution
+    # `c:DpExchange.Core.Venue.coverage/1` forbids. Pushed to the caller, with the default
+    # channels: the contract's callback takes neither a `to:` nor `:channels`.
+    added = wanted |> MapSet.difference(subscribed()) |> MapSet.to_list()
+    push(added, self(), @default_channels)
+
     Process.put(__MODULE__, wanted)
+
+    Process.put(
+      @top_of_book_key,
+      subscribed_top_of_book() |> MapSet.union(MapSet.new(added)) |> MapSet.intersection(wanted)
+    )
+
     # Narrowed to the new set, never expanded by it — `update_symbols/2` carries no
     # `:channels` of its own (the contract's callback takes none), so a symbol it adds
     # cannot be assumed to want trades; one it keeps can only keep what it already had.
     Process.put(@trades_key, MapSet.intersection(subscribed_trades(), wanted))
+    :ok
+  end
+
+  # What a real `@bookTicker` frame delivers for each symbol — a `Quote` and, with
+  # `:top_of_book` asked for, a `TopOfBook` — plus a `Trade` per symbol for `:trades`. The
+  # real Feed's default delivers both of the first two, and this fake used to push only the
+  # `Quote`, so a consumer's book handling had nothing to run against.
+  defp push(symbols, target, channels) do
+    for symbol <- symbols do
+      with {:ok, quote_struct} <- fake_quote(symbol),
+           do: send(target, {:dp_exchange, :gemini, streamed(quote_struct)})
+
+      if :top_of_book in channels do
+        with {:ok, book} <- fake_top_of_book(symbol),
+             do: send(target, {:dp_exchange, :gemini, %{book | venue_time: nil}})
+      end
+
+      if :trades in channels, do: send(target, {:dp_exchange, :gemini, trade_for(symbol)})
+    end
+
     :ok
   end
 
@@ -809,11 +847,10 @@ defmodule DpExchange.Gemini.Fake do
   @doc """
   See `DpExchange.Gemini.coverage_by_kind/1`.
 
-  `subscribe/2` above always pushes a `Types.Quote` (via `get_price/2`) — it never
-  builds a `Types.TopOfBook`, so this fake is honestly `:quotes`-only for that kind.
-  `:top_of_book` still appears as a key, empty, rather than being omitted: an omitted key
-  here would read as "this fake does not know about that kind", where an empty map reads
-  as what is actually true — the kind is declared, and nothing of it has been observed.
+  `subscribe/2` pushes a `Types.Quote` for every symbol, a `Types.TopOfBook` when
+  `:top_of_book` is in `opts[:channels]` (the default, as on the real Feed), and
+  `update_symbols/2` pushes both for a symbol it adds. Each kind reads here only for symbols
+  it was actually pushed for.
   `:trades` is real, not empty: a symbol reads here only for a `subscribe/2` call that
   named it AND asked for `:trades` in `opts[:channels]` — narrowed the same way
   `subscribed/0` narrows `:quotes` on `unsubscribe/2` and `update_symbols/2`, so a symbol
@@ -829,14 +866,17 @@ defmodule DpExchange.Gemini.Fake do
   def coverage_by_kind(_opts \\ []) do
     %{
       quotes: Map.new(subscribed(), &{&1, :stream}),
-      top_of_book: %{},
+      top_of_book: Map.new(subscribed_top_of_book(), &{&1, :stream}),
       trades: Map.new(subscribed_trades(), &{&1, :stream})
     }
   end
 
   @impl true
   def subscribe_notices(opts \\ []) do
-    send(Config.opt(opts, :to, self()), {:dp_exchange, :gemini, Notice.new(:link_up, :gemini)})
+    # Registers, and sends nothing: the real Feed answers `:ok` and notifies on the next
+    # event, so a `:link_up` here was a notice a consumer's test saw that production never
+    # sends. Found 2026-10-10.
+    _registered = Config.opt(opts, :to, self())
     :ok
   end
 
@@ -857,6 +897,8 @@ defmodule DpExchange.Gemini.Fake do
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
 
   defp subscribed_trades, do: Process.get(@trades_key, MapSet.new())
+
+  defp subscribed_top_of_book, do: Process.get(@top_of_book_key, MapSet.new())
 
   # `get_price/2`'s `Quote` is the REST shape — `venue_time` is the venue's `Date` header
   # and is genuinely never `nil` there (see `usage-rules.md`'s "Quote.venue_time is the

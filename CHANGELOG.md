@@ -20,6 +20,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Feed`'s call timeout was shorter than its own worst case.** With `:trades` on,
+  `update_symbols/2` can send an unsubscribe and a subscribe on each of two socket channels:
+  four 5s send windows. The timeout was 15s, set before `:trades` existed, so a slow socket
+  exited the caller instead of returning `{:error, :send_timeout}`. It is now 25s.
+- **A wire unsubscribe that failed was never retried.** `wanted` narrowed, so nothing reached
+  the consumer, but the venue kept streaming the symbol until the next reconnect. The
+  periodic resubscribe now retries it, unless the symbol has been wanted again since.
+- **`Fake.subscribe/2` consumed failures queued for `get_price/2`**, because it built its
+  push through the injected `get_price/2`. It now builds the push directly.
+- **`Fake` never pushed a `TopOfBook`**, though the real Feed's default channels deliver one.
+  It now pushes one when `:top_of_book` is in `:channels`, the default.
+- **`Fake.update_symbols/2` counted an added symbol as covered with nothing pushed.** It now
+  pushes for each symbol it adds.
+- **`Fake.subscribe_notices/1` sent a `:link_up` the real Feed never sends.** It now only
+  registers.
+
 ## [0.2.102] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
