@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.117] - 2026-10-11
+
 ### Fixed
 
 - **A transport failure on an authenticated call carried the wrong venue tag.** Private calls
