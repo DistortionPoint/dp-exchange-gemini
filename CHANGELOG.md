@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.115] - 2026-10-11
+
 ### Fixed
 
 - **`WsDecode` decoded every book row twice per frame.** The snapshot, anchor and delta paths
