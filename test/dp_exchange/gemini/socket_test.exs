@@ -679,8 +679,18 @@ defmodule DpExchange.Gemini.SocketTest do
           assert {:error, {:send_exit, :noproc}} = Socket.subscribe(dead, ["BTC-USD"])
         end)
 
-      assert log =~ "send exited"
-      refute log =~ "btcusd"
+      # `capture_log/1` collects every process's log for the window, so with other async
+      # cases running it can hold an unrelated `HTTP Request: GET .../btcusd` line (CI,
+      # 2026-10-11). Only this module's own entries are judged, whole: split on each
+      # entry's leading timestamp, so a frame inspected across several lines stays inside
+      # the entry that logged it.
+      own_lines =
+        log
+        |> String.split(~r/\n(?=\d{2}:\d{2}:\d{2}\.\d{3} \[)/)
+        |> Enum.filter(&String.contains?(&1, "[Gemini Socket]"))
+
+      assert Enum.any?(own_lines, &String.contains?(&1, "send exited"))
+      refute Enum.any?(own_lines, &String.contains?(&1, "btcusd"))
     end
   end
 
