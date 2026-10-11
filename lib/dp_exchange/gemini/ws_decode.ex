@@ -235,10 +235,12 @@ defmodule DpExchange.Gemini.WsDecode do
   @spec depth_gap?(map(), integer() | nil) :: boolean()
   def depth_gap?(_frame, nil), do: false
 
-  def depth_gap?(%{"U" => first_update}, last_applied) when is_integer(first_update),
-    do: first_update > last_applied + 1
+  def depth_gap?(%{"U" => first_update}, last_applied)
+      when is_integer(first_update) and is_integer(last_applied),
+      do: first_update > last_applied + 1
 
-  # A diff frame with no `U` cannot be checked, and an unverifiable frame is treated as a
+  # A diff frame with no `U`, or a `last_applied` that is not an integer (it raised
+  # `ArithmeticError` here), cannot be checked, and an unverifiable frame is treated as a
   # gap: continuing would apply it blind.
   def depth_gap?(_frame, _last_applied), do: true
 

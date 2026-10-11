@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (public REST precision, depth sequence bookkeeping)
+
+Found by reading `Rest`, `Socket`, `Feed` and `WsDecode` against `docs/reference/gemini/`.
+
+- **Public REST money sent as a JSON number kept only a float's 17 digits.** `Rest` now
+  passes `decode_body: false` and `decoded_body/1` decodes with `floats: :decimals`, as
+  `Private` does. The vendor's own examples type `tick_size` and `quote_increment`
+  (`/v1/symbols/details`), `fundingAmount` (`/v1/fundingamount`), `ratePct` (staking) and
+  every candle price as numbers. `rate_pct/1` and `candle_time/1` accept the `Decimal` a
+  fractional number now is; a candle time with an absurd exponent is refused rather than
+  expanded. **Requires `dp_exchange_core ~> 0.3.65`** (the floor was `0.3.50`, which drops
+  `:decode_body`). WebSocket frames are unchanged: the AsyncAPI types every price and size
+  `DecimalString`.
+- **A `depthUpdate` with no readable `u` erased the symbol's sequence.** It stored `nil`,
+  which `depth_gap?/2` reads as "nothing applied yet", so a real gap behind it was never
+  announced; a string `u` made the next check raise `ArithmeticError` in the socket process.
+  The frame now raises `"undecodable depth update"`, keeps the last good `u`, and still
+  marks the symbol anchored. `depth_gap?/2` treats a non-integer last-applied id as a gap.
+
 ## [0.2.108] - 2026-10-11
 
 ### Fixed (float money, order-id fidelity, withdrawal refusals)

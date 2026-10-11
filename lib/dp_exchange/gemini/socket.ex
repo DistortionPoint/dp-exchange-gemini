@@ -1076,9 +1076,38 @@ defmodule DpExchange.Gemini.Socket do
     last_by_symbol = Map.get(state, :last_depth_update, %{})
 
     case {message["u"], Map.get(last_by_symbol, symbol)} do
-      {u, applied} when is_integer(u) and is_integer(applied) and u <= applied -> {:ok, state}
-      {_u, applied} -> apply_depth_update(message, symbol, state, last_by_symbol, applied)
+      {u, applied} when is_integer(u) and is_integer(applied) and u <= applied ->
+        {:ok, state}
+
+      {u, applied} when is_integer(u) ->
+        apply_depth_update(message, symbol, state, last_by_symbol, applied)
+
+      {_unreadable_u, _applied} ->
+        refuse_unsequenced_depth_update(message, symbol, state)
     end
+  end
+
+  # **A diff whose `u` cannot be read does not advance the sequence, and is not delivered.**
+  # `u` was stored as it came, so a frame with no `u` (or a non-integer one) overwrote the
+  # symbol's last-applied id with `nil`, and `WsDecode.depth_gap?/2` reads `nil` as "nothing
+  # applied yet, never a gap". The frame after it was then judged against nothing, so a real
+  # gap behind the unreadable frame was never announced, and a string `u` made the check
+  # that followed raise `ArithmeticError` in this process. Found 2026-10-11 reading the
+  # sequence bookkeeping. The last good `u` is kept, so the next frame is judged against it
+  # and the missing changes surface as the gap they are. The anchor flag still advances
+  # (`decode_depth_frame/3`): if this was the anchor, the next frame is a diff, and reading
+  # that as the whole book would be worse than the loss.
+  defp refuse_unsequenced_depth_update(message, symbol, state) do
+    {_discarded, state} = decode_depth_frame(message, symbol, state)
+
+    notify(
+      state,
+      Notice.new(:degraded, :gemini,
+        details: %{reason: "undecodable depth update", symbol: symbol}
+      )
+    )
+
+    {:ok, state}
   end
 
   defp apply_depth_update(message, symbol, state, last_by_symbol, last_applied) do

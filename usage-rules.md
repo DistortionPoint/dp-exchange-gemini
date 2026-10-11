@@ -287,6 +287,16 @@ own AsyncAPI requires only `[lastUpdateId, bids, asks]` for `OrderBookSnapshot` 
 nanosecond event time; the `Quote` a `bookTicker` frame's last trade produces does not — see
 above.
 
+## Numbers keep every digit, on public reads as well as private ones
+
+Gemini types some money fields as JSON numbers, not strings: a symbol's `tick_size` and
+`quote_increment`, a perpetual's `fundingAmount`, staking `ratePct`, every price in a candle
+row. A float holds about 17 significant digits, so a longer amount was rounded before this
+package saw it. Public REST bodies are now decoded as `Decimal`s exactly (`floats:
+:decimals`), as private ones have been since 0.2.108; the WebSocket channels send decimal
+**strings** (`DecimalString` in the AsyncAPI document) and are unaffected. This needs
+`dp_exchange_core ~> 0.3.65`, the first release that lets a venue decode its own bodies.
+
 ## A 404 on a market-data call is a refusal, not a retryable error
 
 Measured live 2026-09-06: `GET /v1/pubticker/{symbol}` and `GET
@@ -1148,6 +1158,12 @@ gap, and no second notice follows. **Act on that first notice**: discard your lo
 that symbol and resubscribe (or refetch with `get_order_book/2`). Waiting for the notice to
 repeat leaves you applying diffs to a book that is wrong from the gap onward, with every
 price real.
+
+A `depthUpdate` whose `u` is missing or not an integer is the exception: its sequence cannot
+be stated, so the socket does **not** advance past it. It raises `"undecodable depth update"`
+and keeps the last good `u`, so the frame after it is judged against that and the missing
+changes are announced as the gap they are (previously the unreadable frame reset the symbol
+to "nothing applied yet", which can never be a gap).
 
 Likewise an undecodable trade frame raises a `:data_quality` notice
 (`details.reason: "undecodable trade"`) instead of vanishing; one notice per frame.

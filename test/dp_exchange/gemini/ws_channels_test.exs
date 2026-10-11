@@ -417,6 +417,11 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert WsDecode.depth_gap?(%{"U" => 500, "u" => 505}, nil) == false
     end
 
+    test "a last-applied id that is not an integer is a gap, never an ArithmeticError" do
+      # `"x" + 1` raised inside the socket process, which dropped the connection.
+      assert WsDecode.depth_gap?(%{"U" => 11, "u" => 15}, "x") == true
+    end
+
     test "a frame with no U is treated as a gap, because it cannot be checked" do
       # Continuing would apply it blind.
       assert WsDecode.depth_gap?(%{"u" => 15}, 10) == true

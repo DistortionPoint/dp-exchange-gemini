@@ -229,6 +229,38 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert details.reason == "undecodable depth update"
     end
 
+    test "a diff whose u is unreadable keeps the last good sequence, so the gap still shows" do
+      # `u` used to be stored as it came, so a frame with no `u` set the symbol's last-applied
+      # id to `nil`, which `depth_gap?/2` reads as "nothing applied yet". The frame after it
+      # was then judged against nothing and a real gap behind it was never announced.
+      start = state(%{last_depth_update: %{"BTC-USD" => 10}})
+
+      for unreadable <- [Map.delete(@diff, "u"), %{@diff | "u" => "15"}] do
+        assert {:ok, kept} = Socket.handle_frame(frame(unreadable), start)
+
+        assert kept.last_depth_update == %{"BTC-USD" => 10}
+        refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+        assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
+        assert details.reason == "undecodable depth update"
+
+        # The next frame continues from the unreadable one, so it skips ahead of 10: a gap.
+        later = %{@diff | "U" => 16, "u" => 17}
+        assert {:ok, _state} = Socket.handle_frame(frame(later), kept)
+        assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+        # The later frame itself is still delivered; take it so the next pass starts clean.
+        assert_received {:dp_exchange, :gemini, %Types.OrderBookDelta{sequence: 17}}
+      end
+    end
+
+    test "an unreadable-u frame that is the anchor still marks the symbol anchored" do
+      anchored = state(%{depth_snapshot?: true})
+
+      assert {:ok, new_state} = Socket.handle_frame(frame(Map.delete(@diff, "u")), anchored)
+
+      refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
+      assert MapSet.member?(new_state.depth_anchored, "BTC-USD")
+    end
+
     test "the anchor frame after a resubscribe is a full OrderBook, not a diff" do
       # See the moduledoc's "A depth diff stream needs its own anchor" (websocket.yaml:
       # 1263-1270): with the `snapshot` connection parameter set, the FIRST depthUpdate per

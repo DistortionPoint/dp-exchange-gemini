@@ -89,6 +89,11 @@ defmodule DpExchange.Gemini.Rest do
 
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
+  # A value `decimal/1` can read. A `Decimal` counts: bodies are decoded with
+  # `floats: :decimals`, so a JSON number with a fraction arrives as one, not a float.
+  defguardp is_numeric(value)
+            when is_binary(value) or is_number(value) or is_struct(value, Decimal)
+
   # The venue's refusal vocabulary, written down at compile time so that decoding one can
   # never mint an atom from venue-supplied text. See `refusal_reason/1` for why that
   # matters more than it looks.
@@ -911,9 +916,9 @@ defmodule DpExchange.Gemini.Rest do
 
   # `ratePct` where the venue publishes it; otherwise `rate`, which is basis points, divided
   # by a hundred. Never `apyPct`, which is a different number for the same position.
-  defp rate_pct(%{"ratePct" => pct}) when is_binary(pct) or is_number(pct), do: decimal(pct)
+  defp rate_pct(%{"ratePct" => pct}) when is_numeric(pct), do: decimal(pct)
 
-  defp rate_pct(%{"rate" => bps}) when is_binary(bps) or is_number(bps) do
+  defp rate_pct(%{"rate" => bps}) when is_numeric(bps) do
     case decimal(bps) do
       nil -> nil
       value -> Decimal.div(value, Decimal.new(100))
@@ -1137,9 +1142,17 @@ defmodule DpExchange.Gemini.Rest do
       :req_adapter,
       :rate_limit_blocking
     ])
-    |> Keyword.merge(provider: :gemini, raw_status: true)
+    |> Keyword.merge(provider: :gemini, raw_status: true, decode_body: false)
   end
 
+  # `decode_body: false` (request_opts/1) hands this module the venue's BYTES, decoded here
+  # with `floats: :decimals`. Gemini types money fields as JSON numbers on public routes too
+  # (`/v1/symbols/details` `tick_size` and `quote_increment`, `/v1/fundingamount`'s
+  # `fundingAmount`, the `/v2/candles` rows), and Req's own decoder turns each into a float
+  # that holds at most 17 significant digits. A fractional number is a `Decimal` here and an
+  # integer stays an integer; every reader below goes through `decimal/1`, which accepts
+  # both. Core before 0.3.65 drops the option, so the dependency floor is 0.3.65.
+  #
   # A 2xx body this package cannot decode is NOT an empty object.
   #
   # This used to collapse any unparseable body to `%{}` and hand it on as success. Nothing
@@ -1154,7 +1167,7 @@ defmodule DpExchange.Gemini.Rest do
   # Refuse instead. Refusal bodies do NOT come through here — see `refusal/1` below, which
   # reads the venue's own text and has its own reason to stay lenient.
   defp decoded_body(body) when is_binary(body) do
-    case Jason.decode(body) do
+    case Jason.decode(body, floats: :decimals) do
       {:ok, decoded} -> {:ok, decoded}
       {:error, _reason} -> {:error, {:undecodable_response, :gemini}}
     end
@@ -1526,6 +1539,17 @@ defmodule DpExchange.Gemini.Rest do
 
   defp candle_time(value) when is_integer(value), do: from_unix_ms(value)
   defp candle_time(value) when is_float(value), do: from_unix_ms(trunc(value))
+
+  # `floats: :decimals` (see `decoded_body/1`) turns a fractional JSON number into a
+  # `Decimal`; it truncates to whole milliseconds exactly as the float clause above does.
+  # The exponent is bounded BEFORE any arithmetic: `Decimal` aligns exponents to round or
+  # compare, so `1E999999999` would try to build an integer of a billion digits. A real
+  # epoch has an exponent of 0, a handful of negative places, or a short mantissa like `1.7E12`.
+  defp candle_time(%Decimal{exp: exp} = value) when exp in -30..18 do
+    value |> Decimal.round(0, :down) |> Decimal.to_integer() |> from_unix_ms()
+  end
+
+  defp candle_time(%Decimal{} = value), do: {:error, {:unparseable_venue_timestamp, value}}
 
   defp candle_time(value) when is_binary(value) do
     # The WHOLE string, not `Integer.parse/1`'s leading run. `{integer, _rest}` accepted
