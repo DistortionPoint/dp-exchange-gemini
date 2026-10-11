@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.110] - 2026-10-11
+
 ### Fixed
 
 - **`Fake.place_order/3` issued an id its own `get_order/3` and `cancel_order/3` refused**
