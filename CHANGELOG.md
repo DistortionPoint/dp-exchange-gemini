@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.109] - 2026-10-11
+
 ### Fixed (public REST precision, depth sequence bookkeeping)
 
 Found by reading `Rest`, `Socket`, `Feed` and `WsDecode` against `docs/reference/gemini/`.
