@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.113] - 2026-10-11
+
 ### Fixed
 
 - **An order row with a numeric field the venue SENT and this package could not read became a
