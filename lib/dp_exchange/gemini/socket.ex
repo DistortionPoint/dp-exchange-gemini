@@ -276,9 +276,30 @@ defmodule DpExchange.Gemini.Socket do
   defp verified_tls do
     [
       verify: :verify_peer,
-      cacerts: :public_key.cacerts_get(),
+      cacerts: load_cacerts(),
       customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
     ]
+  end
+
+  # `:public_key.cacerts_get/0` RAISES when the operating system has no trust store to read
+  # (a minimal container image without `ca-certificates` is the ordinary way to get there).
+  # `start_link/1` runs inside `Feed`'s `handle_call`, so the raise crashed the shared feed
+  # and every other consumer's subscription with it, and the restarted feed raised again on
+  # the next subscribe. It is `{:error, {:tls_trust_store_unavailable, _}}` from `start_link/1`
+  # now, and the connection is NOT made unverified: refusing is the only safe answer to "no
+  # CA list". `:cacerts_loader` is the test seam, in the same place `:websocket_url` is.
+  defp load_cacerts do
+    case Config.get(:dp_exchange_gemini, :cacerts_loader, nil) do
+      nil -> :public_key.cacerts_get()
+      loader -> loader.()
+    end
+  end
+
+  defp tls_connect_opts(opts) do
+    {:ok, connect_opts(opts)}
+  rescue
+    error in ErlangError ->
+      {:error, {:tls_trust_store_unavailable, inspect(error.original, limit: 20)}}
   end
 
   @doc """
@@ -313,7 +334,9 @@ defmodule DpExchange.Gemini.Socket do
       depth_snapshot?: depth_snapshot?(opts)
     }
 
-    VendoredWebSockex.start_link(url, __MODULE__, state, connect_opts(opts))
+    with {:ok, connect} <- tls_connect_opts(opts) do
+      VendoredWebSockex.start_link(url, __MODULE__, state, connect)
+    end
   end
 
   # The venue's own endpoint, unless the application config names another with

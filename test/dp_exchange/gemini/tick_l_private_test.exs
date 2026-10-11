@@ -606,8 +606,11 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
 
   describe "arguments that used to raise in the caller" do
     test "a payment method's details must be a map, in the real call and the fake" do
-      for details <- [nil, [country: "US"], "routing", ~D[2026-01-01]] do
-        expected = {:error, {:invalid_details, details}}
+      # Never echoed: a keyword list of bank fields is the likeliest mistake.
+      keyword_fields = [country: "US", account: "000123456789"]
+
+      for details <- [nil, keyword_fields, "routing", ~D[2026-01-01]] do
+        expected = {:error, {:invalid_details, :not_a_map}}
 
         assert Private.add_payment_method(details, @credentials, real_opts([])) == expected
         assert Fake.add_payment_method(details, credentials: @credentials) == expected

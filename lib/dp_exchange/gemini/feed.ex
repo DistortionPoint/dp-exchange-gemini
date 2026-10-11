@@ -536,6 +536,26 @@ defmodule DpExchange.Gemini.Feed do
      }}
   end
 
+  # **A crash report and `:sys.get_status/1` print this process's state, and the state holds
+  # the caller's `:ssl_options`.** That is the option `usage-rules.md` tells a consumer to use
+  # to replace the verified-TLS defaults, and what it holds is whatever the consumer needs for
+  # its own trust: a `:cacerts` list of every CA certificate (hundreds of kilobytes in one log
+  # line), and for a private CA or a client certificate a `:key` or a `:password`. The state
+  # is shown with that one option replaced; nothing else in it is secret. `:sys.get_state/1`
+  # is unchanged, which is what this package's own tests read.
+  @impl true
+  def format_status(%{state: %{socket_opts: socket_opts} = state} = status)
+      when is_list(socket_opts) do
+    redacted =
+      if Keyword.has_key?(socket_opts, :ssl_options),
+        do: Keyword.put(socket_opts, :ssl_options, :redacted),
+        else: socket_opts
+
+    %{status | state: %{state | socket_opts: redacted}}
+  end
+
+  def format_status(status), do: status
+
   @impl true
   # `{:error, _}` leaves nothing registered — see `subscribe/3`. A failure to connect undoes
   # the registration. A failure to send undoes it too, keeps the socket this call dialled, and

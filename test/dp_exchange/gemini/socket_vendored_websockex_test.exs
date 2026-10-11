@@ -82,6 +82,33 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert Process.alive?(socket_pid)
   end
 
+  test "a frame that never finishes is closed at the size bound instead of buffered forever" do
+    # The header declares 4 GB and the server then sends 20 MiB of it. Upstream buffered all
+    # of it (and would have waited for the rest); the bound is 16 MiB.
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_send_endless_frame/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down, details: details}},
+                   10_000
+
+    assert details.reason =~ "message too big"
+    assert Process.alive?(socket_pid)
+  end
+
+  test "a trust store the operating system cannot supply is an error, not a raise" do
+    # `:public_key.cacerts_get/0` raises where there is no CA list (a minimal image). It ran
+    # inside `Feed`'s `handle_call`, so the feed died with every subscription in it.
+    DpExchange.Core.Config.put_override(:cacerts_loader, fn -> :erlang.error(:enoent) end)
+
+    assert {:error, {:tls_trust_store_unavailable, reason}} =
+             Socket.start_link(url: "wss://localhost:1/", subscriber: self())
+
+    assert reason =~ "enoent"
+  end
+
   test "a wss peer whose certificate nothing trusts is refused" do
     # websockex's own default is `verify: :verify_none`. Against this server, the TLS
     # handshake used to complete and the upgrade request went out.
@@ -230,6 +257,25 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     # Waits for the client to tear down, so the close cannot race the frame.
     _client_closed = :gen_tcp.recv(socket, 0, 5_000)
     :gen_tcp.close(socket)
+  end
+
+  # A text frame whose header declares 4 GB, followed by 20 MiB of its payload. Waits for the
+  # client's close frame before closing, so the close cannot race the data.
+  defp upgrade_then_send_endless_frame(socket) do
+    upgrade(socket)
+    :ok = :gen_tcp.send(socket, <<129, 127, 4_000_000_000::64>>)
+    stream_filler(socket, 20)
+    _client_closed = :gen_tcp.recv(socket, 0, 5_000)
+    :gen_tcp.close(socket)
+  end
+
+  defp stream_filler(_socket, 0), do: :ok
+
+  defp stream_filler(socket, remaining) do
+    case :gen_tcp.send(socket, :binary.copy("a", 1_048_576)) do
+      :ok -> stream_filler(socket, remaining - 1)
+      {:error, _closed} -> :ok
+    end
   end
 
   # Upgrades, then keeps the connection open (reading whatever the client sends) until the

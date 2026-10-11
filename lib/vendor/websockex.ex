@@ -94,7 +94,8 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly three things**, each marked `## VENDORED FIX` at its call site below:
+  **Exactly four things**, each marked `## VENDORED FIX` at its call site below (the fourth,
+  listed last, bounds an unfinished frame and a reassembled message at 16 MiB):
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -119,6 +120,11 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
      task is killed and the attempt ends as `%WebSockex.ConnError{original: :timeout}`, the
      error a timed-out `recv` already produces, so the existing start and reconnect paths
      handle it unchanged. Added 2026-09-27.
+  4. `websocket_loop/3` and `handle_fragment/4` close with 1009 ("message too big") once the
+     unparsed buffer or a reassembled fragmented message passes `@max_message_bytes`
+     (16 MiB). Upstream buffers an unfinished frame without limit, and a header may declare a
+     length up to 2^63, so a peer that never finished one grew this process until the node
+     ran out of memory.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -905,6 +911,10 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
   defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
+  # The most one unfinished frame, or one reassembled message, may hold. See "VENDORED FIX
+  # (4 of 4)" in `websocket_loop/3`.
+  @max_message_bytes 16_777_216
+
   defp websocket_loop(parent, debug, state) do
     case WebSockex.Frame.parse_frame(state.buffer) do
       {:ok, frame, buffer} ->
@@ -958,7 +968,17 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
           {^transport, ^socket, message} ->
             buffer = read_all_data(transport, socket, [message, state.buffer])
-            websocket_loop(parent, debug, %{state | buffer: buffer})
+
+            # ## VENDORED FIX (4 of 4) — an unfinished frame is not buffered without limit.
+            # A frame header may declare any length up to 2^63, and `parse_frame/1` answers
+            # `:incomplete` until all of it has arrived, so a peer (or a proxy) that never
+            # finishes one grew `state.buffer` until the node ran out of memory. Gemini's
+            # frames are a few KB; the bound is Core's HTTP body cap.
+            if byte_size(buffer) > @max_message_bytes do
+              handle_close({:local, 1009, "message too big"}, parent, debug, state)
+            else
+              websocket_loop(parent, debug, %{state | buffer: buffer})
+            end
 
           {:tcp_closed, ^socket} ->
             handle_close({:remote, :closed}, parent, debug, state)
@@ -1096,13 +1116,21 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
   end
 
   defp handle_fragment({:continuation, next}, parent, debug, %{fragment: {type, part}} = state) do
-    websocket_loop(parent, debug, %{state | fragment: {type, <<part::binary, next::binary>>}})
+    if byte_size(part) + byte_size(next) > @max_message_bytes do
+      handle_close({:local, 1009, "message too big"}, parent, debug, %{state | fragment: nil})
+    else
+      websocket_loop(parent, debug, %{state | fragment: {type, <<part::binary, next::binary>>}})
+    end
   end
 
   defp handle_fragment({:finish, next}, parent, debug, %{fragment: {type, part}} = state) do
-    frame = {type, <<part::binary, next::binary>>}
-    debug = Utils.sys_debug(debug, {:in, :completed_fragment, frame}, state)
-    handle_frame(frame, parent, debug, %{state | fragment: nil})
+    if byte_size(part) + byte_size(next) > @max_message_bytes do
+      handle_close({:local, 1009, "message too big"}, parent, debug, %{state | fragment: nil})
+    else
+      frame = {type, <<part::binary, next::binary>>}
+      debug = Utils.sys_debug(debug, {:in, :completed_fragment, frame}, state)
+      handle_frame(frame, parent, debug, %{state | fragment: nil})
+    end
   end
 
   defp handle_close({:remote, :closed} = reason, parent, debug, state) do

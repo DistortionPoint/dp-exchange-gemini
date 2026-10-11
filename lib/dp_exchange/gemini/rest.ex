@@ -1388,7 +1388,7 @@ defmodule DpExchange.Gemini.Rest do
             :refused
 
           {:error, _reason} ->
-            {:unknown_reason, trimmed}
+            {:unknown_reason, bounded_text(trimmed)}
         end
     end
   end
@@ -1403,7 +1403,7 @@ defmodule DpExchange.Gemini.Rest do
     case Map.fetch(@refusal_reasons, reason) do
       {:ok, known} when is_binary(message) -> {known, message}
       {:ok, known} -> known
-      :error -> {:unknown_reason, reason}
+      :error -> {:unknown_reason, bounded_text(reason)}
     end
   end
 
@@ -1412,11 +1412,37 @@ defmodule DpExchange.Gemini.Rest do
   defp message_from(%{"message" => message}) when is_binary(message) do
     case String.trim(message) do
       "" -> nil
-      trimmed -> trimmed
+      trimmed -> bounded_text(trimmed)
     end
   end
 
   defp message_from(_no_message), do: nil
+
+  # **The venue's words are quoted bounded.** A 4xx body reaches `refusal_reason/1` whole
+  # (Core's default cap is 16 MiB), and a CDN or proxy error page answers a 400 or 404 as
+  # readily as Gemini's own one-line JSON does. Kept whole, the page became the payload of
+  # `{:unknown_reason, text}` and from there went into every caller's log, the hole
+  # `status_error/2` and Core already close for the other statuses. Text inside the bound is
+  # returned byte-identical, so a real Gemini reason or message is unchanged.
+  @refusal_text_max 2_048
+
+  defp bounded_text(text) when byte_size(text) <= @refusal_text_max, do: text
+
+  defp bounded_text(text) do
+    text
+    |> binary_part(0, @refusal_text_max)
+    |> drop_partial_codepoint(3)
+    |> Kernel.<>("... [truncated]")
+  end
+
+  # The cut may land inside a multi-byte character; at most three bytes of it are dropped.
+  defp drop_partial_codepoint(text, 0), do: text
+
+  defp drop_partial_codepoint(text, left) do
+    if String.valid?(text),
+      do: text,
+      else: drop_partial_codepoint(binary_part(text, 0, byte_size(text) - 1), left - 1)
+  end
 
   # The venue's own clock, from the response it served. Absent, this returns an error and
   # callers that can tolerate it (`header_time_or_nil/1`) turn that into `nil`.

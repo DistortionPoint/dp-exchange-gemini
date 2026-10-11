@@ -139,6 +139,11 @@ Both come from a private, patched fork of websockex 0.5.1's process loop,
 - **A close frame with an invalid status code disconnects.** Upstream raised on it and
   crashed the socket before its reconnect logic ran. It now produces an ordinary
   `:link_down` and reconnect.
+- **A frame that never finishes is closed.** A frame header may declare a length up to 2^63
+  and upstream buffered whatever arrived, without limit. An unfinished frame, or a fragmented
+  message reassembled, past 16 MiB (the size of Core's HTTP body cap; Gemini's frames are a
+  few kilobytes) is closed with status 1009 and surfaces as an ordinary `:link_down` and
+  reconnect.
 
 **This package depends on `{:websockex, "== 0.5.1"}` exactly.** The fork calls that
 release's internals. If your application pins a different websockex version, dependency
@@ -147,10 +152,14 @@ resolution will fail, so resolve to 0.5.1.
 **The WebSocket verifies the venue's TLS certificate** (2026-09-27). websockex's own
 default is not to (`verify: :verify_none`), and until then this package connected with
 that default, accepting any certificate. It now uses the operating system's trust store and
-HTTPS hostname rules. On a host with no system CA bundle the connection fails with a TLS
-error rather than connecting unverified. Pass your own `:ssl_options` where you start the
-tree to replace the defaults entirely — `{DpExchange.Gemini, ssl_options: [...]}`, which
-`Feed` forwards to every socket it dials (it did not before; the option was dropped).
+HTTPS hostname rules. On a host with no system CA bundle (`:public_key.cacerts_get/0` raises
+there) the subscribe call answers `{:error, {:tls_trust_store_unavailable, reason}}` rather
+than connecting unverified; it used to raise inside the shared `Feed`. Pass your own
+`:ssl_options` where you start the tree to replace the defaults entirely —
+`{DpExchange.Gemini, ssl_options: [...]}`, which `Feed` forwards to every socket it dials (it
+did not before; the option was dropped). `Feed` shows that option as `:redacted` in a crash
+report and in `:sys.get_status/1`, because a `:cacerts` list, a `:key` or a `:password` lives
+there; `:sys.get_state/1` still returns it.
 
 ## A socket crash costs one reconnect, never your whole subscription
 

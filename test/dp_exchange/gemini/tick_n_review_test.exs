@@ -172,9 +172,11 @@ defmodule DpExchange.Gemini.TickNReviewTest do
     end
 
     test "a secret that is not a string is refused, not dropped or raised on" do
-      for bad <- [5, %{}, :secret] do
+      # The refusal names the key and never echoes the value: it is a secret in a shape that
+      # could not be sent (a charlist, iodata, a map holding it).
+      for bad <- [5, %{}, :secret, ~c"hunter2-canary", ["hunter2", "-canary"]] do
         assert Private.refresh_access_token("client", "refresh", real_opts(client_secret: bad)) ==
-                 {:error, {:invalid_option, :client_secret, bad}}
+                 {:error, {:invalid_option, :client_secret, :redacted}}
       end
     end
   end

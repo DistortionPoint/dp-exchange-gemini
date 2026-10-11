@@ -20,6 +20,70 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refusal carried the venue's words whole.** `Rest.refusal_reason/1` is shared by every
+  public and signed call, and a 400 or 404 body reaches it unbounded (Core's cap is 16 MiB).
+  A CDN or proxy error page became the payload of `{:unknown_reason, text}`, and from there
+  went into every caller's log; a long `message` on a known reason (`{:invalid_nonce, text}`)
+  and a long unknown `reason` did the same. `status_error/2` and Core already quoted the other
+  statuses bounded. The text is cut at 2,048 bytes, on a character boundary, and ends
+  `... [truncated]`; text inside the bound is byte-identical, so a real Gemini reason is
+  unchanged.
+- **`Socket.start_link/1` raised where the operating system has no CA list.**
+  `:public_key.cacerts_get/0` raises on a host without a trust store (a minimal container
+  image), and `start_link/1` runs inside `Feed`'s `handle_call`, so the shared feed died with
+  every consumer's subscription and the restarted one raised again on the next subscribe. It is
+  `{:error, {:tls_trust_store_unavailable, reason}}` now, from `Socket.start_link/1` and so from
+  the subscribe call. The connection is still never made unverified.
+- **The vendored WebSocket loop buffered an unfinished frame without limit.** A frame header may
+  declare a length up to 2^63, and a peer that never finished one grew the socket process until
+  the node ran out of memory. An unparsed buffer, or a fragmented message reassembled, past
+  16 MiB is closed with status 1009 ("message too big") and surfaces as an ordinary
+  `:link_down` and reconnect. Gemini's frames are a few kilobytes; 16 MiB is the size of
+  Core's HTTP body cap. This is a fourth patch to the fork, listed in its moduledoc.
+- **`Feed` printed the caller's `:ssl_options` in a crash report and in
+  `:sys.get_status/1`.** The option holds whatever the consumer needs for its own trust: a
+  `:cacerts` list (hundreds of kilobytes in one log line), and for a private CA or a client
+  certificate a `:key` or `:password`. `Feed.format_status/1` shows it as `:redacted`;
+  `:sys.get_state/1` is unchanged.
+- **Two refusals echoed a value that can be a secret.** `refresh_access_token/3` answered
+  `{:error, {:invalid_option, :client_secret, value}}` with the secret in whatever shape it
+  could not be sent (a charlist, iodata, a map holding it); the value is `:redacted` now.
+  `add_payment_method/3` answered `{:error, {:invalid_details, details}}` with the caller's
+  whole value, and a keyword list of the same bank fields is the likeliest mistake; it is
+  `{:error, {:invalid_details, :not_a_map}}`; the fake already runs that check through
+  `Private.validate_payment_details/1`.
+- `Private.decimal/1` bounded every branch but a float's, whose exponent `from_float/1` keeps
+  (`1.0e300`). Bodies are decoded with `floats: :decimals`, so none arrives from the venue
+  today; the branch now matches the other copies.
+
+### Documentation
+
+- `Credentials`' moduledoc called `{DpExchange.X, credentials: ...}` "the supported child form"
+  while the README says nothing reads a credential from the child's options (the calls that
+  sign take it as an argument). It now says what the option is for: a host that does hand one
+  to the tree does not print it.
+- `usage-rules.md` states the 16 MiB frame bound, the `:tls_trust_store_unavailable` answer
+  and the redaction of `:ssl_options`.
+
+### Tests
+
+- `tick_o_review_test.exs` covers the bounded refusal (page, multi-byte cut, known and unknown
+  reason, text at the bound, and a signed call end to end) and the `Feed` status redaction.
+- `socket_vendored_websockex_test.exs` drives a 4 GB frame header followed by 20 MiB against a
+  real socket (closed at the bound, `:link_down`, socket still alive), and a trust store that
+  raises.
+- `tick_n_review_test.exs` and `tick_l_private_test.exs` now assert the redacted shapes above.
+
+### Unmeasured, left alone
+
+- A subscribe frame names every wanted symbol at once, on each socket channel, and so does the
+  minute resubscribe. 347 symbols was measured live; nothing documents a frame or subscription
+  limit (the AsyncAPI is silent), and the venue lists 347 symbols in all, so a larger frame is
+  not reachable from its catalogue. Not chunked: chunking would change how acknowledgements
+  are counted against the ack deadline, on a limit nobody has measured.
+
 ## [0.2.118] - 2026-10-11
 
 ### Fixed

@@ -2935,13 +2935,15 @@ defmodule DpExchange.Gemini.Private do
 
   @doc """
   Whether `details` is a map `add_payment_method/3` can sign: the bank fields the caller
-  holds. Anything else is `{:error, {:invalid_details, details}}`; a `nil` or a list raised in
-  the caller's process. Exposed so `DpExchange.Gemini.Fake` refuses with this function,
-  before the country and the credential.
+  holds. Anything else is `{:error, {:invalid_details, :not_a_map}}`; a `nil` or a list raised
+  in the caller's process. **The value is not echoed**: a keyword list of the same bank fields
+  is the likeliest mistake, and an account and routing number do not belong in an error tuple
+  that is logged. Exposed so `DpExchange.Gemini.Fake` refuses with this function, before the
+  country and the credential.
   """
-  @spec validate_payment_details(term()) :: :ok | {:error, {:invalid_details, term()}}
+  @spec validate_payment_details(term()) :: :ok | {:error, {:invalid_details, :not_a_map}}
   def validate_payment_details(details) when is_map(details) and not is_struct(details), do: :ok
-  def validate_payment_details(details), do: {:error, {:invalid_details, details}}
+  def validate_payment_details(_details), do: {:error, {:invalid_details, :not_a_map}}
 
   defp addbank_path("US"), do: {:ok, "/v1/payments/addbank"}
   defp addbank_path("CA"), do: {:ok, "/v1/payments/addbank/cad"}
@@ -4784,7 +4786,11 @@ defmodule DpExchange.Gemini.Private do
   defp valid_client_secret?(nil), do: true
   defp valid_client_secret?(secret), do: is_binary(secret)
 
-  defp secret_refusal(opts), do: invalid_option(:client_secret, Keyword.get(opts, :client_secret))
+  # The value is NOT echoed, unlike every other `{:invalid_option, key, value}`: it is a secret
+  # in a shape this package could not send (a charlist, iodata, a map holding it), and the error
+  # tuple goes to whatever logs the caller's result. `:redacted` names the key and keeps the
+  # value out.
+  defp secret_refusal(_opts), do: invalid_option(:client_secret, :redacted)
 
   defp blank_string?(value), do: not is_binary(value) or String.trim(value) == ""
 
@@ -5371,7 +5377,8 @@ defmodule DpExchange.Gemini.Private do
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+  # Bounded like every other branch: `1.0e300` keeps its exponent through `from_float/1`.
+  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> bounded()
 
   # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
   # the whole string be consumed (`{d, ""}`), is what this package already does in

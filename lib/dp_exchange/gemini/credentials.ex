@@ -45,8 +45,10 @@ defmodule DpExchange.Gemini.Credentials do
 
   `child_spec/1` is where `wrap_opt/1` is applied, because a supervisor captures the
   `{module, :start_link, [opts]}` MFA before `start_link/1` or `init/1` ever runs — see
-  `wrap_opt/1`'s own doc. A consumer who uses the supported `{DpExchange.X, credentials:
-  ...}` child form gets the redaction for free.
+  `wrap_opt/1`'s own doc. A consumer who puts `{DpExchange.Gemini, credentials: ...}` in a
+  supervision tree gets the redaction for free. (Nothing in this package reads a credential
+  from the child's options: the calls that sign take it as an argument. The option exists so
+  that a host which does hand one to the tree, for its own use, does not print it.)
 
   **A consumer who builds the child spec themselves does not**, and upgrading this package
   will not change that: their supervisor stores the raw map and OTP renders it on the next
