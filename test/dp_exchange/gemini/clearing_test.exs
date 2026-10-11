@@ -98,6 +98,17 @@ defmodule DpExchange.Gemini.ClearingTest do
                Private.create_clearing_order(%{symbol: "BTC-USD", side: :buy}, @credentials, [])
     end
 
+    test "an amount, price or side that is not a real order term is refused before signing" do
+      refused = fn terms ->
+        Private.create_clearing_order(terms, @credentials, retry_attempts: 0)
+      end
+
+      assert {:error, {:non_positive_amount, :amount, 0}} = refused.(%{@terms | amount: 0})
+      assert {:error, {:non_positive_amount, :price, _price}} = refused.(%{@terms | price: "-1"})
+      assert {:error, {:invalid_decimal, :amount, "abc"}} = refused.(%{@terms | amount: "abc"})
+      assert {:error, {:invalid_side, :hold}} = refused.(%{@terms | side: :hold})
+    end
+
     test "a created order is not confirmed, and that is what the caller must read" do
       assert {:ok, order} =
                Private.create_clearing_order(@terms, @credentials,

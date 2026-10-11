@@ -521,7 +521,8 @@ defmodule DpExchange.Gemini.PrivateTest do
         "timestampms" => 1_787_936_147_000
       }
 
-      for bad <- ["2026-09-14", "1787936147.5", "1787936147000-ish", "12abc"] do
+      # Zero and negatives, as numbers or digit strings, are not instants either.
+      for bad <- ["2026-09-14", "1787936147.5", "1787936147000-ish", "12abc", 0, -5, "0"] do
         assert {:error, {:unparseable_venue_timestamp, ^bad}} =
                  Private.get_trade_history(@credentials,
                    symbol: "BTC-USD",

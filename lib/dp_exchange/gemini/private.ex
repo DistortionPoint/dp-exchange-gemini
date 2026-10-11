@@ -1964,8 +1964,11 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("legacy", Keyword.get(opts, :legacy))
 
     with {:ok, network_segment} <- withdrawal_network(network),
+         # Once: every call generates a NEW address, and nothing in the request lets the venue
+         # tell a retry from a second ask, so a retried timeout would create an address the
+         # caller never saw. See `post_once/4`.
          {:ok, body, _headers} <-
-           post("/v1/deposit/#{network_segment}/newAddress", params, credentials, opts),
+           post_once("/v1/deposit/#{network_segment}/newAddress", params, credentials, opts),
          # An object, or a refusal — `body["address"]` on a list raises. See
          # `Rest.object/1`.
          {:ok, body} <- Rest.object(body),
@@ -2539,18 +2542,17 @@ defmodule DpExchange.Gemini.Private do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def transfer_internal(asset, amount, transfer_opts, credentials, opts) do
     with {:ok, from} <- required_opt(transfer_opts, :from),
-         {:ok, to} <- required_opt(transfer_opts, :to) do
-      transfer_id = Keyword.get(transfer_opts, :client_transfer_id) || generate_transfer_id()
+         {:ok, to} <- required_opt(transfer_opts, :to),
+         {:ok, currency, wire_amount} <- validate_internal_transfer(asset, amount) do
+      transfer_id = transfer_id(Keyword.get(transfer_opts, :client_transfer_id))
 
       params = %{
         "sourceAccount" => from,
         "targetAccount" => to,
-        # Full notation — see `withdraw/6`.
-        "amount" => decimal_string(amount),
+        # Full notation, and finite and above zero — see `withdraw/6`.
+        "amount" => wire_amount,
         "clientTransferId" => transfer_id
       }
-
-      currency = String.downcase(asset)
 
       # Once: the venue's own schema never says a repeated `clientTransferId` here
       # deduplicates the way `withdraw/6`'s does — see this function's own doc — so a retry
@@ -2560,6 +2562,26 @@ defmodule DpExchange.Gemini.Private do
              post_once("/v1/account/transfer/#{segment(currency)}", params, credentials, opts) do
         {:ok, body}
       end
+    end
+  end
+
+  @doc """
+  The lower-case currency segment and plain-notation amount `transfer_internal/5` sends, or
+  the refusal.
+
+  `asset` must be a non-blank string (`{:error, {:invalid_asset, value}}`) and `amount` a
+  finite number above zero (`{:error, {:invalid_decimal | :non_positive_amount, :amount,
+  value}}`). Before this, `String.downcase/1` raised on a non-string asset and any amount,
+  `"abc"`, zero or a negative included, was signed into an account-to-account transfer.
+  Exposed so `DpExchange.Gemini.Fake` refuses with this function, after the two account
+  names and before the credential.
+  """
+  @spec validate_internal_transfer(term(), term()) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
+  def validate_internal_transfer(asset, amount) do
+    with {:ok, currency} <- withdrawal_ticker(asset),
+         {:ok, wire_amount} <- wire_positive(amount, :amount) do
+      {:ok, currency, wire_amount}
     end
   end
 
@@ -3081,16 +3103,37 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp staking_write(path, type, asset, amount, credentials, opts) do
-    with {:ok, provider_id} <- required_provider_id(opts) do
+    with {:ok, provider_id} <- required_provider_id(opts),
+         {:ok, currency, wire_amount} <- validate_staking_terms(asset, amount) do
       params = %{
-        "currency" => String.upcase(asset),
-        "amount" => Decimal.to_string(amount, :normal),
+        "currency" => currency,
+        "amount" => wire_amount,
         "providerId" => provider_id
       }
 
       with {:ok, body, _headers} <- post_once(path, params, credentials, opts) do
         to_staking_transaction(body, type)
       end
+    end
+  end
+
+  @doc """
+  The upper-case currency and plain-notation amount `stake/4` and `unstake/4` send, or the
+  refusal.
+
+  `asset` must be a non-blank string (`{:error, {:invalid_asset, value}}`) and `amount` a
+  finite number above zero (`{:error, {:invalid_decimal | :non_positive_amount, :amount,
+  value}}`). Before this, `String.upcase/1` and `Decimal.to_string/2` raised in the caller on
+  a non-string asset or a non-`Decimal` amount, and a zero, negative or NaN `Decimal` was
+  signed into a staking write. Exposed so `DpExchange.Gemini.Fake` refuses with this function,
+  after the provider and before the credential.
+  """
+  @spec validate_staking_terms(term(), term()) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
+  def validate_staking_terms(asset, amount) do
+    with {:ok, ticker} <- withdrawal_ticker(asset),
+         {:ok, wire_amount} <- wire_positive(amount, :amount) do
+      {:ok, String.upcase(ticker), wire_amount}
     end
   end
 
@@ -3749,20 +3792,30 @@ defmodule DpExchange.Gemini.Private do
     }
 
     with :ok <- preview_side(to_string(side)),
-         {:ok, sized} <- margin_preview_size(base, to_string(type), to_string(side), request) do
-      {:ok, put_present(sized, "price", decimal_string(Map.get(request, :price)))}
+         {:ok, sized} <- margin_preview_size(base, to_string(type), to_string(side), request),
+         {:ok, price} <- preview_number(Map.get(request, :price), nil, :price) do
+      {:ok, put_present(sized, "price", price)}
     end
   end
 
   defp margin_preview_params(_request), do: {:error, :missing_order_fields}
 
+  # **Every number is checked as `place_order/3`'s are.** These went through
+  # `decimal_string/1`, so `"abc"`, zero, a negative or a NaN `Decimal` was signed into the
+  # preview and a margin figure came back for an order nobody could place. `nil` is absent,
+  # answered with the preview's own vocabulary (`missing`) where the field is required and
+  # left out where it is not (`missing` is `nil`).
+  defp preview_number(nil, nil, _field), do: {:ok, nil}
+  defp preview_number(nil, missing, _field), do: {:error, missing}
+  defp preview_number(value, _missing, field), do: wire_positive(value, field)
+
   # The venue's own rule, enforced rather than discovered: a market **buy** is sized in quote
   # currency and everything else in base. Sending `amount` on a market buy previews a
   # different order than the caller described.
   defp margin_preview_size(base, "market", "buy", request) do
-    case decimal_string(Map.get(request, :total_spend)) do
-      nil -> {:error, :total_spend_required}
-      spend -> {:ok, Map.put(base, "totalSpend", spend)}
+    with {:ok, spend} <-
+           preview_number(Map.get(request, :total_spend), :total_spend_required, :total_spend) do
+      {:ok, Map.put(base, "totalSpend", spend)}
     end
   end
 
@@ -3791,17 +3844,11 @@ defmodule DpExchange.Gemini.Private do
   # about to describe. Two callers, two vocabularies, and merging them would report a
   # placement error on a call that places nothing.
   defp required_preview_price(request) do
-    case decimal_string(Map.get(request, :price)) do
-      nil -> {:error, :price_required}
-      price -> {:ok, price}
-    end
+    preview_number(Map.get(request, :price), :price_required, :price)
   end
 
   defp required_amount(request) do
-    case decimal_string(Map.get(request, :amount)) do
-      nil -> {:error, :amount_required}
-      amount -> {:ok, amount}
-    end
+    preview_number(Map.get(request, :amount), :amount_required, :amount)
   end
 
   # Full notation, never scientific: `1E-8` is not a number this venue reads.
@@ -3815,9 +3862,7 @@ defmodule DpExchange.Gemini.Private do
   # and `price` through bare `to_string/1` a few hundred lines above. The generic
   # `maybe_put/3` and `maybe_param/3` now refuse a `%Decimal{}` before it can reach
   # `String.Chars` at all, so a new money field cannot repeat it by being added to a map.
-  defp decimal_string(nil), do: nil
   defp decimal_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
-  defp decimal_string(value), do: to_string(value)
 
   # --- account administration ---------------------------------------------
 
@@ -4268,13 +4313,21 @@ defmodule DpExchange.Gemini.Private do
   # The four terms the venue requires on every clearing write, and none of them defaulted.
   defp clearing_order_params(%{symbol: symbol, amount: amount, price: price, side: side})
        when is_binary(symbol) do
-    {:ok,
-     %{
-       "symbol" => SymbolFormat.to_exchange_symbol(symbol),
-       "amount" => decimal_string(amount),
-       "price" => decimal_string(price),
-       "side" => to_string(side)
-     }}
+    # **Checked like `place_order/3`'s numbers.** These went out through `decimal_string/1`
+    # and `to_string/1`, so `"abc"`, `0`, `-1` and a `Decimal` NaN were signed into an offer
+    # to a counterparty, and `side: :hold` went out as `"hold"`. A confirm or create here
+    # commits a trade; the refusal belongs before anything is signed.
+    with {:ok, wire_amount} <- wire_positive(amount, :amount),
+         {:ok, wire_price} <- wire_positive(price, :price),
+         {:ok, wire_side} <- wire_side(side) do
+      {:ok,
+       %{
+         "symbol" => SymbolFormat.to_exchange_symbol(symbol),
+         "amount" => wire_amount,
+         "price" => wire_price,
+         "side" => wire_side
+       }}
+    end
   end
 
   defp clearing_order_params(_request), do: {:error, :missing_clearing_terms}
@@ -4373,7 +4426,9 @@ defmodule DpExchange.Gemini.Private do
       else: value |> Decimal.round(0, :down) |> Decimal.to_integer() |> epoch_ms()
   end
 
-  defp epoch_ms(value) when is_integer(value) do
+  # Positive only. Zero and negatives are not a venue instant: they dated a fill to 1970 and
+  # slipped past `required_time/1`'s refusal, which waits for the `nil` this now answers.
+  defp epoch_ms(value) when is_integer(value) and value > 0 do
     case DateTime.from_unix(value, :millisecond) do
       {:ok, datetime} -> datetime
       _error -> nil

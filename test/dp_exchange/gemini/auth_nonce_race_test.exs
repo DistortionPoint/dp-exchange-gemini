@@ -10,7 +10,13 @@ defmodule DpExchange.Gemini.AuthNonceRaceTest do
   @counter_key {Auth, :nonce_counter}
 
   setup do
-    on_exit(fn -> Auth.ensure_counter() end)
+    # Erased first, so a counter a test seeded (to the cell's top, in one) is not what every
+    # later module draws its nonces from.
+    on_exit(fn ->
+      :persistent_term.erase(@counter_key)
+      Auth.ensure_counter()
+    end)
+
     :ok
   end
 
@@ -112,7 +118,11 @@ defmodule DpExchange.Gemini.AuthNonceRaceTest do
       :persistent_term.erase(@counter_key)
 
       assert Auth.seed_nonce(1_780_000_000_000_000_000_000) == {:error, :above_counter_range}
-      assert Auth.seed_nonce(0xFFFF_FFFF_FFFF_FFFF) == :ok
+
+      # A counter AT the cell's maximum has no next nonce: `max + 1` raised in the signer.
+      assert Auth.seed_nonce(0xFFFF_FFFF_FFFF_FFFF) == {:error, :above_counter_range}
+      assert Auth.seed_nonce(0xFFFF_FFFF_FFFF_FFFE) == :ok
+      assert Auth.nonce(:incremental) == 0xFFFF_FFFF_FFFF_FFFF
     end
 
     test "seed_nonce/1 refuses anything that is not a positive integer" do

@@ -576,7 +576,7 @@ retrying and have a person do it.
 
 `seed_nonce/1` remains for the millisecond counter: call it once with a value above the mark
 and the sequence advances by one per call from there. It refuses to lower the counter, a mark
-beyond `2^64 - 1` cannot be reached at all, and a seed does not survive a restart.
+at or beyond `2^64 - 1` cannot be reached at all (the next nonce would not fit), and a seed does not survive a restart.
 
 **Fee promotions moved off the public path.** `GET /v1/feepromos`, which
 `Rest.list_fee_promos/1` calls, is no longer in the vendor's specification as of 2026-09-21;
@@ -905,7 +905,9 @@ the shared feed process sees it. `DpExchange.Gemini.Fake` answers the same.
 
 `:data_quality`, `:refusal` and `:degraded` notices that arrive per frame (an unreadable
 bookTicker level, a refused subscribe, a depth gap) are forwarded once per
-`{kind, reason, symbol}` per 30 seconds. The first one after the window carries
+`{kind, reason, symbol}` per 30 seconds (a refused subscribe states no reason, so the venue's
+status stands in for it: a 400 and a 429 are separate keys). The first one after the window
+carries
 `details.suppressed`, the number it covers. Lifecycle notices (`:link_up`, `:link_down`,
 `:coverage_change`) are never throttled.
 

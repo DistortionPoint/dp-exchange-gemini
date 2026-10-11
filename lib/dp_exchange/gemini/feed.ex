@@ -1028,10 +1028,23 @@ defmodule DpExchange.Gemini.Feed do
   defp notice_key(%Notice{kind: kind, details: details}, wanted) when is_map(details) do
     symbol = Map.get(details, :symbol)
     known = if is_binary(symbol) and MapSet.member?(wanted, symbol), do: symbol
-    {kind, Map.get(details, :reason), known}
+    {kind, notice_reason(details), known}
   end
 
   defp notice_key(%Notice{kind: kind}, _wanted), do: {kind, nil, nil}
+
+  # A `:refusal` from `Socket` states no `:reason`, only the venue's `subscribe_status`. Keyed
+  # on `nil` alone, a 429 landing inside the window of an earlier 400 was counted away and
+  # never reached a consumer, though the two call for different responses. The status is an
+  # integer the venue chose, so a stream of distinct values could grow the table, which is
+  # why only the closed set of HTTP-style codes (100..599) is keyed and any other value
+  # shares one key.
+  defp notice_reason(details) do
+    case {Map.get(details, :reason), Map.get(details, :subscribe_status)} do
+      {nil, status} when is_integer(status) and status in 100..599 -> {:status, status}
+      {reason, _status} -> reason
+    end
+  end
 
   defp suppressed_count({_window_start, suppressed}), do: suppressed
   defp suppressed_count(nil), do: 0

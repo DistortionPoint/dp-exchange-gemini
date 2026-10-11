@@ -1443,6 +1443,45 @@ defmodule DpExchange.Gemini.FeedTest do
       assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "undecodable trade"}}}
     end
 
+    test "refusals with different venue statuses are keys of their own" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      refusal = fn status ->
+        Notice.new(:refusal, :gemini, details: %{subscribe_status: status})
+      end
+
+      send(feed, {:dp_exchange, :gemini, refusal.(400)})
+      send(feed, {:dp_exchange, :gemini, refusal.(429)})
+      send(feed, {:dp_exchange, :gemini, refusal.(429)})
+      _settled = Feed.coverage(feed)
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :refusal, details: %{subscribe_status: 400}}}
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :refusal, details: %{subscribe_status: 429}}}
+
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :refusal}}
+    end
+
+    test "a status outside the HTTP range shares one key, so the table cannot be grown by it" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      for status <- [1, 99, 600, 70_000, -5] do
+        send(
+          feed,
+          {:dp_exchange, :gemini,
+           Notice.new(:refusal, :gemini, details: %{subscribe_status: status})}
+        )
+      end
+
+      _settled = Feed.coverage(feed)
+
+      assert map_size(:sys.get_state(feed).notice_seen) == 1
+    end
+
     test "a symbol this feed does not want shares one key, so the table cannot be grown by it" do
       feed = start_feed()
       :ok = Feed.subscribe_notices(feed, to: self())

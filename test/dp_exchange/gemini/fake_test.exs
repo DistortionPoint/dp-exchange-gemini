@@ -529,6 +529,35 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:error, :nothing_to_rename} = Fake.rename_account("id", nil, [])
     end
 
+    test "transfer_internal/4 refuses an amount or asset the real call refuses" do
+      accounts = [from: "primary", to: "other"]
+      opts = [credentials: @credentials]
+
+      for bad <- [0, -1, "abc", Decimal.new("NaN"), nil] do
+        assert {:error, {reason, :amount, _value}} =
+                 Fake.transfer_internal("BTC", bad, accounts, opts)
+
+        assert reason in [:non_positive_amount, :invalid_decimal]
+      end
+
+      assert {:error, {:invalid_asset, nil}} = Fake.transfer_internal(nil, 1, accounts, opts)
+
+      assert {:ok, %{"amount" => "0.00000001"}} =
+               Fake.transfer_internal("BTC", Decimal.new("0.00000001"), accounts, opts)
+    end
+
+    test "stake/3 and unstake/3 refuse an amount or asset the real call refuses" do
+      opts = [provider_id: "p", credentials: @credentials]
+
+      for write <- [&Fake.stake/3, &Fake.unstake/3] do
+        assert {:error, {:non_positive_amount, :amount, _value}} =
+                 write.("ETH", Decimal.new(0), opts)
+
+        assert {:error, {:invalid_asset, nil}} = write.(nil, Decimal.new(1), opts)
+        assert {:ok, _transaction} = write.("eth", Decimal.new(1), opts)
+      end
+    end
+
     test "convert/4 settles in one step and holds no rate" do
       assert {:ok, conversion} =
                Fake.convert("GUSD", "USD", Decimal.new("1"),
@@ -1045,6 +1074,30 @@ defmodule DpExchange.Gemini.FakeTest do
 
     test "an account-scoped key is unaffected" do
       assert {:ok, _balances} = Fake.get_balances(@credentials)
+    end
+  end
+
+  describe "order round trip (core conformance assertion 31)" do
+    test "the id place_order/3 mints reads back through get_order/3 and cancel_order/3" do
+      request = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
+
+      assert {:ok, %Types.Order{id: id}} = Fake.place_order(@credentials, request)
+      assert {:ok, %Types.Order{id: ^id}} = Fake.get_order(@credentials, id)
+
+      assert {:ok, %Types.Order{id: ^id, status: :cancelled}} =
+               Fake.cancel_order(@credentials, id)
+    end
+
+    test "place_orders, replace_order and close_position are declared unsupported and refuse" do
+      endpoints = DpExchange.Gemini.capabilities().endpoints
+
+      for key <- [{:place_orders, 3}, {:replace_order, 4}, {:close_position, 3}] do
+        assert Map.fetch!(endpoints, key) == :unsupported
+      end
+
+      assert Fake.place_orders(@credentials, [], []) == {:error, :not_supported}
+      assert Fake.replace_order(@credentials, "1", %{}, []) == {:error, :not_supported}
+      assert Fake.close_position(@credentials, "BTC-USD", []) == {:error, :not_supported}
     end
   end
 end

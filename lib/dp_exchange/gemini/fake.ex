@@ -1192,6 +1192,7 @@ defmodule DpExchange.Gemini.Fake do
   def stake(asset, amount, opts \\ []) do
     with_injection(fn ->
       with {:ok, provider_id} <- fake_provider_id(opts),
+           {:ok, _currency, _wire_amount} <- Private.validate_staking_terms(asset, amount),
            :ok <- authenticated(fake_credentials(opts), opts) do
         {:ok,
          %Types.StakingTransaction{
@@ -1217,6 +1218,7 @@ defmodule DpExchange.Gemini.Fake do
   def unstake(asset, amount, opts \\ []) do
     with_injection(fn ->
       with {:ok, provider_id} <- fake_provider_id(opts),
+           {:ok, _currency, _wire_amount} <- Private.validate_staking_terms(asset, amount),
            :ok <- authenticated(fake_credentials(opts), opts) do
         # Nothing has arrived yet. A fake reporting the full amount paid would teach a
         # consumer to spend an asset that is still unbonding.
@@ -1523,11 +1525,14 @@ defmodule DpExchange.Gemini.Fake do
           {:error, {:missing_option, :to}}
 
         {from, to} ->
-          with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+          # The asset and amount are checked by the function the real call uses, after the
+          # two account names and before the credential, as there.
+          with {:ok, _currency, wire_amount} <- Private.validate_internal_transfer(asset, amount),
+               :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
             {:ok,
              %{
                "asset" => asset,
-               "amount" => Decimal.to_string(decimal(amount), :normal),
+               "amount" => wire_amount,
                "sourceAccount" => from,
                "targetAccount" => to
              }}

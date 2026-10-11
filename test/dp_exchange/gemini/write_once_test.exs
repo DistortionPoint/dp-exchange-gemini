@@ -64,6 +64,71 @@ defmodule DpExchange.Gemini.WriteOnceTest do
     assert [_one] = requests()
   end
 
+  test "an internal transfer with an asset or amount that is not real is never sent" do
+    accounts = [from: "a", to: "b"]
+
+    assert {:error, {:non_positive_amount, :amount, 0}} =
+             Private.transfer_internal("USD", 0, accounts, @oauth, opts([]))
+
+    assert {:error, {:invalid_decimal, :amount, "abc"}} =
+             Private.transfer_internal("USD", "abc", accounts, @oauth, opts([]))
+
+    assert {:error, {:invalid_asset, nil}} =
+             Private.transfer_internal(nil, 1, accounts, @oauth, opts([]))
+
+    assert [] = requests()
+  end
+
+  test "a staking write with an asset or amount that is not real is never sent" do
+    for write <- [&Private.stake/4, &Private.unstake/4] do
+      assert {:error, {:non_positive_amount, :amount, _zero}} =
+               write.("ETH", Decimal.new(0), @oauth, opts(provider_id: "p"))
+
+      assert {:error, {:invalid_decimal, :amount, _nan}} =
+               write.("ETH", Decimal.new("NaN"), @oauth, opts(provider_id: "p"))
+
+      assert {:error, {:invalid_asset, nil}} =
+               write.(nil, Decimal.new(1), @oauth, opts(provider_id: "p"))
+    end
+
+    assert [] = requests()
+  end
+
+  test "a new deposit address is requested once" do
+    Private.get_deposit_address("ETH", "ethereum", @oauth, opts([]))
+    assert [_one] = requests()
+  end
+
+  test "a margin preview with a number that is not real is never sent" do
+    base = %{symbol: "BTC-USD", side: :buy, type: "limit", amount: "1", price: "100"}
+
+    for {terms, expected} <- [
+          {%{amount: 0}, {:non_positive_amount, :amount, 0}},
+          {%{amount: "abc"}, {:invalid_decimal, :amount, "abc"}},
+          {%{price: "-1"}, {:non_positive_amount, :price, "-1"}}
+        ] do
+      assert {:error, ^expected} =
+               Private.preview_margin_order(Map.merge(base, terms), @oauth, opts([]))
+    end
+
+    assert {:error, {:invalid_decimal, :price, %Decimal{}}} =
+             Private.preview_margin_order(
+               Map.put(base, :price, Decimal.new("NaN")),
+               @oauth,
+               opts([])
+             )
+
+    market_buy = %{symbol: "BTC-USD", side: :buy, type: "market", total_spend: "0"}
+
+    assert {:error, {:non_positive_amount, :total_spend, "0"}} =
+             Private.preview_margin_order(market_buy, @oauth, opts([]))
+
+    assert {:error, :amount_required} =
+             Private.preview_margin_order(Map.delete(base, :amount), @oauth, opts([]))
+
+    assert [] = requests()
+  end
+
   test "a clearing order is sent once" do
     Private.create_clearing_order(@terms, @oauth, opts(counterparty_id: "cp-1"))
     assert [_one] = requests()

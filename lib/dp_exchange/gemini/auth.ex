@@ -516,8 +516,9 @@ defmodule DpExchange.Gemini.Auth do
   Raises the incremental nonce counter to `value`, once.
 
   Returns `:ok` when the counter moved, `{:error, :below_current}` when `value` is not above
-  where it already is, `{:error, :above_counter_range}` when it exceeds the 64-bit unsigned
-  cell this counter lives in, and `{:error, :invalid_seed}` for anything that is not a
+  where it already is, `{:error, :above_counter_range}` when it reaches the top of the 64-bit
+  unsigned cell this counter lives in (`2^64 - 1` itself included: the next nonce would not
+  fit), and `{:error, :invalid_seed}` for anything that is not a
   positive integer.
 
   ## Why this exists, and why it is not a mode
@@ -545,7 +546,11 @@ defmodule DpExchange.Gemini.Auth do
   @spec seed_nonce(pos_integer()) ::
           :ok | {:error, :below_current | :above_counter_range | :invalid_seed}
   def seed_nonce(value) when is_integer(value) and value > 0 do
-    if value > @max_counter_value do
+    # `>=`, not `>`: a counter AT the cell's maximum has no next value, and
+    # `:atomics.compare_exchange/4` raises on `max + 1`, so every later `nonce(:incremental)`
+    # raised `ArgumentError` in the signing caller. A mark of `2^64 - 1` needs a nonce of
+    # `2^64`, which is out of reach exactly like any larger one.
+    if value >= @max_counter_value do
       {:error, :above_counter_range}
     else
       @nonce_counter |> ensure_counter() |> raise_counter(value)

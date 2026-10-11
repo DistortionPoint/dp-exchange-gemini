@@ -20,6 +20,43 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`seed_nonce(2^64 - 1)` was accepted and then every `nonce(:incremental)` raised.** The
+  counter is a 64-bit cell and the next nonce after its maximum does not fit, so
+  `:atomics.compare_exchange/4` raised `ArgumentError` in the signing caller. A seed at the
+  maximum is now `{:error, :above_counter_range}`, like any mark that cannot be cleared.
+- **Refused subscribes with different venue statuses shared one throttle key.** A `:refusal`
+  states no `reason`, so a 429 inside the window of an earlier 400 was counted away. The
+  venue's `subscribe_status` (100..599) now keys it; any other value shares one key, so the
+  table stays bounded.
+- **`transfer_internal/5`, `stake/4` and `unstake/4` signed any amount.** `"abc"`, zero, a
+  negative or a `Decimal` NaN went to the venue, and a non-string asset (or, for staking, a
+  non-`Decimal` amount) raised in the caller. Both now check the asset is a non-blank string
+  and the amount a finite number above zero, in plain notation, before anything is signed:
+  `{:error, {:invalid_asset, v}}`, `{:invalid_decimal | :non_positive_amount, :amount, v}`.
+  `Private.validate_internal_transfer/2` and `validate_staking_terms/2` are the one
+  implementation, and `Fake` calls them after the account names or provider and before the
+  credential, as the real calls do.
+- **Clearing create, broker create and confirm signed any amount, price or side.** The same
+  checks as `place_order/3` now apply (`wire_positive` for amount and price, `buy`/`sell` for
+  side) before a trade is offered or executed.
+- **A zero or negative epoch read as 1970.** `Private`'s `epoch_ms/1` accepted any integer,
+  so a fill with `timestampms: 0` was dated 1970 instead of refused by `required_time/1`, and
+  an order's `created_at` likewise. Non-positive values are now unreadable (`nil`).
+- **`get_deposit_address/4` could create a second address on a retry.** Every call generates
+  a new address and nothing in the request lets the venue tell a retried timeout from a
+  second ask, so it now sends once (`post_once/4`).
+- **`preview_margin_order/3` signed any amount, price or total spend.** They are now finite
+  numbers above zero in plain notation, as in `place_order/3`:
+  `{:error, {:invalid_decimal | :non_positive_amount, field, value}}`. A missing required
+  one keeps its existing `:amount_required`, `:price_required` and `:total_spend_required`.
+
+### Added
+
+- `Fake`: tests for the order round trip (place, get, cancel on the id `place_order/3`
+  issued) and for the three declared-unsupported trading endpoints refusing.
+
 ## [0.2.111] - 2026-10-11
 
 ### Fixed
