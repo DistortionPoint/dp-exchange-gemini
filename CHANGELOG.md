@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.114] - 2026-10-11
+
 ### Fixed
 
 - **An order id or quote id with a sign was accepted.** `order_id_param/1` (behind
