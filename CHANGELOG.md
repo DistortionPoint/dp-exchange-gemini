@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.116] - 2026-10-11
+
 ### Fixed
 
 - **A public-data read's unexpected status quoted the whole body.** `Rest`'s symbol-scoped
