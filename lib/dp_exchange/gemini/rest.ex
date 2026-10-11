@@ -188,9 +188,9 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_price(String.t(), keyword()) ::
           {:ok, Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-
-    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
+    with :ok <- validate_symbol(symbol),
+         native = SymbolFormat.to_exchange_symbol(symbol),
+         {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
          {:ok, last} <- quoted_price(body),
          {:ok, price} <- required_decimal(last, :price) do
       # The ticker's `volume` is "the 24 hour volume on the exchange", measured up to its
@@ -237,9 +237,9 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_top_of_book(String.t(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-
-    with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
+    with :ok <- validate_symbol(symbol),
+         native = SymbolFormat.to_exchange_symbol(symbol),
+         {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
          {:ok, body} <- object(body),
          :ok <- ticker_states_a_side(body),
          # A side the venue stated and this package cannot read is refused, not `nil`:
@@ -310,6 +310,10 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_historical_prices(String.t(), String.t(), keyword(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, opts) do
+    with :ok <- validate_symbol(symbol), do: fetch_candles(symbol, timeframe, range, opts)
+  end
+
+  defp fetch_candles(symbol, timeframe, range, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
     # Found 2026-10-10 by reading the call sites: this echoed the caller's symbol string and
     # interpolated `native` raw, where `get_order_book/2` and `get_price/2` return the
@@ -326,6 +330,43 @@ defmodule DpExchange.Gemini.Rest do
          |> Enum.filter(&within?(&1, range))
          |> Enum.sort_by(& &1.opened_at, DateTime)}
       end
+    end
+  end
+
+  @doc """
+  Whether `symbol` is a non-blank string, checked without sending anything.
+
+  A `nil`, atom or integer symbol raised `FunctionClauseError` in
+  `SymbolFormat.to_exchange_symbol/1`, and `""` sent `GET /v1/pubticker/` with an empty path
+  segment. Both are `{:error, {:invalid_symbol, symbol}}` now, decided locally before any
+  request. Exposed so `DpExchange.Gemini.Fake` refuses with this function.
+  """
+  @spec validate_symbol(term()) :: :ok | {:error, {:invalid_symbol, term()}}
+  def validate_symbol(symbol) when is_binary(symbol) do
+    if String.trim(symbol) == "", do: {:error, {:invalid_symbol, symbol}}, else: :ok
+  end
+
+  def validate_symbol(other), do: {:error, {:invalid_symbol, other}}
+
+  @doc """
+  Whether `range` is a keyword list whose `:start` and `:end`, where present, are
+  `DateTime`s, checked without sending anything.
+
+  A non-list range raised in `Keyword.get/3`. A non-keyword-list is
+  `{:error, {:invalid_range, range}}`; a bad bound keeps its more specific
+  `{:error, {:invalid_range, :start | :end, value}}`. Exposed so `DpExchange.Gemini.Fake`
+  refuses with this function.
+  """
+  @spec validate_range(term()) ::
+          :ok | {:error, {:invalid_range, term()} | {:invalid_range, :start | :end, term()}}
+  def validate_range(range) do
+    if is_list(range) and Keyword.keyword?(range) do
+      case Enum.find([:start, :end], &(not range_bound?(Keyword.get(range, &1)))) do
+        nil -> :ok
+        bad -> {:error, {:invalid_range, bad, Keyword.get(range, bad)}}
+      end
+    else
+      {:error, {:invalid_range, range}}
     end
   end
 
@@ -468,9 +509,9 @@ defmodule DpExchange.Gemini.Rest do
   @spec quantization(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def quantization(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-
-    with {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
+    with :ok <- validate_symbol(symbol),
+         native = SymbolFormat.to_exchange_symbol(symbol),
+         {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
          {:ok, body} <- object(raw),
          {:ok, price_increment} <- stated_or_absent(body, "quote_increment"),
          {:ok, quantity_increment} <- stated_or_absent(body, "tick_size"),
@@ -559,7 +600,7 @@ defmodule DpExchange.Gemini.Rest do
   def requested_instrument_symbols(nil), do: {:ok, nil}
 
   def requested_instrument_symbols(symbols) when is_list(symbols) do
-    if Enum.all?(symbols, &is_binary/1) do
+    if Enum.all?(symbols, &(validate_symbol(&1) == :ok)) do
       {:ok, symbols |> Enum.map(&canonical_symbol/1) |> Enum.uniq()}
     else
       {:error, {:invalid_option, :symbols, symbols}}
@@ -620,13 +661,14 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_order_book(String.t(), keyword()) ::
           {:ok, OrderBook.t()} | {:error, term()} | {:refused, term()}
   def get_order_book(symbol, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
     # 50 is the venue's own documented default for both limit_bids and limit_asks — see
     # this function's own @doc and docs/reference/gemini/order-book.md.
     depth = Config.opt(opts, :depth, 50)
     params = [limit_bids: depth, limit_asks: depth]
 
-    with :ok <- validate_book_opts(opts),
+    with :ok <- validate_symbol(symbol),
+         native = SymbolFormat.to_exchange_symbol(symbol),
+         :ok <- validate_book_opts(opts),
          {:ok, body} <-
            get_body("/v1/book/#{segment(native)}", Keyword.put(opts, :params, params)),
          :ok <- book_shape(body),
@@ -695,7 +737,9 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_trades(String.t(), keyword()) ::
           {:ok, [Trade.t()]} | {:error, term()} | {:refused, term()}
   def get_trades(symbol, opts) do
-    with :ok <- validate_trade_opts(opts), do: fetch_trades(symbol, opts)
+    with :ok <- validate_symbol(symbol),
+         :ok <- validate_trade_opts(opts),
+         do: fetch_trades(symbol, opts)
   end
 
   @doc """
@@ -1060,7 +1104,8 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_funding(String.t(), keyword()) ::
           {:ok, Funding.t()} | {:error, term()} | {:refused, term()}
   def get_funding(symbol, opts) do
-    with {:ok, raw} <- get_body("/v1/fundingamount/#{segment(symbol)}", opts),
+    with :ok <- validate_symbol(symbol),
+         {:ok, raw} <- get_body("/v1/fundingamount/#{segment(symbol)}", opts),
          {:ok, body} <- object(raw) do
       {:ok,
        %Funding{
@@ -1089,7 +1134,8 @@ defmodule DpExchange.Gemini.Rest do
   @spec next_funding_timestamp(String.t(), keyword()) ::
           {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
   def next_funding_timestamp(symbol, opts) do
-    with {:ok, body} <- get_body("/v1/nextfundingtimestamp/#{segment(symbol)}", opts) do
+    with :ok <- validate_symbol(symbol),
+         {:ok, body} <- get_body("/v1/nextfundingtimestamp/#{segment(symbol)}", opts) do
       case epoch_ms(body) do
         nil -> {:error, :unexpected_response_shape}
         at -> {:ok, at}
@@ -1115,7 +1161,8 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_contract_stats(String.t(), keyword()) ::
           {:ok, ContractStats.t()} | {:error, term()} | {:refused, term()}
   def get_contract_stats(symbol, opts) do
-    with {:ok, raw} <- get_body("/v1/riskstats/#{segment(symbol)}", opts),
+    with :ok <- validate_symbol(symbol),
+         {:ok, raw} <- get_body("/v1/riskstats/#{segment(symbol)}", opts),
          {:ok, body} <- object(raw) do
       {:ok,
        %ContractStats{
@@ -1574,10 +1621,7 @@ defmodule DpExchange.Gemini.Rest do
   # A `:start` or `:end` that is not a `DateTime` is refused here. It reached
   # `DateTime.compare/2` in the row filter and raised in the caller's process.
   defp range_within_window(timeframe, range) do
-    case Enum.find([:start, :end], &(not range_bound?(Keyword.get(range, &1)))) do
-      nil -> window_check(timeframe, range)
-      bad -> {:error, {:invalid_range, bad, Keyword.get(range, bad)}}
-    end
+    with :ok <- validate_range(range), do: window_check(timeframe, range)
   end
 
   defp range_bound?(nil), do: true

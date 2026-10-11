@@ -527,6 +527,37 @@ defmodule DpExchange.Gemini.SocketTest do
       assert is_list(tls[:cacerts]) and tls[:cacerts] != []
     end
 
+    test "an explicit ssl_options of nil or [] keeps certificate verification" do
+      for absent <- [nil, [], :none, "x", [:not_a_keyword]] do
+        tls = Socket.connect_opts(ssl_options: absent)[:ssl_options]
+
+        assert tls[:verify] == :verify_peer
+        assert is_list(tls[:cacerts]) and tls[:cacerts] != []
+        assert Keyword.has_key?(tls, :customize_hostname_check)
+      end
+    end
+
+    test "a caller's ssl_options that say nothing about :verify get verification added" do
+      tls = Socket.connect_opts(ssl_options: [depth: 3])[:ssl_options]
+
+      assert tls[:depth] == 3
+      assert tls[:verify] == :verify_peer
+      assert is_list(tls[:cacerts]) and tls[:cacerts] != []
+    end
+
+    test "a caller's own :cacerts is used, and the OS trust store is not read for it" do
+      tls = Socket.connect_opts(ssl_options: [cacerts: [:mine]])[:ssl_options]
+
+      assert tls[:cacerts] == [:mine]
+      assert tls[:verify] == :verify_peer
+    end
+
+    test "a caller's explicit :verify override is respected untouched" do
+      opts = [verify: :verify_peer, cacerts: [:mine], password: "x"]
+
+      assert Socket.connect_opts(ssl_options: opts)[:ssl_options] == opts
+    end
+
     test "a caller's :socket_connect_timeout wins over the default" do
       assert Socket.connect_opts(socket_connect_timeout: 9_000)[:socket_connect_timeout] ==
                9_000

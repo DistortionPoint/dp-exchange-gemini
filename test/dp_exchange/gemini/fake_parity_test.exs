@@ -55,16 +55,16 @@ defmodule DpExchange.Gemini.FakeParityTest do
       credentials = %{api_key: "k"}
 
       assert Auth.headers(:api_key, "/v1/balances", %{}, credentials) ==
-               {:error, {:missing_credentials, :api_key}}
+               {:error, {:missing_credentials, :gemini}}
 
-      assert Fake.get_balances(credentials, []) == {:error, {:missing_credentials, :api_key}}
+      assert Fake.get_balances(credentials, []) == {:error, {:missing_credentials, :gemini}}
     end
 
     test "an access_token that is not a binary never satisfies :oauth" do
       credentials = %{access_token: 12_345}
 
       assert Auth.headers(:oauth, "/v1/balances", %{}, credentials) ==
-               {:error, {:missing_credentials, :oauth}}
+               {:error, {:missing_credentials, :gemini}}
     end
 
     test "both header families at once: :ambiguous, refused before either is sent" do
@@ -81,7 +81,7 @@ defmodule DpExchange.Gemini.FakeParityTest do
       credentials = %{api_key: "k", api_secret: "s"}
 
       assert Fake.get_balances(credentials, auth_scheme: :oauth) ==
-               {:error, {:missing_credentials, :oauth}}
+               {:error, {:missing_credentials, :gemini}}
     end
 
     test "valid credentials still succeed, through every calling convention the fake uses" do

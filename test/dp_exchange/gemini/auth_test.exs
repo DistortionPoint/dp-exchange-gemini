@@ -22,10 +22,10 @@ defmodule DpExchange.Gemini.AuthTest do
     test "credentials that do not match the named scheme are refused, not half-signed" do
       # A partially-signed request fails at the venue with an error about signatures,
       # which sends the reader looking in the wrong place.
-      assert {:error, {:missing_credentials, :api_key}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Auth.headers(:api_key, "/v1/balances", %{}, @oauth)
 
-      assert {:error, {:missing_credentials, :oauth}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Auth.headers(:oauth, "/v1/balances", %{}, @api_key)
     end
 
@@ -315,17 +315,30 @@ defmodule DpExchange.Gemini.AuthTest do
             %{api_key: "   ", api_secret: "s"}
           ] do
         assert Auth.headers(:api_key, "/v1/balances", %{}, credentials) ==
-                 {:error, {:missing_credentials, :api_key}},
+                 {:error, {:missing_credentials, :gemini}},
                "#{inspect(credentials)} was signed with"
       end
     end
 
     test "an empty bearer token refuses rather than sending `Authorization: Bearer `" do
       assert Auth.headers(:oauth, "/v1/balances", %{}, %{access_token: ""}) ==
-               {:error, {:missing_credentials, :oauth}}
+               {:error, {:missing_credentials, :gemini}}
 
       assert Auth.headers(:oauth, "/v1/balances", %{}, %{access_token: "  "}) ==
-               {:error, {:missing_credentials, :oauth}}
+               {:error, {:missing_credentials, :gemini}}
+    end
+
+    test "a key, secret or token with surrounding whitespace is refused, never trimmed" do
+      for credentials <- [
+            %{api_key: "k\n", api_secret: "s"},
+            %{api_key: "k", api_secret: " s"}
+          ] do
+        assert Auth.headers(:api_key, "/v1/balances", %{}, credentials) ==
+                 {:error, {:invalid_credentials, :gemini}}
+      end
+
+      assert Auth.headers(:oauth, "/v1/balances", %{}, %{access_token: "t\n"}) ==
+               {:error, {:invalid_credentials, :gemini}}
     end
 
     test "a credential that is not a string refuses instead of crashing the caller" do
@@ -334,10 +347,10 @@ defmodule DpExchange.Gemini.AuthTest do
       # crypto rather than the credential. It is the same condition as an absent field and
       # now gets the same answer.
       assert Auth.headers(:api_key, "/v1/balances", %{}, %{api_key: 12, api_secret: "s"}) ==
-               {:error, {:missing_credentials, :api_key}}
+               {:error, {:missing_credentials, :gemini}}
 
       assert Auth.headers(:api_key, "/v1/balances", %{}, %{api_key: "k", api_secret: nil}) ==
-               {:error, {:missing_credentials, :api_key}}
+               {:error, {:missing_credentials, :gemini}}
     end
 
     test "a real pair still signs" do

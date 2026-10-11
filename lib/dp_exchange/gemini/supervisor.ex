@@ -71,6 +71,11 @@ defmodule DpExchange.Gemini.Supervisor do
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
+    # Idempotent with the wrap `DpExchange.Gemini.child_spec/1` already did. A caller that
+    # reaches here directly (`DpExchange.Gemini.start_link/1`) would otherwise leave raw
+    # credentials in the supervisor's init argument and in its child specs, both printed by
+    # `:sys.get_status/1` and any crash report.
+    opts = DpExchange.Gemini.Credentials.wrap_opt(opts)
     Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
   end
 

@@ -110,8 +110,7 @@ defmodule DpExchange.Gemini.TickNReviewTest do
           ] do
         real = Private.get_balances(credentials, real_opts([]))
 
-        assert {:error, {:missing_credentials, scheme}} = real
-        assert scheme in [:api_key, :oauth]
+        assert {:error, {:missing_credentials, :gemini}} = real
         assert Fake.get_balances(credentials, []) == real, inspect(credentials)
       end
     end

@@ -1039,8 +1039,8 @@ defmodule DpExchange.Gemini.Private do
   access_token: _}` pattern read that as both families at once: every call made with a wrapped
   credential was `{:error, {:unsupported_auth_scheme, :ambiguous}}`. Only a non-`nil` value counts
   towards the ambiguity. A map that names a key with a `nil` value and nothing else is still the
-  scheme of that key, so `Auth.headers/5` answers `{:missing_credentials, scheme}` for it as it
-  always did.
+  scheme of that key, so `Auth.headers/5` answers `{:missing_credentials, :gemini}` for it (the
+  venue atom, not the scheme, since 2026-10-11).
 
   Exposed so `DpExchange.Gemini.Fake` resolves the scheme with this function.
   """

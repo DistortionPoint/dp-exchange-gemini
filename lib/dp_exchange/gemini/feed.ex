@@ -310,6 +310,8 @@ defmodule DpExchange.Gemini.Feed do
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
+    # Idempotent: credentials, if any were passed, never reach the init argument raw.
+    opts = DpExchange.Gemini.Credentials.wrap_opt(opts)
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
@@ -560,6 +562,18 @@ defmodule DpExchange.Gemini.Feed do
   # `{:error, _}` leaves nothing registered — see `subscribe/3`. A failure to connect undoes
   # the registration. A failure to send undoes it too, keeps the socket this call dialled, and
   # queues the new symbols for a wire unsubscribe (`settle_subscribe/5`).
+  # **`subscribe([])` registers the subscriber and opens nothing.** It used to dial the venue
+  # for no symbol, and a consumer that has asked for nothing must not find a socket open.
+  # The subscriber still receives whatever a later subscribe delivers.
+  def handle_call({:subscribe, [], subscriber}, _from, state) do
+    {:reply, :ok,
+     %{
+       state
+       | subscribers: MapSet.put(state.subscribers, subscriber),
+         monitors: Fanout.watch(subscriber, state.monitors)
+     }}
+  end
+
   def handle_call({:subscribe, symbols, subscriber}, _from, state) do
     registered = %{
       state

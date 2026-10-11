@@ -257,9 +257,29 @@ defmodule DpExchange.Gemini.Socket do
       socket_connect_timeout:
         Config.opt(opts, :socket_connect_timeout, @socket_connect_timeout_ms),
       socket_recv_timeout: Config.opt(opts, :socket_recv_timeout, @socket_recv_timeout_ms),
-      ssl_options: Config.opt(opts, :ssl_options, nil) || verified_tls()
+      ssl_options: ssl_options(Config.opt(opts, :ssl_options, nil))
     ]
   end
+
+  # **An explicit `ssl_options: nil` or `[]` is absence, not "none".** `websockex` reads an
+  # empty value as no options and starts from `verify: :verify_none`, so a caller (or a
+  # `Config` override) that wrote `ssl_options: []` got a socket that accepted any
+  # certificate. Absent, `nil`, `[]` and anything that is not a keyword list take the
+  # verified defaults. A non-empty list that does not say `:verify` gets verification added
+  # underneath it: the caller's keys win, but verification is not silently dropped by
+  # omission. Only an explicit `verify: :verify_none` turns it off, and that is the caller
+  # saying so.
+  defp ssl_options(custom) when is_list(custom) and custom != [] do
+    if Keyword.keyword?(custom) do
+      if Keyword.has_key?(custom, :verify),
+        do: custom,
+        else: Keyword.merge(verified_tls(custom), custom)
+    else
+      verified_tls([])
+    end
+  end
+
+  defp ssl_options(_absent_or_unusable), do: verified_tls([])
 
   # **Certificate verification, which `websockex` does not do unless told to.** Its
   # `WebSockex.Conn` starts with `insecure: true`, which is `verify: :verify_none`
@@ -273,12 +293,16 @@ defmodule DpExchange.Gemini.Socket do
   # The operating system's trust store (`:public_key.cacerts_get/0`, which OTP caches after
   # the first read) and the HTTPS hostname rules, so a venue's wildcard certificate matches.
   # A caller can still pass its own `:ssl_options`, which replace these entirely.
-  defp verified_tls do
+  defp verified_tls(custom) do
+    trust =
+      if Keyword.has_key?(custom, :cacerts) or Keyword.has_key?(custom, :cacertfile),
+        do: [],
+        else: [cacerts: load_cacerts()]
+
     [
       verify: :verify_peer,
-      cacerts: load_cacerts(),
       customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
-    ]
+    ] ++ trust
   end
 
   # `:public_key.cacerts_get/0` RAISES when the operating system has no trust store to read

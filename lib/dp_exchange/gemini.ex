@@ -799,6 +799,10 @@ defmodule DpExchange.Gemini do
   # path, with nothing to say so. An explicit `:feed` still wins, for `Config` overrides too.
   defp feed(opts), do: Config.opt(opts, :feed, DpExchange.Gemini.Supervisor.feed_name(opts))
 
+  # `Process.alive?/1` raises `ArgumentError` for a pid on another node, so a remote feed
+  # pid raised in `coverage/1`, which has no error shape. A remote pid cannot be checked
+  # from here and is answered as not running: the empty map, "not observed".
+  defp alive?(pid) when is_pid(pid) and node(pid) != node(), do: false
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
 
   # A registered name, `{:global, name}` or `{:via, module, name}`: `GenServer.whereis/1`

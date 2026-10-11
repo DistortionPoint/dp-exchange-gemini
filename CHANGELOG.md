@@ -20,6 +20,55 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **A missing or blank credential answers the venue atom, not the scheme.**
+  `Auth.headers/5` (and so every signed and bearer call, and `DpExchange.Gemini.Fake`) answered
+  `{:error, {:missing_credentials, :api_key}}` or `{:missing_credentials, :oauth}` for a blank,
+  missing or non-string field; it answers `{:error, {:missing_credentials, :gemini}}` now,
+  which is what the no-credentials case already answered and what every other venue answers.
+  Match on `{:missing_credentials, :gemini}`; which scheme was empty is no longer in the tag.
+- **A credential with surrounding whitespace is refused, not sent.** A key, secret or bearer
+  token such as `"k\n"` (the usual `.env` trailing newline) was signed as given and failed at
+  the venue with an error about signatures. It is `{:error, {:invalid_credentials, :gemini}}`
+  now, before anything is signed; the value is never echoed.
+- **A single-symbol read refuses a symbol that is not a non-blank string.** `get_price/2`,
+  `get_top_of_book/2`, `get_order_book/2`, `get_historical_prices/4`, `get_trades/2`,
+  `quantization/1`, `get_funding/2`, `get_contract_stats/2` and `next_funding_timestamp/2`
+  raised `FunctionClauseError` in the caller for `nil`, an atom or an integer, and sent
+  `GET /v1/pubticker/` (an empty path segment) for `""`. All answer
+  `{:error, {:invalid_symbol, value}}` now, decided locally before any request.
+  `list_instruments(symbols: [...])` refuses a blank element as `{:invalid_option, :symbols, _}`.
+  `DpExchange.Gemini.Fake` answered `{:refused, {:unknown_reason, ...}}` for `nil`; it answers
+  the same refusal as the real call (`Rest.validate_symbol/1` is shared).
+- **`get_historical_prices/4` refuses a range that is not a keyword list.** It raised in
+  `Keyword.get/3`. It is `{:error, {:invalid_range, range}}` now, before any request; a
+  `:start`/`:end` that is not a `DateTime` keeps `{:invalid_range, :start | :end, value}`.
+  The Fake refuses the same way (`Rest.validate_range/1` is shared).
+
+### Fixed
+
+- **`subscribe([])` opened a socket for nothing.** It dialled the venue, so a consumer that
+  had asked for no symbol found a connection open. It registers the subscriber and opens
+  nothing; the socket is dialled by the first `subscribe/2` that names a symbol.
+- **`DpExchange.Gemini.coverage/1` and `coverage_by_kind/1` raised `ArgumentError` for a feed
+  addressed by a pid on another node** (`Process.alive?/1` accepts a local pid only). A remote
+  pid is answered as not running: the empty map.
+- **`DpExchange.Gemini.Fake.subscribe/2` raised `ArgumentError` when `to:` named an atom no
+  process holds.** The push is skipped, as `Core.Fanout` skips it for the real feed, and
+  `coverage/1` does not report a symbol that was delivered to nobody.
+- **An explicit `ssl_options: []` (or `nil`, or a value that is not a keyword list) no longer
+  drops certificate verification.** `websockex` reads an empty value as none and falls back to
+  `verify: :verify_none`. Those values now take the verified defaults (`verify_peer`, the OS
+  trust store, HTTPS hostname matching), and a non-empty list that does not mention `:verify`
+  gets verification added beneath the caller's own keys (a caller's `:cacerts` or
+  `:cacertfile` replaces the OS trust store). Only an explicit `verify: :verify_none` turns
+  verification off.
+- **`Supervisor.start_link/1` and `Feed.start_link/1` wrap raw credentials**
+  (`Credentials.wrap_opt/1`, idempotent). Only `child_spec/1` did, so a tree started with
+  `DpExchange.Gemini.start_link(credentials: ...)` held the raw map in the supervisor's init
+  argument and child specs, printed by `:sys.get_status/1` and any crash report.
+
 ## [0.2.119] - 2026-10-11
 
 ### Fixed

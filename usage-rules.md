@@ -155,8 +155,12 @@ that default, accepting any certificate. It now uses the operating system's trus
 HTTPS hostname rules. On a host with no system CA bundle (`:public_key.cacerts_get/0` raises
 there) the subscribe call answers `{:error, {:tls_trust_store_unavailable, reason}}` rather
 than connecting unverified; it used to raise inside the shared `Feed`. Pass your own
-`:ssl_options` where you start the tree to replace the defaults entirely —
-`{DpExchange.Gemini, ssl_options: [...]}`, which `Feed` forwards to every socket it dials (it
+`:ssl_options` where you start the tree to replace the defaults —
+`{DpExchange.Gemini, ssl_options: [...]}`. `nil`, `[]` and anything that is not a keyword list
+mean "not given" and keep verification; a list that does not mention `:verify` has
+`verify: :verify_peer` added beneath your keys (your `:cacerts`/`:cacertfile` replaces the OS
+trust store); only an explicit `verify: :verify_none` turns it off. The option is forwarded
+by `Feed`, which `Feed` forwards to every socket it dials (it
 did not before; the option was dropped). `Feed` shows that option as `:redacted` in a crash
 report and in `:sys.get_status/1`, because a `:cacerts` list, a `:key` or a `:password` lives
 there; `:sys.get_state/1` still returns it.
@@ -605,7 +609,11 @@ credential the same way the real call does.
 
 **A blank credential counts as a missing one.** An `:api_key`, `:api_secret` or OAuth
 `:access_token` that is `""`, or only whitespace, is refused with
-`{:error, {:missing_credentials, scheme}}` — it is never signed with. This matters because
+`{:error, {:missing_credentials, :gemini}}` — the venue atom, as every venue in the family
+answers (it used to be the scheme, `:api_key` or `:oauth`). A value with surrounding
+whitespace (a trailing newline from a `.env` file) is refused as
+`{:error, {:invalid_credentials, :gemini}}`, never trimmed and sent. Neither is ever signed
+with. This matters because
 the usual way a credential goes missing is not a `nil`: it is a `.env` line reading `NAME=`
 with nothing after it, and `System.get_env/1` hands that back as `""`. HMAC over an empty key
 is a perfectly good HMAC, so signing with it produced a well-formed request the venue refused
@@ -927,6 +935,21 @@ and for a value that is not a list at all (`subscribe("BTC-USD")`). Spellings ar
 canonicalised and de-duplicated first, so `["btcusd", "BTC-USD"]` is one symbol. Nothing is
 subscribed on an error. This used to raise inside the shared feed process, which crashed it
 and, on its restart from the static options, dropped every other consumer's subscription.
+`DpExchange.Gemini.Fake` answers the same.
+
+`subscribe([])` registers your subscriber and opens nothing: no socket is dialled until a
+`subscribe/2` names a symbol. `coverage/1` and `coverage_by_kind/1` answer `%{}` for a feed
+addressed by a pid on another node (it cannot be checked from here).
+
+## A single-symbol read refuses a symbol that is not a non-blank string
+
+`get_price/2`, `get_top_of_book/2`, `get_order_book/2`, `get_historical_prices/4`,
+`get_trades/2`, `quantization/1`, `get_funding/2`, `get_contract_stats/2` and
+`next_funding_timestamp/2` answer `{:error, {:invalid_symbol, value}}` for `nil`, an atom, an
+integer, `""` or whitespace, before any request. They used to raise `FunctionClauseError`
+(and `""` sent `GET /v1/pubticker/` with an empty path). `get_historical_prices/4` likewise
+answers `{:error, {:invalid_range, range}}` for a `range` that is not a keyword list, and
+`{:error, {:invalid_range, :start | :end, value}}` for a bound that is not a `DateTime`.
 `DpExchange.Gemini.Fake` answers the same.
 
 ## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded

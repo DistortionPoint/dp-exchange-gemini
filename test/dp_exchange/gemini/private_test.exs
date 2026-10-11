@@ -877,7 +877,7 @@ defmodule DpExchange.Gemini.PrivateTest do
 
     test "an explicit auth_scheme overrides what the credentials look like" do
       # The host named it; that wins. Shape-based resolution is only the fallback.
-      assert {:error, {:missing_credentials, :oauth}} =
+      assert {:error, {:missing_credentials, :gemini}} =
                Private.get_balances(@credentials, auth_scheme: :oauth, retry_attempts: 0)
     end
   end

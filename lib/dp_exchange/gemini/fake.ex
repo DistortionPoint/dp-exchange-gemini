@@ -61,7 +61,7 @@ defmodule DpExchange.Gemini.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Timeframe, Types, Venue}
+  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Fanout, Timeframe, Types, Venue}
   alias DpExchange.Gemini.{Environment, Feed, Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
@@ -116,8 +116,10 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_price(symbol, _opts \\ []) do
-    symbol = canonical(symbol)
-    with_injection(symbol, fn -> fake_quote(symbol) end)
+    with :ok <- Rest.validate_symbol(symbol) do
+      symbol = canonical(symbol)
+      with_injection(symbol, fn -> fake_quote(symbol) end)
+    end
   end
 
   # Outside `with_injection/2`, so `subscribe/2` builds its push without consuming a failure
@@ -145,8 +147,10 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_top_of_book(symbol, _opts \\ []) do
-    symbol = canonical(symbol)
-    with_injection(symbol, fn -> fake_top_of_book(symbol) end)
+    with :ok <- Rest.validate_symbol(symbol) do
+      symbol = canonical(symbol)
+      with_injection(symbol, fn -> fake_top_of_book(symbol) end)
+    end
   end
 
   defp fake_top_of_book(symbol) do
@@ -174,8 +178,12 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], _opts \\ []) do
-    symbol = canonical(symbol)
+    with :ok <- Rest.validate_symbol(symbol) do
+      fake_candles(canonical(symbol), timeframe, range)
+    end
+  end
 
+  defp fake_candles(symbol, timeframe, range) do
     with_injection(symbol, fn ->
       # **The width and the range are checked by the real function, and before the symbol.**
       # `Rest.get_historical_prices/4` refuses an unsupported width (`2h`, `4h` and `12h` are
@@ -251,13 +259,13 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_order_book(symbol, opts \\ []) do
-    symbol = canonical(symbol)
-
-    with_injection(symbol, fn ->
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- Rest.validate_book_opts(opts) do
+      symbol = canonical(symbol)
       # The depth is checked by the real call's own function, before the symbol: the venue is
       # never asked, so it never gets to refuse the symbol.
-      with :ok <- Rest.validate_book_opts(opts), do: fake_order_book(symbol)
-    end)
+      with_injection(symbol, fn -> fake_order_book(symbol) end)
+    end
   end
 
   defp fake_order_book(symbol) do
@@ -311,13 +319,13 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_trades(symbol, opts \\ []) do
-    symbol = canonical(symbol)
-
-    with_injection(symbol, fn ->
-      # The real call's own option check, before the symbol: it refuses a `:since`,
-      # `:since_tid` or `:limit` it cannot send without asking the venue anything.
-      with :ok <- Rest.validate_trade_opts(opts), do: fake_tape(symbol, opts)
-    end)
+    # The real call's own checks, before the venue is asked: a symbol that is not a
+    # non-blank string, then a `:since`, `:since_tid` or `:limit` it cannot send.
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- Rest.validate_trade_opts(opts) do
+      symbol = canonical(symbol)
+      with_injection(symbol, fn -> fake_tape(symbol, opts) end)
+    end
   end
 
   # `:since_tid` wins over `:since`, as the venue states; both are "after", so exclusive. A
@@ -478,8 +486,10 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def quantization(symbol) do
-    symbol = canonical(symbol)
+    with :ok <- Rest.validate_symbol(symbol), do: fake_quantization(canonical(symbol))
+  end
 
+  defp fake_quantization(symbol) do
     with_injection(symbol, fn ->
       case Map.fetch(@price, symbol) do
         {:ok, _price} ->
@@ -782,22 +792,33 @@ defmodule DpExchange.Gemini.Fake do
   # family is built rather than sent and rejected.
   #
   # **A blank or non-string credential is refused here as `Auth.headers/5` refuses it**
-  # (`{:missing_credentials, scheme}`). The `:api_key` clause accepted any value for the pair,
+  # (`{:missing_credentials, :gemini}`). The `:api_key` clause accepted any value for the pair,
   # `nil` and `""` included, so a consumer's tier-1 test passed with an unset `.env` variable
   # (`GEMINI_SECRET=` is `""`) that the real call refuses before it signs.
   defp authenticated_venue_faithful(:api_key, %{api_key: key, api_secret: secret})
        when is_binary(key) and is_binary(secret) do
-    if String.trim(key) == "" or String.trim(secret) == "",
-      do: {:error, {:missing_credentials, :api_key}},
-      else: :ok
+    cond do
+      String.trim(key) == "" or String.trim(secret) == "" ->
+        {:error, {:missing_credentials, :gemini}}
+
+      String.trim(key) != key or String.trim(secret) != secret ->
+        {:error, {:invalid_credentials, :gemini}}
+
+      true ->
+        :ok
+    end
   end
 
   defp authenticated_venue_faithful(:oauth, %{access_token: token}) when is_binary(token) do
-    if String.trim(token) == "", do: {:error, {:missing_credentials, :oauth}}, else: :ok
+    cond do
+      String.trim(token) == "" -> {:error, {:missing_credentials, :gemini}}
+      String.trim(token) != token -> {:error, {:invalid_credentials, :gemini}}
+      true -> :ok
+    end
   end
 
   defp authenticated_venue_faithful(scheme, _credentials) when scheme in [:api_key, :oauth] do
-    {:error, {:missing_credentials, scheme}}
+    {:error, {:missing_credentials, :gemini}}
   end
 
   # `nil` — nothing credential-shaped, and no scheme was named — is not an unsupported
@@ -912,7 +933,10 @@ defmodule DpExchange.Gemini.Fake do
   defp do_subscribe(symbols, opts) do
     target = Config.opt(opts, :to, self())
     channels = Config.opt(opts, :channels, @default_channels)
-    wanted = Enum.filter(symbols, &(&1 in @symbols))
+    # Coverage is only for what was delivered: a `to:` name nothing holds receives nothing,
+    # so no symbol is recorded as covered for it.
+    wanted =
+      if Fanout.resolve(target), do: Enum.filter(symbols, &(&1 in @symbols)), else: []
 
     push(wanted, target, channels)
 
@@ -996,17 +1020,26 @@ defmodule DpExchange.Gemini.Fake do
   defp push(symbols, target, channels) do
     for symbol <- symbols do
       with {:ok, quote_struct} <- fake_quote(symbol),
-           do: send(target, {:dp_exchange, :gemini, streamed(quote_struct)})
+           do: deliver(target, streamed(quote_struct))
 
       if :top_of_book in channels do
         with {:ok, book} <- fake_top_of_book(symbol),
-             do: send(target, {:dp_exchange, :gemini, %{book | venue_time: nil}})
+             do: deliver(target, %{book | venue_time: nil})
       end
 
-      if :trades in channels, do: send(target, {:dp_exchange, :gemini, trade_for(symbol)})
+      if :trades in channels, do: deliver(target, trade_for(symbol))
     end
 
     :ok
+  end
+
+  # As the real `Core.Fanout` delivers: a `to:` name that no process holds (or a dead pid) is
+  # nobody, skipped. A bare `send/2` raised `ArgumentError` for an unregistered atom.
+  defp deliver(target, payload) do
+    case Fanout.resolve(target) do
+      nil -> :ok
+      pid -> send(pid, {:dp_exchange, :gemini, payload})
+    end
   end
 
   # Observed, not intended — only symbols actually pushed for.
@@ -1198,6 +1231,10 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_funding(symbol, _opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol), do: fake_funding(symbol)
+  end
+
+  defp fake_funding(symbol) do
     with_injection(symbol, fn ->
       # Funding is a property of a perpetual, and `Rest.get_funding/2` sends the symbol as
       # given. A name that is not a perpetual is the venue's "no data" 404 — measured 2026-09-06
@@ -1225,6 +1262,10 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_contract_stats(symbol, _opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol), do: fake_contract_stats(symbol)
+  end
+
+  defp fake_contract_stats(symbol) do
     with_injection(symbol, fn ->
       # Risk statistics exist for perpetuals only. The venue's refusal body for anything else
       # was never measured (only `/v1/fundingamount`'s empty 404 was), so this answers the bare

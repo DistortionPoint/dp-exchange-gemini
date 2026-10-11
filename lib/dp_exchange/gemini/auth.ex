@@ -253,11 +253,14 @@ defmodule DpExchange.Gemini.Auth do
 
   Returns `{:error, {:unsupported_auth_scheme, scheme}}` when `scheme` names something
   this module does not implement — a caller-supplied `:auth_scheme` this venue has no
-  handler for, which never happens by inference; `{:error, {:missing_credentials, scheme}}`
-  when a scheme WAS named or inferred but the credentials do not carry what it needs; and
-  `{:error, {:missing_credentials, :gemini}}` when `scheme` is `nil` — nothing
+  handler for, which never happens by inference; and `{:error, {:missing_credentials,
+  :gemini}}` when a scheme WAS named or inferred but the credentials do not carry what it
+  needs (a blank field, a missing field) and when `scheme` is `nil` — nothing
   credential-shaped was supplied and no `:auth_scheme` was named, so there is no scheme to
-  be unsupported, only a credential that never arrived. Never a partially-signed request,
+  be unsupported, only a credential that never arrived. The tag is the venue atom, as in
+  every other venue of the family; it used to be the scheme (`:api_key`, `:oauth`), which
+  told a caller which field was empty and made the answer differ from every other venue's.
+  Never a partially-signed request,
   which would fail at the venue with an error about signatures rather than about the
   missing field. `{:error, :unencodable_payload}` is a `params` map the JSON encoder cannot
   write (a tuple, a pid): nothing is signed, and it no longer raises `Jason.EncodeError` in
@@ -285,7 +288,13 @@ defmodule DpExchange.Gemini.Auth do
 
     cond do
       blank?(key) or blank?(secret) ->
-        {:error, {:missing_credentials, :api_key}}
+        {:error, {:missing_credentials, :gemini}}
+
+      # A key or secret with surrounding whitespace (a trailing newline from a `.env` file is
+      # the usual way) is refused, never trimmed and sent: the venue would answer a signature
+      # error about a value this package altered. The value is never echoed.
+      padded?(key) or padded?(secret) ->
+        {:error, {:invalid_credentials, :gemini}}
 
       # An unrecognised mode — a typo, or `:incremental_ms` for `:incremental` — reached
       # `nonce/1`, which has no clause for it, and raised in the caller's process. It is
@@ -301,13 +310,15 @@ defmodule DpExchange.Gemini.Auth do
   # The token is attached, not obtained. Whether it is still valid, and what to do when it
   # is not, is the host's flow — this module cannot refresh what it did not fetch.
   def headers(:oauth, _path, _params, %{access_token: token}, _opts) when is_binary(token) do
-    if blank?(token),
-      do: {:error, {:missing_credentials, :oauth}},
-      else: {:ok, [{"Authorization", "Bearer " <> token}]}
+    cond do
+      blank?(token) -> {:error, {:missing_credentials, :gemini}}
+      padded?(token) -> {:error, {:invalid_credentials, :gemini}}
+      true -> {:ok, [{"Authorization", "Bearer " <> token}]}
+    end
   end
 
   def headers(scheme, _path, _params, _credentials, _opts) when scheme in [:api_key, :oauth] do
-    {:error, {:missing_credentials, scheme}}
+    {:error, {:missing_credentials, :gemini}}
   end
 
   # `nil` means no credential-shaped value was supplied and no `:auth_scheme` was named —
@@ -561,6 +572,8 @@ defmodule DpExchange.Gemini.Auth do
   # `nil`-shaped guard upstream passes it through intact. Trimmed rather than compared to
   # `""`, because a trailing space in a `.env` line produces `" "` and means the same thing.
   defp blank?(value), do: String.trim(value) == ""
+
+  defp padded?(value), do: String.trim(value) != value
 
   @doc """
   Raises the incremental nonce counter to `value`, once.
