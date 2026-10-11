@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.119] - 2026-10-11
+
 ### Fixed
 
 - **A refusal carried the venue's words whole.** `Rest.refusal_reason/1` is shared by every
