@@ -931,9 +931,21 @@ defmodule DpExchange.Gemini.Private do
         status_error(status, body)
 
       {:error, reason} ->
-        {:error, reason}
+        transport_error(reason)
     end
   end
+
+  # The venue tag on a transport failure. Authenticated calls meter against the
+  # `:gemini_private` limiter bucket, and `Core.HttpClient` tags its errors with whatever
+  # `:provider` keys that bucket, so a timeout or an unavailable limiter on a private call came
+  # back as `{:exchange_error, :gemini_private, _}` while a bad status from the same call was
+  # `{:exchange_error, :gemini, _}`. The contract names the venue, and a consumer matching
+  # `{:exchange_error, :gemini, _}` missed every private transport failure. Telemetry keeps
+  # `:gemini_private` as its `provider`: that one separates the two buckets on a dashboard.
+  defp transport_error({:exchange_error, :gemini_private, reason}),
+    do: {:error, {:exchange_error, :gemini, reason}}
+
+  defp transport_error(reason), do: {:error, reason}
 
   # A status this module has no answer for (a 405, 409, 413, 422 and so on; Core has already
   # turned a 429 into a retry or a rate-limited error). **The body is quoted bounded**, as
@@ -1050,7 +1062,7 @@ defmodule DpExchange.Gemini.Private do
         status_error(status, body)
 
       {:error, reason} ->
-        {:error, reason}
+        transport_error(reason)
     end
   end
 
@@ -1079,7 +1091,7 @@ defmodule DpExchange.Gemini.Private do
         status_error(status, body)
 
       {:error, reason} ->
-        {:error, reason}
+        transport_error(reason)
     end
   end
 
@@ -1460,8 +1472,9 @@ defmodule DpExchange.Gemini.Private do
   # might write while identifying no order at all. An empty string is not a weaker id; it is
   # a different kind of wrong, because `nil` is at least detectable.
   #
-  # `fee`, `fee_currency` and `liquidity` stay unguarded on purpose: none is enforced, and a
-  # venue that did not state a fee has not stated one.
+  # `fee`, `fee_currency` and `liquidity` are not enforced, so an ABSENT one stays `nil`: a
+  # venue that did not state a fee has not stated one. A fee the venue sent and this package
+  # cannot read refuses the page (`decode_fill/2`); `nil` would read as "no fee".
   defp to_fill(row, _requested_symbol) when not is_map(row),
     do: {:error, :unexpected_response_shape}
 
@@ -1508,7 +1521,10 @@ defmodule DpExchange.Gemini.Private do
          {:ok, side} <- required_side(row["type"]),
          {:ok, quantity} <- required_decimal(row["amount"], :quantity),
          {:ok, price} <- required_decimal(row["price"], :price),
-         {:ok, timestamp} <- required_time(row["timestampms"]) do
+         {:ok, timestamp} <- required_time(row["timestampms"]),
+         # A fee the venue SENT and this package cannot read is a refusal, not `nil`: `nil`
+         # reads as "the venue stated no fee", and a reconciliation sums it as zero.
+         {:ok, fee} <- order_decimal(row, "fee_amount", :strict) do
       {:ok,
        %Fill{
          order_id: order_id,
@@ -1517,8 +1533,8 @@ defmodule DpExchange.Gemini.Private do
          side: side,
          quantity: quantity,
          price: price,
-         fee: decimal(row["fee_amount"]),
-         fee_currency: row["fee_currency"],
+         fee: fee,
+         fee_currency: fee_currency(row["fee_currency"]),
          timestamp: timestamp,
          liquidity: liquidity(row["aggressor"]),
          provider: :gemini
@@ -1597,6 +1613,11 @@ defmodule DpExchange.Gemini.Private do
       parsed -> {:ok, parsed}
     end
   end
+
+  # A string or `nil`: the type says `String.t() | nil`, and a map or a number from the venue
+  # is no currency code.
+  defp fee_currency(currency) when is_binary(currency), do: currency
+  defp fee_currency(_absent_or_unreadable), do: nil
 
   defp liquidity(true), do: :taker
   defp liquidity(false), do: :maker
@@ -2716,11 +2737,19 @@ defmodule DpExchange.Gemini.Private do
       address: address,
       memo: memo,
       fee: decimal(body["fee"]),
-      tx_id: body["txHash"] || body["txn_hash"],
+      tx_id: tx_hash(body["txHash"]) || tx_hash(body["txn_hash"]),
       requested_at: DateTime.utc_now(),
       provider: :gemini
     }
   end
+
+  # `Withdrawal.tx_id` is `String.t() | nil`. A non-blank string is a hash; anything else the
+  # venue put there (a number, a map, `""`) is no hash, and `nil` says so.
+  defp tx_hash(hash) when is_binary(hash) do
+    if String.trim(hash) == "", do: nil, else: hash
+  end
+
+  defp tx_hash(_not_a_hash), do: nil
 
   defp withdrawal_status("complete"), do: :completed
   defp withdrawal_status("completed"), do: :completed
@@ -4514,7 +4543,7 @@ defmodule DpExchange.Gemini.Private do
         status_error(status, body)
 
       {:error, reason} ->
-        {:error, reason}
+        transport_error(reason)
     end
   end
 

@@ -390,6 +390,18 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
       "fee" => "0.001"
     }
 
+    test "a withdrawal's tx_id is a non-blank string or nil" do
+      cases = [{"0xhash", "0xhash"}, {123, nil}, {"  ", nil}, {%{"a" => 1}, nil}]
+
+      for {sent, expected} <- cases do
+        assert {:ok, %Withdrawal{tx_id: ^expected}} =
+                 Private.withdraw("ETH", "ethereum", 1, "0xabc", @credentials,
+                   plug: responding(Map.put(@withdrawal, "txHash", sent)),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "a withdrawal's amount is a Decimal and its memo a string, whatever was passed" do
       for amount <- [Decimal.new("2.5"), "2.5", 2.5] do
         assert {:ok, %Withdrawal{} = withdrawal} =
@@ -524,6 +536,70 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
         assert {:error, {:exchange_error, :gemini, message}} = result
         assert String.starts_with?(message, "HTTP 413: ")
         assert String.length(message) < 2_200
+      end
+    end
+  end
+
+  describe "a fill's fee" do
+    defp fill_row(extra) do
+      Map.merge(
+        %{
+          "order_id" => "1",
+          "tid" => "2",
+          "price" => "100",
+          "amount" => "0.5",
+          "type" => "Buy",
+          "aggressor" => false,
+          "fee_currency" => "USD",
+          "timestampms" => 1_787_936_147_000
+        },
+        extra
+      )
+    end
+
+    defp trade_history(row) do
+      Private.get_trade_history(@credentials,
+        symbol: "BTC-USD",
+        plug: responding([row]),
+        retry_attempts: 0
+      )
+    end
+
+    test "is read as the venue's decimal, and absent stays nil" do
+      assert {:ok, [fill]} = trade_history(fill_row(%{"fee_amount" => "0.024937655575035"}))
+      assert Decimal.equal?(fill.fee, Decimal.new("0.024937655575035"))
+      assert fill.liquidity == :maker
+
+      assert {:ok, [fill]} = trade_history(fill_row(%{}))
+      assert fill.fee == nil
+    end
+
+    test "that is present and unreadable refuses the page instead of becoming nil" do
+      for bad <- ["abc", "NaN", "Infinity", %{"x" => 1}] do
+        assert {:error, :unexpected_response_shape} =
+                 trade_history(fill_row(%{"fee_amount" => bad}))
+      end
+    end
+
+    test "currency is a string or nil" do
+      assert {:ok, [fill]} = trade_history(fill_row(%{"fee_currency" => %{"x" => 1}}))
+      assert fill.fee_currency == nil
+    end
+  end
+
+  describe "a transport failure on an authenticated call" do
+    defp timing_out do
+      fn conn -> Req.Test.transport_error(conn, :timeout) end
+    end
+
+    test "is tagged with the venue, not with the private limiter bucket" do
+      opts = [plug: timing_out(), retry_attempts: 1]
+
+      for result <- [
+            Private.get_balances(@credentials, opts),
+            Private.list_networks("BTC", [credentials: @credentials] ++ opts)
+          ] do
+        assert {:error, {:exchange_error, :gemini, _reason}} = result
       end
     end
   end

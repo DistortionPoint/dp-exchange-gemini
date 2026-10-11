@@ -895,8 +895,12 @@ defmodule DpExchange.Gemini.Socket do
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do
-    notify(state, Notice.new(:link_down, :gemini, details: %{reason: inspect(reason)}))
-    Telemetry.link_down(:gemini, inspect(reason))
+    # Bounded: a refused upgrade carries the venue's response inside the reason, and it went
+    # whole into every notice subscriber and every telemetry handler.
+    reason_text = inspect(reason, limit: 50, printable_limit: 1_024)
+
+    notify(state, Notice.new(:link_down, :gemini, details: %{reason: reason_text}))
+    Telemetry.link_down(:gemini, reason_text)
 
     # `attempt_number` comes from `websockex` itself. It is a documented key of the
     # `connection_status_map` this function already pattern-matches on

@@ -733,7 +733,7 @@ defmodule DpExchange.Gemini.Feed do
           resubscribe_recovered(state)
 
         {:error, reason} ->
-          Logger.warning("[Gemini Feed] periodic resubscribe failed: #{inspect(reason)}")
+          Logger.warning("[Gemini Feed] periodic resubscribe failed: #{reason_text(reason)}")
           resubscribe_failed(state, reason)
       end
     else
@@ -759,7 +759,7 @@ defmodule DpExchange.Gemini.Feed do
           resubscribe(state)
 
         {:error, reason} ->
-          Logger.warning("[Gemini Feed] periodic reconnect failed: #{inspect(reason)}")
+          Logger.warning("[Gemini Feed] periodic reconnect failed: #{reason_text(reason)}")
           resubscribe_failed(state, reason)
       end
     else
@@ -795,7 +795,7 @@ defmodule DpExchange.Gemini.Feed do
       Notice.new(:coverage_change, :gemini,
         severity: :warning,
         message: "periodic resubscribe failed",
-        details: %{reason: inspect(reason)}
+        details: %{reason: reason_text(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
@@ -873,6 +873,11 @@ defmodule DpExchange.Gemini.Feed do
   # nothing is lost: `wanted` is already updated, and `:reconnected` re-issues all of it.
   defp when_linked(%{link_down?: true}, _send), do: :ok
   defp when_linked(%{socket: socket}, send), do: send.(socket)
+
+  # Bounded: a socket crash reason carries the exception and its stacktrace (frame
+  # arguments included), and a refused connect carries the venue's response; either went
+  # whole into every notice subscriber and every log line.
+  defp reason_text(reason), do: inspect(reason, limit: 50, printable_limit: 1_024)
 
   defp ensure_socket(%{socket: socket} = state) when is_pid(socket), do: {:ok, state}
 
@@ -962,8 +967,8 @@ defmodule DpExchange.Gemini.Feed do
     notice =
       Notice.new(:link_down, :gemini,
         severity: :warning,
-        message: "socket crashed (#{inspect(reason)}) — reconnecting now",
-        details: %{reason: inspect(reason)}
+        message: "socket crashed (#{reason_text(reason)}) — reconnecting now",
+        details: %{reason: reason_text(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})

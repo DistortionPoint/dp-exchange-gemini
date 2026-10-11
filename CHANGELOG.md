@@ -20,6 +20,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A transport failure on an authenticated call carried the wrong venue tag.** Private calls
+  meter against the `:gemini_private` limiter bucket, and `Core.HttpClient` tags its errors
+  with the `:provider` that keys it, so a timeout or an unavailable limiter came back as
+  `{:error, {:exchange_error, :gemini_private, _}}` while a bad status from the same call was
+  `{:exchange_error, :gemini, _}`. A consumer matching the venue's tag missed every private
+  transport failure. They are now `{:exchange_error, :gemini, _}`; telemetry keeps
+  `provider: :gemini_private`, which is what separates the two buckets. `usage-rules.md`
+  said the old tag and now says this.
+- **A fill's `fee_amount` the venue sent and this package could not read became `nil`.**
+  `get_trade_history/2` read it with the lenient `decimal/1`, so `"abc"` or a map was "the
+  venue stated no fee" and a reconciliation summed it as zero. It refuses the page with
+  `{:error, :unexpected_response_shape}`, as an unreadable order amount does; an absent fee is
+  still `nil`. A non-string `fee_currency` is `nil` rather than carried into a `String.t()`
+  field.
+- **`Withdrawal.tx_id` was whatever `txHash` held.** A number or a map from the venue reached
+  a field typed as a string. It is a non-blank string or `nil`.
+- **A disconnect or socket-crash reason went whole into notices, telemetry and logs.**
+  `Socket.handle_disconnect/2` and `Feed`'s crash and resubscribe-failure notices used plain
+  `inspect(reason)`; a refused upgrade carries the venue's response and a crash carries a
+  stacktrace with frame arguments. Bounded now (`limit: 50`, `printable_limit: 1_024`). A
+  short reason such as `:closed` prints as before.
+
+### Unmeasured, left alone
+
+- Whether the venue ever sends `fee_amount` as `""`. It is refused as unreadable until
+  measured.
+
 ## [0.2.116] - 2026-10-11
 
 ### Fixed
