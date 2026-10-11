@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.112] - 2026-10-11
+
 ### Fixed
 
 - **`seed_nonce(2^64 - 1)` was accepted and then every `nonce(:incremental)` raised.** The
