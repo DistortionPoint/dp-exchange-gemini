@@ -446,17 +446,37 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert payload["label"] == "desk"
     end
 
-    test "no label is sent when none is given" do
+    test "a missing label is refused before a request goes out (the venue requires it)" do
+      # `rest.yaml:5702` lists `label` in `required`. No plug: reaching HTTP would fail on
+      # the connection rather than on the guard.
+      assert {:error, {:missing_required_field, :label}} =
+               Private.request_approved_address("ethereum", "0xabc", nil, @credentials, [])
+
+      assert {:error, {:missing_required_field, :label}} =
+               Private.request_approved_address("ethereum", "0xabc", "", @credentials, [])
+    end
+
+    test "a memo is sent when given, and only then" do
       me = self()
 
       assert {:ok, _requested} =
-               Private.request_approved_address("ethereum", "0xabc", nil, @credentials,
-                 plug: capturing(%{"status" => "pending-time"}, me),
+               Private.request_approved_address("cosmos", "cosmos1abc", "desk", @credentials,
+                 memo: "12345",
+                 plug: capturing(%{"message" => "ok"}, me),
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload, _path}
-      refute Map.has_key?(payload, "label")
+      assert_receive {:payload, with_memo, _path}
+      assert with_memo["memo"] == "12345"
+
+      assert {:ok, _requested} =
+               Private.request_approved_address("ethereum", "0xabc", "desk", @credentials,
+                 plug: capturing(%{"message" => "ok"}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, without_memo, _path}
+      refute Map.has_key?(without_memo, "memo")
     end
 
     test "removal is its own endpoint" do
@@ -597,6 +617,29 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                  retry_attempts: 0
                )
     end
+
+    test "an empty page ends the walk even though the venue still sends a token" do
+      # A venue that attaches a token to every page, the last included, used to be walked
+      # into an empty page and then into `:repeated_continuation_token` (or the page cap):
+      # a complete history reported as an error.
+      me = self()
+
+      responses = [
+        %{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"},
+        %{"results" => [], "continuationToken" => "tok-1"}
+      ]
+
+      assert {:ok, [%{"type" => "Trade"}]} =
+               Private.get_transactions(@credentials,
+                 plug: paging_plug(me, responses),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, _first}
+      assert_receive {:payload, second}
+      assert second["continuation_token"] == "tok-1"
+      refute_receive {:payload, _third}
+    end
   end
 
   describe "get_notional_balances/3 — a valuation is not a balance" do
@@ -629,6 +672,19 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert_receive {:payload, payload, path}
       assert path == "/v1/notionalbalances/usd"
       refute Map.has_key?(payload, "currency")
+    end
+
+    test "a currency carrying path characters cannot change the signed path" do
+      me = self()
+
+      assert {:ok, _rows} =
+               Private.get_notional_balances(@credentials, "us/d?x=1",
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, _path}
+      assert payload["request"] == "/v1/notionalbalances/us%2Fd%3Fx%3D1"
     end
 
     test "an undocumented currency is sent as given rather than refused here" do

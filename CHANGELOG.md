@@ -20,6 +20,120 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (float money, order-id fidelity, withdrawal refusals)
+
+- **Money sent as a JSON number kept only a float's 17 digits.** Private requests now pass
+  `decode_body: false` and `decoded_body/1` decodes with `floats: :decimals`, so a fractional
+  number (a balance, a fee estimate's `fee`, a staking `accrualTotal`) is a `Decimal` with
+  every digit (`1234.567890123456789` used to arrive as `1234.567890123457`); integers stay
+  integers. `epoch_ms/1` and `staking_time/1` accept the `Decimal` a fractional epoch now is.
+  **Needs the dp_exchange_core release that passes `:decode_body` to Req;** until then Core
+  drops the option, Req decodes to floats, and `decoded_body/1` passes the map through.
+- **`Fake.cancel_order/3` and `Fake.get_order/3` accepted any id.** They now call the new
+  public `Private.order_id_param/1`, in the same order as the real path (id, then
+  credentials), so the fake refuses `{:error, {:invalid_order_id, id}}` identically.
+- **`withdraw/6` reported a 2xx error body as an accepted withdrawal.** A body with `result`
+  of `"error"` / `"failed"`, or an error `reason` / `message` and no `withdrawalId`, is now
+  `{:refused, body}`. An unreadable-but-JSON 2xx body (empty object, array) stays accepted
+  under the idempotency key that was sent; the reasoning is in `to_withdrawal/3`.
+
+### Fixed (private.ex first half: orders, trades, balances, conversions, withdrawals)
+
+Found by reading `Private` against `docs/reference/gemini/openapi/rest.yaml`.
+
+- **Reversed trades were reported as executions.** `/v1/mytrades` marks a broken trade with
+  `break`; the vendor says `full` "should not be accounted for ... as though the transfer of
+  fund ... had simply not happened" and `manual` "must be included" for the balance to be
+  correct. `get_trade_history/2` read neither, so a fully broken trade came back as an
+  ordinary `Fill` and a reconciliation counted money that never moved. `full` is now left
+  out, `manual` and absent/`""` are kept, and any other value (including the schema enum's
+  undescribed `"trade correct"`) is `{:error, {:unknown_break_type, value}}`. The
+  truncation check still counts the rows the venue sent.
+- **`cancel_order/3` and `get_order/3` sent the order id as a JSON string.** Both request
+  schemas name `order_id` an unsigned 64-bit integer. It is parsed back to the integer and
+  an id that is not a whole number in range is `{:error, {:invalid_order_id, id}}` before
+  anything is signed. (`Fake` still accepts any id string.)
+- **Order, conversion and withdrawal numbers are validated before they reach the wire.**
+  `place_order/3`, `quote_conversion/4`, `commit_conversion/2`, `convert/4`, `withdraw/6` and
+  `estimate_withdrawal_fee/5` sent whatever the caller held through `to_string/1`: `"abc"`,
+  a `Decimal` NaN or Infinity, zero and negative amounts, and floats as `"1.0e-8"`. They are
+  now `{:error, {:invalid_decimal, field, value}}`, `{:error, {:non_positive_amount, field,
+  value}}` (a commit's `:fee` may be zero and is `{:negative_amount, :fee, value}` below it)
+  and always plain notation. `place_order/3` also refuses a `:side` other than buy/sell
+  (`{:invalid_side, side}`; it used to send `to_string(side)`), a `:stop_limit` with no
+  `:stop_price`, and a `:stop_price` on any other type (`{:unexpected_field, :stop_price}`),
+  since the trigger exists only on a stop-limit order. `validate_order/1`, which `Fake`
+  shares, enforces the same.
+- **A conversion reply with no `side` was decoded as a buy.** `conversion_amounts` treated
+  everything that was not literally `"sell"` as a buy, so a sell whose reply omitted `side`
+  carried CCY1 amounts under CCY2 labels. The body's `side` wins; the side that was asked for
+  stands in when the body is silent; any other value refuses the read
+  (`:unexpected_response_shape`).
+- **`estimate_withdrawal_fee/5` returned `fee: nil` inside `{:ok, _}`** when the reply had no
+  readable `fee`, which a caller deciding affordability reads as "no fee". It is now
+  `{:error, :unexpected_response_shape}`; a fee of `0` is still a fee.
+- **`get_deposit_address/4` accepted an address on another network.** A reply whose own
+  `network` disagrees with the one asked for is `{:error, {:network_mismatch, requested,
+  returned}}`. A blank or non-string network (and, for `withdraw/6` and
+  `estimate_withdrawal_fee/5`, a blank asset, network or address) is refused before a path with
+  an empty segment is signed.
+- **`withdraw/6` accepted a blank memo as satisfying `memo_required: true`,** sent `""` as a
+  memo, sent an integer tag as a JSON number, and kept a blank `:client_transfer_id` (truthy)
+  instead of generating one, so every such withdrawal shared one idempotency key.
+- **`get_accounts/2`, `list_networks/2`, `get_fees/2` and `get_trade_volume/2` wrapped or
+  passed through unreadable bodies.** `List.wrap/1` turned a JSON `null` into `[]` ("this
+  account cannot move anything on that network") and a scalar into a one-row list; `get_fees/2`
+  returned a list or string as the fee schedule; `get_trade_volume/2` flattened scalars into
+  rows. All are `{:error, :unexpected_response_shape}` now.
+- **`get_transfers/2` sent a `DateTime` `:timestamp` as an ISO string** (the filter wants
+  milliseconds, so it silently narrowed nothing), and a `nil` option became a `null` field.
+  It now converts to milliseconds, drops `nil`, and passes the venue's `network` filter.
+- Tests: `test/dp_exchange/gemini/private_audit_test.exs`. `edge_cases_test.exs` and
+  `fake_test.exs` now give their `:stop_limit` Fake orders the `:stop_price` the shared
+  validation requires.
+
+### Fixed (private.ex second half: wallet, staking, derivatives, margin, accounts, clearing)
+
+- **A clearing `confirm` or `cancel` the venue declines is no longer `{:ok, _}`.** The venue
+  answers a refused confirm (`result: "error"`, `reason`, `message`) and a failed cancel
+  (`result: "failed"`, `details`) with HTTP 200, and both were returned as `{:ok, body}` —
+  including `confirm_clearing_order/4`, which executes a trade. Only `result: "confirmed"` /
+  `"ok"` is a success now; any other `result` is `{:refused, body}` (the venue's own fields
+  travel), and a 200 naming no `result` is `{:error, :unexpected_response_shape}`. The two
+  spec-example tests that pinned the old `{:ok, _}` were rewritten.
+- **Reads capped by the venue with no cursor no longer answer a first page as the whole
+  history.** `get_staking_history/2` (default 50, max 500), `list_accounts/2` (500),
+  `list_clearing_trades/2` (default 100, max 300) and `funding_payment_report/2` (default
+  8760 rows) now follow `list_custody_fees/2`'s rule: with no `:limit` / `:rows` a reply as
+  full as the cap is `{:error, {:history_truncated, cap}}`, and staking history and clearing
+  trades ask for the venue's maximum instead of its smaller default. Passing the limit takes
+  one page on purpose.
+- **`get_transactions/2` no longer turns a complete history into an error.** The page walk
+  stopped only on an absent `continuationToken`; a venue that sends a token on the last page
+  too made it fetch an empty page and then fail with `:repeated_continuation_token` (or the
+  page cap). An empty page now ends the walk.
+- **`request_approved_address/5` refuses a missing label and can send a memo.** `label` is in
+  the request's `required` list (`rest.yaml:5702`) and was dropped when `nil`, so the venue's
+  refusal was the first the caller heard of it; it is now
+  `{:error, {:missing_required_field, :label}}` before any request, and `Fake` refuses the same
+  way. `opts[:memo]` (documented for cosmos addresses) is sent when given.
+- **`list_funding_payments/2` can be windowed.** The venue answers only the last 24 hours
+  unless told otherwise, and there was no way to tell it. `opts[:since]` / `opts[:to]` go out as
+  the documented `since` / `to` query parameters, signed with the path as
+  `funding_payment_report/2` does. The signing of the query on this path is inferred from that
+  sibling and not measured live.
+- **`list_clearing_orders/2` and `list_clearing_brokers/2` refuse a half window.** Each
+  `*_start` requires its `*_end` (and the reverse) at the venue; one alone is
+  `{:error, {:window_needs_both_bounds, :expiration | :submission}}` before a request.
+  `list_clearing_trades/2` now converts a `DateTime` `:since_nanos` to nanoseconds.
+- **`preview_margin_order/3` refuses a side or type the venue does not list.** A `type` other
+  than `market` / `limit` fell into the sized-by-`amount` branch and was previewed as a market
+  sell; now `{:error, {:unknown_order_type, type}}` / `{:error, {:unknown_side, side}}`.
+- **`get_notional_balances/3` percent-encodes the currency path segment**, as every other
+  interpolated segment already does, so it cannot change the signed path.
+- **Staking `dateTime` sent as a numeric string** (`TimestampType` allows `"1495127793000"`) was
+  read as no time at all; a whole-string integer is now the epoch, as an integer is.
+
 ## [0.2.107] - 2026-10-10
 
 ### Fixed

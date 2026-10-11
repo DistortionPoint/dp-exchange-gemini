@@ -452,6 +452,82 @@ defmodule DpExchange.Gemini.StakingTest do
       assert Decimal.equal?(tx.amount_remaining, Decimal.new("6"))
     end
 
+    test "the venue's 50-row default is never relied on, and a full 500 is refused" do
+      me = self()
+
+      full =
+        for n <- 1..500 do
+          %{
+            "transactionId" => "t-#{n}",
+            "transactionType" => "Interest",
+            "amountCurrency" => "ETH",
+            "amount" => "0.01"
+          }
+        end
+
+      # Two provider groups that together reach the cap: the cap is on transactions, not
+      # on groups, so the count is over the flattened list.
+      {first, second} = Enum.split(full, 250)
+
+      body = history_body("provider-a", first) ++ history_body("provider-b", second)
+
+      assert {:error, {:history_truncated, 500}} =
+               Private.get_staking_history(@credentials,
+                 plug: capturing(body, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, "/v1/staking/history"}
+      assert payload["limit"] == 500
+
+      # One page taken on purpose, and a reply short of the cap, are both answers.
+      assert {:ok, txns} =
+               Private.get_staking_history(@credentials,
+                 limit: 500,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert length(txns) == 500
+
+      assert {:ok, short} =
+               Private.get_staking_history(@credentials,
+                 plug: responding(history_body("provider-a", Enum.take(full, 499))),
+                 retry_attempts: 0
+               )
+
+      assert length(short) == 499
+    end
+
+    test "a dateTime sent as a numeric string is the epoch, not an unreported time" do
+      # `TimestampType` allows `"1495127793000"` (rest.yaml:7900).
+      transactions = [
+        %{
+          "transactionId" => "stk-1",
+          "transactionType" => "Deposit",
+          "amountCurrency" => "ETH",
+          "amount" => "1",
+          "dateTime" => "1787936401000"
+        },
+        %{
+          "transactionId" => "stk-2",
+          "transactionType" => "Deposit",
+          "amountCurrency" => "ETH",
+          "amount" => "1",
+          "dateTime" => "not a time"
+        }
+      ]
+
+      assert {:ok, [numeric, junk]} =
+               Private.get_staking_history(@credentials,
+                 plug: responding(history_body("provider-a", transactions)),
+                 retry_attempts: 0
+               )
+
+      assert numeric.venue_time == ~U[2026-08-28 17:00:01.000Z]
+      assert junk.venue_time == nil
+    end
+
     test "the provider id comes from the parent group, not the transaction" do
       transactions = [
         %{

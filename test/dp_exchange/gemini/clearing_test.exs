@@ -243,7 +243,9 @@ defmodule DpExchange.Gemini.ClearingTest do
                  counterparty: "cp-1",
                  side: :buy,
                  expiration_start: ~U[2026-08-28 17:00:01Z],
+                 expiration_end: ~U[2026-08-29 17:00:01Z],
                  submission_start: ~U[2026-08-01 00:00:00Z],
+                 submission_end: ~U[2026-08-02 00:00:00Z],
                  plug: capturing(%{"orders" => []}, me),
                  retry_attempts: 0
                )
@@ -253,7 +255,94 @@ defmodule DpExchange.Gemini.ClearingTest do
       assert payload["counterparty"] == "cp-1"
       assert payload["side"] == "buy"
       assert payload["expiration_start"] == 1_787_936_401_000
+      assert payload["expiration_end"] == 1_788_022_801_000
       assert payload["submission_start"] == 1_785_542_400_000
+      assert payload["submission_end"] == 1_785_628_800_000
+    end
+
+    test "a window with one bound is refused before a request goes out" do
+      # `rest.yaml:4184`: each `*_start` "Requires `*_end` if set", and the reverse. No plug:
+      # reaching HTTP would fail on the connection rather than the guard.
+      assert {:error, {:window_needs_both_bounds, :expiration}} =
+               Private.list_clearing_orders(@credentials,
+                 expiration_start: ~U[2026-08-28 17:00:01Z]
+               )
+
+      assert {:error, {:window_needs_both_bounds, :submission}} =
+               Private.list_clearing_orders(@credentials,
+                 submission_end: ~U[2026-08-28 17:00:01Z]
+               )
+
+      assert {:error, {:window_needs_both_bounds, :expiration}} =
+               Private.list_clearing_brokers(@credentials,
+                 expiration_end: ~U[2026-08-28 17:00:01Z]
+               )
+    end
+
+    test "a cancel or confirm the venue declines with HTTP 200 is a refusal, not a success" do
+      declined = %{"result" => "error", "reason" => "InvalidSide"}
+
+      assert {:refused, ^declined} =
+               Private.confirm_clearing_order("c-1", @terms, @credentials,
+                 plug: responding(declined),
+                 retry_attempts: 0
+               )
+
+      failed = %{"result" => "failed", "details" => "Unable to cancel order c-1"}
+
+      assert {:refused, ^failed} =
+               Private.cancel_clearing_order("c-1", @credentials,
+                 plug: responding(failed),
+                 retry_attempts: 0
+               )
+
+      assert {:error, :unexpected_response_shape} =
+               Private.cancel_clearing_order("c-1", @credentials,
+                 plug: responding(%{}),
+                 retry_attempts: 0
+               )
+
+      assert {:error, :unexpected_response_shape} =
+               Private.confirm_clearing_order("c-1", @terms, @credentials,
+                 plug: responding(%{}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "trades ask for the venue's maximum page and refuse a full one without :limit" do
+      me = self()
+      rows = for n <- 1..300, do: %{"clearingId" => "c-#{n}"}
+
+      assert {:error, {:history_truncated, 300}} =
+               Private.list_clearing_trades(@credentials,
+                 plug: capturing(%{"results" => rows}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, "/v1/clearing/trades"}
+      assert payload["limit_per_account"] == 300
+
+      # An explicit limit is one page taken on purpose.
+      assert {:ok, ^rows} =
+               Private.list_clearing_trades(@credentials,
+                 limit: 300,
+                 plug: responding(%{"results" => rows}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "since_nanos accepts a DateTime and sends nanoseconds" do
+      me = self()
+
+      assert {:ok, []} =
+               Private.list_clearing_trades(@credentials,
+                 since_nanos: ~U[2026-08-28 17:00:01Z],
+                 plug: capturing(%{"results" => []}, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:payload, payload, _path}
+      assert payload["timestamp_nanos"] == 1_787_936_401_000_000_000
     end
 
     test "the broker listing has its own path and its own row shape" do
@@ -357,13 +446,16 @@ defmodule DpExchange.Gemini.ClearingTest do
                DpExchange.Gemini.get_clearing_order("c-1", creds ++ [plug: responding(%{})])
 
       assert {:ok, _result} =
-               DpExchange.Gemini.cancel_clearing_order("c-1", creds ++ [plug: responding(%{})])
+               DpExchange.Gemini.cancel_clearing_order(
+                 "c-1",
+                 creds ++ [plug: responding(%{"result" => "ok"})]
+               )
 
       assert {:ok, _result} =
                DpExchange.Gemini.confirm_clearing_order(
                  "c-1",
                  @terms,
-                 creds ++ [plug: responding(%{})]
+                 creds ++ [plug: responding(%{"result" => "confirmed"})]
                )
 
       # `%{}` used to stand here too and still return `{:ok, []}` for all three — the same

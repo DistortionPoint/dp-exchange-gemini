@@ -540,7 +540,10 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts) do
+      # The id is checked BEFORE the credential, as `Private.cancel_order/3` does, through
+      # the same `Private.order_id_param/1`, so the fake cannot be the more permissive one.
+      with {:ok, _wire_id} <- Private.order_id_param(order_id),
+           :ok <- authenticated(credentials, opts) do
         {:ok, %{order(%{}) | id: order_id, status: :cancelled}}
       end
     end)
@@ -549,7 +552,8 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts) do
+      with {:ok, _wire_id} <- Private.order_id_param(order_id),
+           :ok <- authenticated(credentials, opts) do
         {:ok, %{order(%{}) | id: order_id}}
       end
     end)
@@ -1528,7 +1532,8 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def request_approved_address(network, address, label, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts),
+           :ok <- label_present(label) do
         # **Pending.** A successful response is not permission to withdraw, and a fake that
         # returned "active" would teach a consumer it is.
         {:ok,
@@ -1541,6 +1546,11 @@ defmodule DpExchange.Gemini.Fake do
       end
     end)
   end
+
+  # The real adapter refuses a missing label (the venue requires one, `rest.yaml:5702`); a
+  # fake that accepted it would be differently capable.
+  defp label_present(label) when is_binary(label) and label != "", do: :ok
+  defp label_present(_label), do: {:error, {:missing_required_field, :label}}
 
   @impl true
   def remove_approved_address(network, address, opts \\ []) do

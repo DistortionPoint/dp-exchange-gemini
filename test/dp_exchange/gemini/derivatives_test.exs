@@ -441,6 +441,66 @@ defmodule DpExchange.Gemini.DerivativesTest do
     end
   end
 
+  describe "list_funding_payments/2 — the venue's window is 24 hours unless told" do
+    test "since and to go out as the venue's query parameters and are signed with the path" do
+      me = self()
+
+      assert {:ok, []} =
+               Private.list_funding_payments(@credentials,
+                 since: ~U[2026-08-28 17:00:01Z],
+                 to: 1_788_022_801_000,
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, path, query, payload}
+      assert path == "/v1/perpetuals/fundingPayment"
+      assert query == "since=1787936401000&to=1788022801000"
+      assert payload["request"] == path <> "?" <> query
+    end
+
+    test "no window means the bare path, as before" do
+      me = self()
+
+      assert {:ok, []} =
+               Private.list_funding_payments(@credentials,
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, path, "", payload}
+      assert payload["request"] == path
+    end
+  end
+
+  describe "funding_payment_report/2 — the venue's row cap is not an answer" do
+    test "a reply as long as the default cap, asked for without :rows, is refused" do
+      rows = for n <- 1..8760, do: %{"timestamp" => n}
+
+      assert {:error, {:history_truncated, 8760}} =
+               Private.funding_payment_report(@credentials,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      # Asking for the rows on purpose is allowed, and one short of the cap is complete.
+      assert {:ok, ^rows} =
+               Private.funding_payment_report(@credentials,
+                 rows: 8760,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      short = Enum.take(rows, 8759)
+
+      assert {:ok, ^short} =
+               Private.funding_payment_report(@credentials,
+                 plug: responding(short),
+                 retry_attempts: 0
+               )
+    end
+  end
+
   describe "the reports — what gets signed" do
     test "the JSON report signs the path with its query string attached" do
       # Signing the bare path yields a valid signature over the wrong string, which the
@@ -672,6 +732,24 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert_receive {:request, _path, _query, payload}
       assert payload["amount"] == "0.5"
       refute Map.has_key?(payload, "totalSpend")
+    end
+
+    test "a type or side the venue does not list is refused, not sized as a market sell" do
+      # `type` is market|limit and `side` buy|sell (`rest.yaml:2426`). No plug: reaching HTTP
+      # would fail on the connection rather than the guard.
+      assert {:error, {:unknown_order_type, "stop_limit"}} =
+               Private.preview_margin_order(
+                 %{symbol: "BTC-USD", side: :buy, type: :stop_limit, amount: Decimal.new("1")},
+                 @credentials,
+                 []
+               )
+
+      assert {:error, {:unknown_side, "short"}} =
+               Private.preview_margin_order(
+                 %{symbol: "BTC-USD", side: :short, type: :market, amount: Decimal.new("1")},
+                 @credentials,
+                 []
+               )
     end
 
     test "a request missing the three required fields is refused" do

@@ -393,8 +393,12 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       base = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
 
       for order_type <- [:limit, :stop_limit, :post_only, :ioc, :fok] do
+        # A stop-limit carries its trigger; no other type may (`Private.validate_order/1`).
+        request =
+          if order_type == :stop_limit, do: Map.put(base, :stop_price, "99"), else: base
+
         assert {:ok, %DpExchange.Core.Types.Order{}} =
-                 Fake.place_order(credentials, Map.put(base, :order_type, order_type), [])
+                 Fake.place_order(credentials, Map.put(request, :order_type, order_type), [])
       end
     end
 

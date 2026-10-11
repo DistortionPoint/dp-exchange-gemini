@@ -311,19 +311,19 @@ defmodule DpExchange.Gemini.FakeTest do
 
   describe "order lifecycle in memory" do
     test "get_order/3 answers with the id it was asked about" do
-      assert {:ok, order} = Fake.get_order(@credentials, "abc-123", [])
-      assert order.id == "abc-123"
+      assert {:ok, order} = Fake.get_order(@credentials, "123456", [])
+      assert order.id == "123456"
     end
 
     test "cancel_order/3 reports the order cancelled" do
-      assert {:ok, order} = Fake.cancel_order(@credentials, "abc-123", [])
-      assert order.id == "abc-123"
+      assert {:ok, order} = Fake.cancel_order(@credentials, "123456", [])
+      assert order.id == "123456"
       assert order.status == :cancelled
     end
 
     test "both refuse without credentials, as the real adapter does" do
-      assert Fake.get_order(%{}, "abc-123", []) == {:error, {:missing_credentials, :gemini}}
-      assert Fake.cancel_order(%{}, "abc-123", []) == {:error, {:missing_credentials, :gemini}}
+      assert Fake.get_order(%{}, "123456", []) == {:error, {:missing_credentials, :gemini}}
+      assert Fake.cancel_order(%{}, "123456", []) == {:error, {:missing_credentials, :gemini}}
     end
 
     test "a placed order carries the caller's own values back, unrewritten" do
@@ -687,6 +687,11 @@ defmodule DpExchange.Gemini.FakeTest do
       refute Map.has_key?(transfer, "address")
     end
 
+    test "an allowlist request without a label is refused, as the real adapter refuses it" do
+      assert {:error, {:missing_required_field, :label}} =
+               Fake.request_approved_address("ethereum", "0xabc", nil, credentials: @credentials)
+    end
+
     test "a requested allowlist entry is pending, not active" do
       # A fake returning "active" would teach a consumer a successful response is permission
       # to withdraw.
@@ -907,6 +912,10 @@ defmodule DpExchange.Gemini.FakeTest do
             {:limit, :gtc, :limit}
           ] do
         request = Map.merge(@order, %{order_type: order_type, time_in_force: time_in_force})
+
+        # The trigger price belongs to a stop-limit and to nothing else.
+        request =
+          if order_type == :stop_limit, do: Map.put(request, :stop_price, "99"), else: request
 
         assert {:ok, %Types.Order{order_type: ^expected}} =
                  Fake.place_order(@credentials, request, [])

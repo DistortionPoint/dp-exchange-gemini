@@ -1867,11 +1867,11 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert body["result"] == "ok"
     end
 
-    test "the venue's failedCancel example is STILL an :ok decode (HTTP 200), with result: failed" do
+    test "the venue's failedCancel example (HTTP 200, result: failed) is a refusal" do
       request_fixture = fixture!("rest/private/clearing/cancel_clearing_order_request.json")
       fixture = fixture!("rest/private/clearing/cancel_clearing_order_failed.json")
 
-      assert {:ok, body} =
+      assert {:refused, body} =
                Private.cancel_clearing_order(request_fixture["clearing_id"], @credentials,
                  plug: responding(fixture),
                  retry_attempts: 0
@@ -1914,7 +1914,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert payload["side"] == request_fixture["side"]
     end
 
-    test "the venue's failedConfirm example is STILL an :ok decode (HTTP 200), naming the reason" do
+    test "the venue's failedConfirm example (HTTP 200, result: error) is a refusal, with the reason" do
       request_fixture = fixture!("rest/private/clearing/confirm_clearing_order_request.json")
       fixture = fixture!("rest/private/clearing/confirm_clearing_order_failed.json")
 
@@ -1925,7 +1925,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
         side: String.to_existing_atom(request_fixture["side"])
       }
 
-      assert {:ok, body} =
+      assert {:refused, body} =
                Private.confirm_clearing_order(request_fixture["clearing_id"], terms, @credentials,
                  plug: responding(fixture),
                  retry_attempts: 0

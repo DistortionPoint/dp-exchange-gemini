@@ -177,6 +177,28 @@ defmodule DpExchange.Gemini.AdminTest do
       assert payload2["timestamp"] == 1_787_936_401_000
     end
 
+    test "a full 500-row page with no :limit is refused as possibly truncated" do
+      # The venue has no cursor: 500 rows is either the whole group or the first slice of a
+      # larger one, and the reply does not say which.
+      full = for n <- 1..500, do: %{"account" => "acct-#{n}"}
+
+      assert {:error, {:history_truncated, 500}} =
+               Private.list_accounts(@credentials, plug: responding(full), retry_attempts: 0)
+
+      # Taking one page on purpose is allowed, and 499 rows is provably complete.
+      assert {:ok, ^full} =
+               Private.list_accounts(@credentials,
+                 limit: 500,
+                 plug: responding(full),
+                 retry_attempts: 0
+               )
+
+      short = Enum.take(full, 499)
+
+      assert {:ok, ^short} =
+               Private.list_accounts(@credentials, plug: responding(short), retry_attempts: 0)
+    end
+
     test "rows carry the shortname other endpoints address by" do
       body = [
         %{"name" => "Primary", "account" => "primary", "type" => "exchange"},
