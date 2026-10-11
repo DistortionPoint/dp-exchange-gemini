@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.118] - 2026-10-11
+
 ### Fixed
 
 - **A credential wrapped with `Credentials.wrap/1` was refused as ambiguous.** The struct
