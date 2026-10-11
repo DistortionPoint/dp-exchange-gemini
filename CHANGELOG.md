@@ -20,6 +20,23 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A plain `ws://` connection no longer needs the operating system's trust store.**
+  `Socket.start_link/1` loaded the CA list for every URL, so on an image with no
+  `ca-certificates` a `ws://` proxy or local server was refused with
+  `{:error, {:tls_trust_store_unavailable, _}}` for a handshake that never happens. Only a URL
+  whose scheme is `ws` skips the TLS options; `wss`, anything else and anything unparsable
+  still take the verified defaults and still fail closed. Test: `ws://` with a failing
+  `:cacerts_loader` starts.
+
+### Tests
+
+- The vendored `websockex` 16 MiB bound is now pinned on its fragment-reassembly branch (two
+  9 MiB fragments close with 1009 although no single frame passes the bound) and on the
+  other side of the bound (a 3 MiB valid JSON frame is read, answered by a pong, and the link
+  stays up). Only the unfinished-single-frame branch had a test.
+
 ## [0.2.120] - 2026-10-11
 
 ### Changed (BREAKING)

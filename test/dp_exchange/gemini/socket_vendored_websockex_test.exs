@@ -98,6 +98,59 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert Process.alive?(socket_pid)
   end
 
+  test "a fragmented message that reassembles past the bound is closed, though no frame is" do
+    # Two 9 MiB fragments: each frame alone is under 16 MiB, so only the reassembly check in
+    # `handle_fragment/4` can end this.
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_then_send_oversized_fragments/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down, details: details}},
+                   10_000
+
+    assert details.reason =~ "message too big"
+    assert Process.alive?(socket_pid)
+  end
+
+  test "a legitimately large frame, inside the bound, is delivered and the link stays up" do
+    # 3 MiB of valid JSON (a deep book snapshot is a fraction of it), then a ping. The pong
+    # comes back only after the frame was read, and no close came before it.
+    test_pid = self()
+    {listen_socket, port} = listen()
+
+    serve(listen_socket, [
+      fn socket ->
+        upgrade(socket)
+        padding = :binary.copy("a", 3_145_728)
+        body = ~s({"type":"heartbeat","pad":"#{padding}"})
+        :ok = :gen_tcp.send(socket, [<<129, 127, byte_size(body)::64>>, body])
+        :ok = :gen_tcp.send(socket, <<137, 0>>)
+        send(test_pid, {:client_reply, :gen_tcp.recv(socket, 0, 5_000)})
+        hold(socket)
+      end
+    ])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert_receive {:client_reply, {:ok, <<138, _rest::binary>>}}, 10_000
+    refute_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 200
+    assert Process.alive?(socket_pid)
+  end
+
+  test "a plain ws:// connection does not need a trust store" do
+    # The trust store is read for TLS only. A `ws://` proxy or test server must not be refused
+    # because the operating system has no CA list.
+    DpExchange.Core.Config.put_override(:cacerts_loader, fn -> :erlang.error(:enoent) end)
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_and_hold/1])
+
+    assert {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+  end
+
   test "a trust store the operating system cannot supply is an error, not a raise" do
     # `:public_key.cacerts_get/0` raises where there is no CA list (a minimal image). It ran
     # inside `Feed`'s `handle_call`, so the feed died with every subscription in it.
@@ -265,6 +318,17 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     upgrade(socket)
     :ok = :gen_tcp.send(socket, <<129, 127, 4_000_000_000::64>>)
     stream_filler(socket, 20)
+    _client_closed = :gen_tcp.recv(socket, 0, 5_000)
+    :gen_tcp.close(socket)
+  end
+
+  # A text message in two fragments (FIN clear, then a FIN continuation), 9 MiB each. Waits
+  # for the client's close frame before closing.
+  defp upgrade_then_send_oversized_fragments(socket) do
+    upgrade(socket)
+    part = :binary.copy("a", 9_437_184)
+    :ok = :gen_tcp.send(socket, [<<1, 127, byte_size(part)::64>>, part])
+    _sent = :gen_tcp.send(socket, [<<128, 127, byte_size(part)::64>>, part])
     _client_closed = :gen_tcp.recv(socket, 0, 5_000)
     :gen_tcp.close(socket)
   end

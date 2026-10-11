@@ -253,11 +253,14 @@ defmodule DpExchange.Gemini.Socket do
   """
   @spec connect_opts(keyword()) :: keyword()
   def connect_opts(opts) do
+    timeout_opts(opts) ++ [ssl_options: ssl_options(Config.opt(opts, :ssl_options, nil))]
+  end
+
+  defp timeout_opts(opts) do
     [
       socket_connect_timeout:
         Config.opt(opts, :socket_connect_timeout, @socket_connect_timeout_ms),
-      socket_recv_timeout: Config.opt(opts, :socket_recv_timeout, @socket_recv_timeout_ms),
-      ssl_options: ssl_options(Config.opt(opts, :ssl_options, nil))
+      socket_recv_timeout: Config.opt(opts, :socket_recv_timeout, @socket_recv_timeout_ms)
     ]
   end
 
@@ -319,12 +322,25 @@ defmodule DpExchange.Gemini.Socket do
     end
   end
 
-  defp tls_connect_opts(opts) do
-    {:ok, connect_opts(opts)}
+  # A plain `ws://` URL (the `:websocket_url` proxy seam, or a local test server) never does a
+  # TLS handshake, so it has no use for a trust store and must not be refused for lacking one.
+  # Only a URL that is clearly `ws` skips the TLS options; anything else, a `wss` URL included,
+  # takes them, so the failure is toward verification.
+  defp tls_connect_opts(url, opts) do
+    if plaintext_url?(url), do: {:ok, timeout_opts(opts)}, else: {:ok, connect_opts(opts)}
   rescue
     error in ErlangError ->
       {:error, {:tls_trust_store_unavailable, inspect(error.original, limit: 20)}}
   end
+
+  defp plaintext_url?(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme} when is_binary(scheme) -> String.downcase(scheme) == "ws"
+      _no_scheme -> false
+    end
+  end
+
+  defp plaintext_url?(_not_a_string), do: false
 
   @doc """
   `opts` also accepts `:channels` — the channels this connection is DECLARED to carry, used
@@ -358,7 +374,7 @@ defmodule DpExchange.Gemini.Socket do
       depth_snapshot?: depth_snapshot?(opts)
     }
 
-    with {:ok, connect} <- tls_connect_opts(opts) do
+    with {:ok, connect} <- tls_connect_opts(url, opts) do
       VendoredWebSockex.start_link(url, __MODULE__, state, connect)
     end
   end

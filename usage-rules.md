@@ -154,7 +154,8 @@ default is not to (`verify: :verify_none`), and until then this package connecte
 that default, accepting any certificate. It now uses the operating system's trust store and
 HTTPS hostname rules. On a host with no system CA bundle (`:public_key.cacerts_get/0` raises
 there) the subscribe call answers `{:error, {:tls_trust_store_unavailable, reason}}` rather
-than connecting unverified; it used to raise inside the shared `Feed`. Pass your own
+than connecting unverified; it used to raise inside the shared `Feed`. (A plain `ws://` URL,
+the `:websocket_url` proxy seam, does no TLS handshake and does not read the trust store.) Pass your own
 `:ssl_options` where you start the tree to replace the defaults —
 `{DpExchange.Gemini, ssl_options: [...]}`. `nil`, `[]` and anything that is not a keyword list
 mean "not given" and keep verification; a list that does not mention `:verify` has
