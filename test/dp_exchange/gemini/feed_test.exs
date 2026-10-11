@@ -797,13 +797,13 @@ defmodule DpExchange.Gemini.FeedTest do
       # See the timeout note in the previous test — the same multi-hop chain to a
       # `Notice` applies here.
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
-                     1_000
+                     5_000
 
       send(feed, :resubscribe)
 
       assert_receive {:dp_exchange, :gemini,
                       %Notice{kind: :coverage_change, severity: :info} = notice},
-                     1_000
+                     5_000
 
       assert notice.message =~ "resumed"
 
@@ -883,9 +883,16 @@ defmodule DpExchange.Gemini.FeedTest do
 
       # `:kill`, not `:normal` — a non-trapping process ignores a peer's normal exit,
       # which would prove nothing about the trap_exit flag this test exists to check.
+      #
+      # Not decided by a refute window: the feed reports the crash it handled as a
+      # `:link_down` notice, so waiting for that proves the exit signal reached a feed that
+      # was still there to trap it. A feed killed by the link could never send it.
+      :ok = Feed.subscribe_notices(feed, to: self())
       ref = Process.monitor(feed)
       Process.exit(socket, :kill)
-      refute_receive {:DOWN, ^ref, :process, ^feed, _reason}, 500
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 5_000
+      refute_received {:DOWN, ^ref, :process, ^feed, _reason}
       assert Process.alive?(feed)
     end
 
@@ -922,7 +929,7 @@ defmodule DpExchange.Gemini.FeedTest do
       # away: `resubscribe_failed/2` only ever fires from an actual `ensure_socket/1` or
       # `Socket.subscribe/2` result, never from doing nothing.
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
-                     2_000
+                     5_000
     end
 
     test "a crash hard on the heels of another waits before redialling" do
@@ -948,7 +955,7 @@ defmodule DpExchange.Gemini.FeedTest do
       refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 700
 
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
-                     3_000
+                     5_000
     end
 
     test "the redial delay doubles through a run and is capped" do
@@ -964,15 +971,15 @@ defmodule DpExchange.Gemini.FeedTest do
 
     test "it waits @call_timeout, not GenServer.call/2's five-second default" do
       # `subscribe_notices` was the one public call in `Feed` left on the default timeout.
-      # Every sibling call is given `@call_timeout` — 15 seconds, the authors' own statement
+      # Every sibling call is given `@call_timeout` — 25 seconds, the authors' own statement
       # of how long this feed may legitimately take to answer — and this one had five.
       #
       # The blocker runs INSIDE the feed process: `:sys.replace_state/2` applies its function
       # there, so the sleep occupies the feed exactly as a slow callback would, and the call
       # under test queues behind it on the real mailbox. Eight seconds is chosen to sit
       # between the two timeouts: past the five-second default that used to fire, with three
-      # seconds of margin for a loaded scheduler, and well short of the fifteen the call is
-      # now allowed.
+      # seconds of margin for a loaded scheduler, and well short of the twenty-five the call
+      # is now allowed.
       #
       # A `GenServer.call/3` timeout exits in the CALLER, so before the fix this test would
       # not have failed an assertion — it would have killed the test process with
@@ -1172,7 +1179,8 @@ defmodule DpExchange.Gemini.FeedTest do
       # feed from the dying socket while the call comes from this process, and Erlang does
       # not order signals from different senders. The single call used to win that race
       # under full-suite load (2026-10-03), reading coverage before the EXIT had landed.
-      assert trades_coverage_clears?(feed, 50)
+      # 250 tries of 20 ms: a 5 s margin, as every wait on another process has.
+      assert trades_coverage_clears?(feed, 250)
     end
 
     defp trades_coverage_clears?(_feed, 0), do: false

@@ -20,6 +20,112 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A credential wrapped with `Credentials.wrap/1` was refused as ambiguous.** The struct
+  always carries `api_key`, `api_secret` and `access_token`, and the scheme was inferred from
+  which keys were present, so `%Credentials{api_key: k, api_secret: s, access_token: nil}` read
+  as both header families and every call made with it was
+  `{:error, {:unsupported_auth_scheme, :ambiguous}}`. `wrap/1` is public for a host that builds
+  its own child spec, and its moduledoc said nothing downstream changes. Only a non-`nil` value
+  counts now (`Private.credential_scheme/1`, shared with `Fake`); a key with a `nil` value and
+  nothing else is still that key's scheme, so the answer for it is unchanged.
+- **`Fake` accepted a blank or `nil` credential the real call refuses.** `GEMINI_SECRET=` is
+  `""` and `Auth.headers/5` answers `{:missing_credentials, :api_key}` for it, while the fake
+  took any value for the pair. It answers the same refusal now, for a blank or non-string key,
+  secret or OAuth token.
+- **Calls that act on a clearing order, and the token refresh, raised `FunctionClauseError`.**
+  `get_clearing_order/3`, `cancel_clearing_order/3` and `confirm_clearing_order/4` had an
+  `is_binary` guard on the id, so a `nil` or atom id (an unset variable) raised in the caller's
+  process, on the call that executes a trade, and `""` was signed. They answer
+  `{:error, {:invalid_clearing_id, id}}`. `refresh_access_token/3` with a `nil` or other
+  non-string id or token answers `:client_id_required` / `:refresh_token_required`. A blank
+  `:client_secret` (an unset `.env` variable) is left out of the form, as "sent only when given"
+  says, rather than sent as `client_secret=`; one that is not a string raised in
+  `URI.encode_query/1` and is `{:error, {:invalid_option, :client_secret, value}}`.
+- **`get_fees/2` dropped a `:symbol` it could not send.** `symbol: :btcusd` answered with the
+  general fee schedule, a plausible tier for the wrong question. A symbol that is not a
+  non-blank string is `{:error, {:invalid_option, :symbol, value}}` (`Private.fees_params/1`,
+  shared with the fake).
+- **`withdraw/6` and `transfer_internal/5` sent a memo or idempotency key of any type.** A map,
+  list, float, boolean, atom or negative number as `:memo` went onto the wire as given; it is
+  `{:error, {:invalid_memo, memo}}` (a string or a non-negative whole number is a memo). A
+  `:client_transfer_id` that was not a string was sent as it was; a value that is neither a
+  string nor absent is now `{:error, {:invalid_option, :client_transfer_id, value}}`, because
+  a caller who passed a key to keep a retry idempotent across a restart must not be given a
+  different one. A blank string is still none. The fake shares both checks.
+- **`stake/4` and `unstake/4` signed any `:provider_id`.** It is a non-blank string or
+  `{:error, {:invalid_option, :provider_id, value}}` (absent is still `:missing_provider_id`),
+  from `Private.provider_id/1`, which the fake calls too.
+- **`get_deposit_address/4` accepted a `nil` or blank asset** and returned a `DepositAddress`
+  with `asset: nil` around an address the venue had issued. It is
+  `{:error, {:invalid_asset, asset}}`, checked after the network, before anything is signed
+  (`Private.validate_deposit_request/2`, shared with the fake).
+- **A free-text field the venue sent as a map or list reached a string field.**
+  `DepositAddress` `memo` and `label`, `ApprovedAddress.label` and `FxRate` `source` and
+  `benchmark` are text or `nil` now; a whole number (a destination tag) is its digits. An
+  `FxRate`'s `pair` is the venue's own only when it is a non-blank string, else the pair asked
+  for.
+- **`create_account/3` raised on a non-string name, signed a blank one and sent any `:type`.**
+  A `nil` name was a `FunctionClauseError` in `Private`, and `""` created an account with no
+  name. A missing, blank or non-string name is `{:error, :name_required}` (what the facade
+  already answered for a missing one), and `:type` is `"exchange"`, `"custody"`, the same two
+  as atoms, or absent: anything else is `{:error, {:invalid_option, :type, value}}`
+  (`Private.create_account_params/2`, which the real call and the fake share). `rename_account/2`
+  had the same hole: a blank `:name` was sent as a rename to nothing and a non-string was sent
+  as the JSON value it happened to be. `:account`, `:name` and `:shortname` are each absent or a
+  non-blank string, else `{:error, {:invalid_option, key, value}}`
+  (`Private.rename_account_params/1`, also run by the fake).
+- **`preview_margin_order/3` raised `Protocol.UndefinedError`** on a `:side` or `:type` that
+  was a map, list or tuple. It is `{:error, :missing_order_fields}`.
+- **The funding reports signed their query unchecked.** `funding_amount_report/3` with a `nil`
+  or blank symbol left it out of the query (the venue requires it), `rows: "abc"`, `rows: 0`
+  or `rows: -5` became `numRows=abc`, `fromDate=yesterday` was sent as a date, and a map
+  raised in `to_string/1`. They are `{:error, {:invalid_option, key, value}}` before the path
+  is signed: a symbol is a non-blank string, `:rows` a positive integer, `:from` and `:to` a
+  `Date`, a `DateTime` or an ISO 8601 date string. The two payment reports
+  (`funding_payment_report/2`, `funding_payment_report_file/1`) take no symbol in the vendor's
+  spec, so a `:symbol` shared in an options list is no longer appended to their signed query.
+- **`get_order_book/2` sent any `:depth`.** `depth: "ten"` was a venue 400, `depth: -1` a count
+  the venue never describes, and a map raised in `URI.encode_query/1`. It is a whole number of
+  levels, `0` included (the vendor's prose says `0` returns the full side), else
+  `{:error, {:invalid_option, :depth, value}}` from `Rest.validate_book_opts/1`, which
+  `Fake.get_order_book/2` calls before it looks at the symbol (the fake ignored its options).
+- **`:ssl_options` could not reach the socket.** `usage-rules.md` told a consumer to pass its
+  own `:ssl_options` to replace the verified-TLS defaults, and `Feed` forwarded only `:url`,
+  `:environment` and the two timeouts to the sockets it dials, so the option was dropped. It is
+  forwarded now.
+
+### Documentation
+
+- `README.md` showed `{DpExchange.Gemini, credentials: my_credentials()}` as the child spec.
+  Nothing reads a credential from the child's options (they are arguments to the calls that
+  sign), so the example read as if it configured something. It now starts `[]` and passes the
+  credentials to `get_balances/2`.
+- `get_market_overview/1`'s `change_24h` is documented as the venue's `percentChange24h`
+  unchanged with its unit **unestablished**: the vendor's example reads as a percent (`5.23`)
+  and this package's fixtures as a fraction (`-0.0424`); nothing here measured which.
+- `get_orders/2` says `/v1/orders` takes no filter, so `:symbol` narrows nothing on the
+  resting read. `docs/reference/gemini/order-book.md` no longer says `depth` is read with
+  `Keyword.get/3`.
+
+### Tests
+
+- `feed_test.exs` "the feed survives a linked socket being killed" was decided by a 500 ms
+  `refute_receive`. It waits for the `:link_down` notice the feed raises for the crash it
+  trapped (5 s), which a feed killed by the link could never send.
+- `tick_n_review_test.exs` covers each fix above, holding the fake to the real call's answer
+  where the fake has the same call.
+
+### Unmeasured, left alone
+
+- `create_clearing_order/3`'s `:expires_in_hrs` and `:counterparty_id` are signed as given.
+  The vendor types the first `integer` on `/v1/clearing/new` and `integer` with
+  `format: float` (its own example is `1.0`) on the broker form, so there is no single shape
+  to refuse against.
+- `get_order_book/2`'s `depth: 0`: the vendor's prose allows it and its schema says
+  `minimum: 1`. It is passed through.
+
 ## [0.2.117] - 2026-10-11
 
 ### Fixed

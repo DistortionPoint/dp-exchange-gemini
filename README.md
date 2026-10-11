@@ -39,11 +39,15 @@ end
 
 ```elixir
 # In your supervision tree. Nothing starts itself.
-children = [{DpExchange.Gemini, credentials: my_credentials()}]
+children = [{DpExchange.Gemini, []}]
 
 {:ok, quote} = DpExchange.Gemini.get_price("BTCUSD", [])
 
 :ok = DpExchange.Gemini.subscribe(["BTCUSD"], to: self())
+
+# Credentials are an argument to the call that needs them. The child keeps none: they sign
+# that one request and are not stored.
+{:ok, balances} = DpExchange.Gemini.get_balances(my_credentials(), [])
 ```
 
 `DpExchange.Gemini` is the **entire public API**. Everything else — transport, signing,

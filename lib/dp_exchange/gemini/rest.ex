@@ -405,6 +405,13 @@ defmodule DpExchange.Gemini.Rest do
   `/v1/pricefeed` is the only endpoint here that describes the whole catalogue at once,
   which is what makes an overview affordable — the alternative is one request per symbol
   across 346 symbols, which is not an overview, it is a rate-limit incident.
+
+  **`change_24h` is the venue's `percentChange24h`, unchanged, and its unit is not established
+  here.** The vendor's own example reads as a percent (`"5.23"` for BTCUSD,
+  `docs/reference/gemini/openapi/rest.yaml`) while this package's fixtures carry fractions
+  (`"-0.0424"`), and nothing in this repository measured the endpoint to say which is true.
+  Do not scale it; check one value against a chart before relying on it. A pair whose `price`
+  or `percentChange24h` is absent has `nil` for that field.
   """
   @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()}
   def get_market_overview(opts) do
@@ -606,7 +613,9 @@ defmodule DpExchange.Gemini.Rest do
 
   `opts[:depth]` defaults to the venue's own documented default — see
   `docs/reference/gemini/order-book.md`, which quotes `limit_bids`/`limit_asks`'s "Default
-  is 50" verbatim — rather than to a plausible-looking guess.
+  is 50" verbatim — rather than to a plausible-looking guess. It is a whole number of levels
+  per side, `0` included; anything else is `{:error, {:invalid_option, :depth, value}}`
+  before a request is made (see `validate_book_opts/1`).
   """
   @spec get_order_book(String.t(), keyword()) ::
           {:ok, OrderBook.t()} | {:error, term()} | {:refused, term()}
@@ -617,7 +626,8 @@ defmodule DpExchange.Gemini.Rest do
     depth = Config.opt(opts, :depth, 50)
     params = [limit_bids: depth, limit_asks: depth]
 
-    with {:ok, body} <-
+    with :ok <- validate_book_opts(opts),
+         {:ok, body} <-
            get_body("/v1/book/#{segment(native)}", Keyword.put(opts, :params, params)),
          :ok <- book_shape(body),
          :ok <- readable_book_side(body["bids"]),
@@ -631,6 +641,27 @@ defmodule DpExchange.Gemini.Rest do
          observed_at: DateTime.utc_now(),
          provider: :gemini
        }}
+    end
+  end
+
+  @doc """
+  Whether `opts[:depth]` is a value `get_order_book/2` can send, checked without sending
+  anything: a whole number of levels, `0` included (the vendor's prose: "May be 0 to return the
+  full order book on this side"), or absent. Anything else is
+  `{:error, {:invalid_option, :depth, value}}`.
+
+  The value went into the query string as given, so `depth: "ten"` was a venue 400 read as a
+  refusal, `depth: -1` asked the venue for a count it never describes, and a map raised in
+  `URI.encode_query/1` in the caller's process. (The vendor's schema says `minimum: 1` beside
+  its prose that `0` is allowed; which is true is unmeasured, and `0` is passed through rather
+  than refused on a guess.) Exposed so `DpExchange.Gemini.Fake` refuses with this function.
+  """
+  @spec validate_book_opts(keyword()) :: :ok | {:error, {:invalid_option, :depth, term()}}
+  def validate_book_opts(opts) do
+    case Config.opt(opts, :depth, nil) do
+      nil -> :ok
+      depth when is_integer(depth) and depth >= 0 -> :ok
+      other -> {:error, {:invalid_option, :depth, other}}
     end
   end
 

@@ -169,8 +169,10 @@ defmodule DpExchange.Gemini.Feed do
   that `Socket.start_link/1` passed **no opts at all**, so it inherited those defaults by
   accident rather than choosing them — and 6_000 + 5_000 = 11_000ms of connect, plus one
   `send_frame` for the subscribe that follows connecting (up to `@frame_window_ms`,
-  5_000ms), is 16_000ms against this module's own 15_000ms `@call_timeout`: already over
-  budget before any other overhead in that call is counted.
+  5_000ms), is 16_000ms against the 15_000ms `@call_timeout` this module had then: already
+  over budget before any other overhead in that call is counted. (`@call_timeout` is 25_000ms
+  now, sized for the two frames a `:trades` feed sends; see `@frame_window_ms`. The 3_000 +
+  2_000 + one frame below, and the second frame with `:trades` on, are 15_000ms of it.)
 
   `Socket.start_link/1` now sets `:socket_connect_timeout` and `:socket_recv_timeout`
   explicitly, chosen against that same budget rather than left to `websockex`'s general-
@@ -179,8 +181,10 @@ defmodule DpExchange.Gemini.Feed do
   call's own overhead. Both remain overridable through the `opts` `Socket.start_link/1`
   already accepts, for a deployment whose real connect time needs more room than this
   package's own budget assumed — `Feed.start_link/1`'s own `opts` forward
-  `:socket_connect_timeout` and `:socket_recv_timeout` straight through, alongside `:url`
-  and `:environment`.
+  `:socket_connect_timeout` and `:socket_recv_timeout` straight through, alongside `:url`,
+  `:environment` and `:ssl_options`. The last replaces the verified-TLS defaults entirely
+  (`Socket.connect_opts/1`); `usage-rules.md` told a consumer to pass it, and until it was
+  forwarded here there was no way to, since a consumer never calls `Socket.start_link/1`.
 
   ## `channels:` — opt into the trade tape; the default is unchanged
 
@@ -484,7 +488,8 @@ defmodule DpExchange.Gemini.Feed do
            :url,
            :environment,
            :socket_connect_timeout,
-           :socket_recv_timeout
+           :socket_recv_timeout,
+           :ssl_options
          ]),
        # See the moduledoc's "`channels:`" section. Read once, here, already validated —
        # every place that decides which `Socket` channels to carry (`active_channels/1`)

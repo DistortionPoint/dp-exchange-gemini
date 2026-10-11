@@ -250,57 +250,63 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def get_order_book(symbol, _opts \\ []) do
+  def get_order_book(symbol, opts \\ []) do
     symbol = canonical(symbol)
 
     with_injection(symbol, fn ->
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          bid = Decimal.new(price)
-
-          # **Three levels a side, and the depth is load-bearing.** This fake returned one
-          # level each way, and `Core.AdapterContract`'s assertion 25 — the one that exists
-          # to check that bids come back highest-first and asks lowest-first — ran against
-          # it, reached the behaviour, and passed. It could not have done anything else: a
-          # list of one is sorted under every comparator, so there was no edit to this
-          # function that could have made that assertion fail. Adding a second, deliberately
-          # misordered level turned the suite red immediately (48 tests, 1 failure), which
-          # is how the inertness was measured rather than argued.
-          #
-          # Core now refuses a book this thin, so this cannot silently go back to one level.
-          # Keeping the ladder here as well, rather than relying only on that refusal, is
-          # the point: the fixture is what gives the assertion something to be wrong about.
-          {:ok,
-           %Types.OrderBook{
-             symbol: symbol,
-             bids: [
-               {bid, Decimal.new("0.0031")},
-               {Decimal.sub(bid, Decimal.new("0.01")), Decimal.new("0.0140")},
-               {Decimal.sub(bid, Decimal.new("0.02")), Decimal.new("0.2500")}
-             ],
-             asks: [
-               {Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")},
-               {Decimal.add(bid, Decimal.new("0.02")), Decimal.new("0.0910")},
-               {Decimal.add(bid, Decimal.new("0.03")), Decimal.new("0.3300")}
-             ],
-             # `nil`, not `@at` — `Rest.get_order_book/2` never has a real time to report
-             # here: the venue's own schema marks the only field this endpoint carries a
-             # "timestamp" — `OrderBookEntry.timestamp` — a dummy value, "DO NOT USE". A
-             # fake reporting a real `venue_time` would be more capable than the endpoint
-             # it fakes, which this family's parity rule ("less capable is allowed;
-             # differently capable is not") refuses exactly as much as the reverse.
-             venue_time: nil,
-             observed_at: @at,
-             provider: :gemini
-           }}
-
-        :error ->
-          # `Rest.get_order_book/2`'s own test pins `/v1/book/{symbol}` to a JSON
-          # `InvalidSymbol` refusal for an unlisted symbol, not the invented `:not_listed`
-          # this used to answer — found in the parity sweep.
-          {:refused, :invalid_symbol}
-      end
+      # The depth is checked by the real call's own function, before the symbol: the venue is
+      # never asked, so it never gets to refuse the symbol.
+      with :ok <- Rest.validate_book_opts(opts), do: fake_order_book(symbol)
     end)
+  end
+
+  defp fake_order_book(symbol) do
+    case Map.fetch(@price, symbol) do
+      {:ok, price} ->
+        bid = Decimal.new(price)
+
+        # **Three levels a side, and the depth is load-bearing.** This fake returned one
+        # level each way, and `Core.AdapterContract`'s assertion 25 — the one that exists
+        # to check that bids come back highest-first and asks lowest-first — ran against
+        # it, reached the behaviour, and passed. It could not have done anything else: a
+        # list of one is sorted under every comparator, so there was no edit to this
+        # function that could have made that assertion fail. Adding a second, deliberately
+        # misordered level turned the suite red immediately (48 tests, 1 failure), which
+        # is how the inertness was measured rather than argued.
+        #
+        # Core now refuses a book this thin, so this cannot silently go back to one level.
+        # Keeping the ladder here as well, rather than relying only on that refusal, is
+        # the point: the fixture is what gives the assertion something to be wrong about.
+        {:ok,
+         %Types.OrderBook{
+           symbol: symbol,
+           bids: [
+             {bid, Decimal.new("0.0031")},
+             {Decimal.sub(bid, Decimal.new("0.01")), Decimal.new("0.0140")},
+             {Decimal.sub(bid, Decimal.new("0.02")), Decimal.new("0.2500")}
+           ],
+           asks: [
+             {Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")},
+             {Decimal.add(bid, Decimal.new("0.02")), Decimal.new("0.0910")},
+             {Decimal.add(bid, Decimal.new("0.03")), Decimal.new("0.3300")}
+           ],
+           # `nil`, not `@at` — `Rest.get_order_book/2` never has a real time to report
+           # here: the venue's own schema marks the only field this endpoint carries a
+           # "timestamp" — `OrderBookEntry.timestamp` — a dummy value, "DO NOT USE". A
+           # fake reporting a real `venue_time` would be more capable than the endpoint
+           # it fakes, which this family's parity rule ("less capable is allowed;
+           # differently capable is not") refuses exactly as much as the reverse.
+           venue_time: nil,
+           observed_at: @at,
+           provider: :gemini
+         }}
+
+      :error ->
+        # `Rest.get_order_book/2`'s own test pins `/v1/book/{symbol}` to a JSON
+        # `InvalidSymbol` refusal for an unlisted symbol, not the invented `:not_listed`
+        # this used to answer — found in the parity sweep.
+        {:refused, :invalid_symbol}
+    end
   end
 
   @impl true
@@ -579,7 +585,9 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_fees(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts) do
+      # The `:symbol` is refused by the real function's own check, before the credential.
+      with {:ok, _params} <- Private.fees_params(opts),
+           :ok <- authenticated(credentials, opts) do
         {:ok, %{"api_maker_fee_bps" => 10, "api_taker_fee_bps" => 35}}
       end
     end)
@@ -748,7 +756,7 @@ defmodule DpExchange.Gemini.Fake do
     if FakeInjection.credentials_bypassed?(:gemini) do
       :ok
     else
-      scheme = Config.opt(opts, :auth_scheme, resolve_scheme(credentials))
+      scheme = Config.opt(opts, :auth_scheme, Private.credential_scheme(credentials))
       authenticated_venue_faithful(scheme, credentials)
     end
   end
@@ -768,17 +776,25 @@ defmodule DpExchange.Gemini.Fake do
 
   defp account_named(_credentials, _opts), do: :ok
 
-  # The same auto-detection `Private`'s private `auth_scheme/2` runs when the caller
-  # named no scheme explicitly. Both fields present is the venue's own
+  # The scheme is `Private.credential_scheme/1`, the function `Private`'s own `auth_scheme/2`
+  # runs when the caller named no scheme explicitly. Both fields present is the venue's own
   # `AmbiguousAuthentication` (400) waiting to happen, caught here before either header
   # family is built rather than sent and rejected.
-  defp resolve_scheme(%{api_key: _key, access_token: _token}), do: :ambiguous
-  defp resolve_scheme(%{api_key: _key}), do: :api_key
-  defp resolve_scheme(%{access_token: _token}), do: :oauth
-  defp resolve_scheme(_other), do: nil
+  #
+  # **A blank or non-string credential is refused here as `Auth.headers/5` refuses it**
+  # (`{:missing_credentials, scheme}`). The `:api_key` clause accepted any value for the pair,
+  # `nil` and `""` included, so a consumer's tier-1 test passed with an unset `.env` variable
+  # (`GEMINI_SECRET=` is `""`) that the real call refuses before it signs.
+  defp authenticated_venue_faithful(:api_key, %{api_key: key, api_secret: secret})
+       when is_binary(key) and is_binary(secret) do
+    if String.trim(key) == "" or String.trim(secret) == "",
+      do: {:error, {:missing_credentials, :api_key}},
+      else: :ok
+  end
 
-  defp authenticated_venue_faithful(:api_key, %{api_key: _key, api_secret: _secret}), do: :ok
-  defp authenticated_venue_faithful(:oauth, %{access_token: token}) when is_binary(token), do: :ok
+  defp authenticated_venue_faithful(:oauth, %{access_token: token}) when is_binary(token) do
+    if String.trim(token) == "", do: {:error, {:missing_credentials, :oauth}}, else: :ok
+  end
 
   defp authenticated_venue_faithful(scheme, _credentials) when scheme in [:api_key, :oauth] do
     {:error, {:missing_credentials, scheme}}
@@ -1438,12 +1454,7 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
-  defp fake_provider_id(opts) do
-    case Keyword.get(opts, :provider_id) do
-      nil -> {:error, :missing_provider_id}
-      provider_id -> {:ok, provider_id}
-    end
-  end
+  defp fake_provider_id(opts), do: Private.provider_id(opts)
 
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do
@@ -1556,8 +1567,8 @@ defmodule DpExchange.Gemini.Fake do
   def get_deposit_address(asset, network, opts \\ []) do
     with_injection(fn ->
       # The network first, as `Private.get_deposit_address/4` builds its path from it before it
-      # signs anything.
-      with :ok <- Private.validate_deposit_network(network),
+      # signs anything, then the asset it names the address for.
+      with :ok <- Private.validate_deposit_request(asset, network),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.DepositAddress{
@@ -1652,12 +1663,14 @@ defmodule DpExchange.Gemini.Fake do
       with :ok <- Private.validate_memo(memo, Keyword.get(opts, :memo_required, false)),
            :ok <- Private.validate_withdrawal(asset, network, amount, address),
            {:ok, wire_amount} <- Private.validate_amount(amount, :amount),
+           {:ok, supplied_id} <-
+             Private.client_transfer_id(Keyword.get(opts, :client_transfer_id)),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.Withdrawal{
            # The idempotency key the real package always sends, echoed so a consumer can
            # assert its own was used. A blank one is no key there, and is none here.
-           id: fake_transfer_id(Keyword.get(opts, :client_transfer_id)),
+           id: supplied_id || "fake-transfer-1",
            # **`:pending`, never `:completed`.** The venue accepting a withdrawal is not the
            # chain confirming it, and a fake that reported completion would teach a consumer
            # the money has arrived.
@@ -1745,6 +1758,8 @@ defmodule DpExchange.Gemini.Fake do
           # The asset and amount are checked by the function the real call uses, after the
           # two account names and before the credential, as there.
           with {:ok, _currency, wire_amount} <- Private.validate_internal_transfer(asset, amount),
+               {:ok, _supplied_id} <-
+                 Private.client_transfer_id(Keyword.get(transfer_opts, :client_transfer_id)),
                :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
             {:ok,
              %{
@@ -1881,12 +1896,6 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
 
-  defp fake_transfer_id(supplied) when is_binary(supplied) do
-    if String.trim(supplied) == "", do: "fake-transfer-1", else: supplied
-  end
-
-  defp fake_transfer_id(_absent), do: "fake-transfer-1"
-
   defp fake_withdrawal_memo(memo) when is_integer(memo), do: Integer.to_string(memo)
 
   defp fake_withdrawal_memo(memo) when is_binary(memo) do
@@ -1937,20 +1946,17 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def create_account(opts \\ []) do
     with_injection(fn ->
-      case Keyword.get(opts, :name) do
-        name when is_binary(name) ->
-          with :ok <- authenticated_group(fake_credentials(opts), opts) do
-            # The venue answers with a kebab-cased shortname, not the name that was sent —
-            # a fake that echoed the name would let a consumer address the wrong thing.
-            {:ok,
-             %{
-               "account" => name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-"),
-               "type" => Config.opt(opts, :type, "exchange")
-             }}
-          end
-
-        _missing ->
-          {:error, :name_required}
+      # The name and type are checked by the real call's own function, before the credential.
+      with {:ok, params} <- Private.create_account_params(Keyword.get(opts, :name), opts),
+           :ok <- authenticated_group(fake_credentials(opts), opts) do
+        # The venue answers with a kebab-cased shortname, not the name that was sent —
+        # a fake that echoed the name would let a consumer address the wrong thing.
+        {:ok,
+         %{
+           "account" =>
+             params["name"] |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-"),
+           "type" => Map.get(params, "type", "exchange")
+         }}
       end
     end)
   end
@@ -1966,13 +1972,12 @@ defmodule DpExchange.Gemini.Fake do
       shortname = Keyword.get(opts, :shortname)
 
       # `Private.rename_account/2` refuses a call that would change nothing, before it signs
-      # anything: no new name and no new shortname is `:nothing_to_rename`, not a success.
-      if is_nil(name) and is_nil(shortname) do
-        {:error, :nothing_to_rename}
-      else
-        with :ok <- authenticated(fake_credentials(opts), opts),
-             do: {:ok, renamed(id, name, shortname)}
-      end
+      # anything: no new name and no new shortname is `:nothing_to_rename`, not a success. It
+      # refuses a blank or non-string account, name or shortname the same way, and the fake
+      # asks the same function.
+      with {:ok, _params} <- Private.rename_account_params(opts),
+           :ok <- authenticated(fake_credentials(opts), opts),
+           do: {:ok, renamed(id, name, shortname)}
     end)
   end
 

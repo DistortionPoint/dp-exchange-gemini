@@ -28,7 +28,10 @@ defmodule DpExchange.Gemini.Credentials do
   which is the kind of list that silently stops being complete.
 
   A struct is a map, so nothing downstream changes: `Auth.headers/5` pattern-matches only
-  the keys it needs and keeps working unchanged.
+  the keys it needs and keeps working unchanged. The scheme a call infers when the host names
+  none is `DpExchange.Gemini.Private.credential_scheme/1`, which counts only a key whose value
+  is not `nil` — this struct carries all three fields, so a bare key-present test read every
+  wrapped credential as both header families at once and refused it as ambiguous.
 
   ## Both schemes, one struct
 

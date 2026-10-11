@@ -16,16 +16,18 @@ Committed rather than linked, per D13.
 > **`limit_asks`**: "Limit the number of ask (offers to sell) price levels returned.
 > Default is 50. May be 0 to return the full order book on this side."
 
-`Rest.get_order_book/2`'s `depth = Keyword.get(opts, :depth, 50)` is this figure — a
+`Rest.get_order_book/2`'s `depth = Config.opt(opts, :depth, 50)` is this figure — a
 correct, previously uncited default. Found by a family-wide sweep for the
 `@pairs_per_socket`/`@shard_spacing_ms` defect class (`dp_exchange_coinbase`): a value
 that happened to be right, sitting with no citation where one belonged.
 
-Note this package does not currently expose `0` as "the full book" to a caller passing
-`depth: 0` — `Keyword.get/3` only supplies the default when the key is absent, so a
-caller who explicitly asks for `depth: 0` already gets the venue's own full-book
-behaviour; this is stated here for a future reader confirming that, not because anything
-needed to change.
+`Config.opt/3` supplies the default when the key is absent or `nil`, so a caller who
+explicitly asks for `depth: 0` sends `limit_bids=0&limit_asks=0` — the venue's own prose
+for the full book on each side. The vendor's schema (`openapi/rest.yaml`, `limit_bids`)
+says `minimum: 1` beside that prose; which is true is **unmeasured**, and `0` is passed
+through rather than refused on a guess. Any `depth` that is not a whole number (`"ten"`,
+`-1`, `1.5`) is `{:error, {:invalid_option, :depth, value}}` before a request is made
+(`Rest.validate_book_opts/1`).
 
 ## The per-level `timestamp` is a documented dummy value
 

@@ -148,7 +148,9 @@ resolution will fail, so resolve to 0.5.1.
 default is not to (`verify: :verify_none`), and until then this package connected with
 that default, accepting any certificate. It now uses the operating system's trust store and
 HTTPS hostname rules. On a host with no system CA bundle the connection fails with a TLS
-error rather than connecting unverified. Pass your own `:ssl_options` to override.
+error rather than connecting unverified. Pass your own `:ssl_options` where you start the
+tree to replace the defaults entirely — `{DpExchange.Gemini, ssl_options: [...]}`, which
+`Feed` forwards to every socket it dials (it did not before; the option was dropped).
 
 ## A socket crash costs one reconnect, never your whole subscription
 
@@ -586,6 +588,12 @@ vendor moved the parameter onto the authenticated `/v1/notionalvolume`. `list_fe
 is still declared `:experimental` rather than `:unsupported`, because a path missing from a
 document is not a refusal the venue made and this repository cannot probe it to find out.
 
+**A credential wrapped with `DpExchange.Gemini.Credentials.wrap/1` is the scheme of the values
+it holds.** The struct always carries `api_key`, `api_secret` and `access_token`; only a
+non-`nil` value counts, so a wrapped API-key pair is `:api_key` and not "both". (It used to be
+refused as `{:unsupported_auth_scheme, :ambiguous}`.) `DpExchange.Gemini.Fake` refuses a blank
+credential the same way the real call does.
+
 **A blank credential counts as a missing one.** An `:api_key`, `:api_secret` or OAuth
 `:access_token` that is `""`, or only whitespace, is refused with
 `{:error, {:missing_credentials, scheme}}` — it is never signed with. This matters because
@@ -728,6 +736,22 @@ windows: a `DateTime` or an ISO 8601 string). Anything else — `limit: 0`, `lim
 `since: ~D[2026-01-01]` — is `{:error, {:invalid_option, key, value}}`. A larger limit is
 refused rather than clamped, because the vendor does not say what it does with one.
 `DpExchange.Gemini.Fake` refuses the same values, and narrows its answers by the same options.
+
+**`/v1/orders` (resting orders) takes no filter.** `get_orders/2` without `history: true`
+sends none, so `symbol:` narrows nothing there; filter the result yourself.
+
+**Other option values are checked the same way, before anything is signed**, each
+`{:error, {:invalid_option, key, value}}` unless noted: `get_fees/2`'s `symbol:` (a non-blank
+string), `get_order_book/2`'s `depth:` (a whole number, `0` included), `stake/3` and `unstake/3`'s
+`provider_id:` (a non-blank string), the funding reports' `rows:` (a positive integer), `from:`
+and `to:` (a `Date`, a `DateTime` or an ISO 8601 date string) and `funding_amount_report/2`'s
+symbol (a non-blank string), and `withdraw/5` and `transfer_internal/4`'s `client_transfer_id:`
+(a string; a blank one is none). A `memo:` that is not a string or a non-negative whole number is
+`{:error, {:invalid_memo, memo}}`; a `get_deposit_address/3` asset that is blank or not a string
+is `{:error, {:invalid_asset, asset}}`; a clearing id that is not a non-blank string is
+`{:error, {:invalid_clearing_id, id}}`. The fake answers the same for each. The two payment
+reports (`funding_payment_report/1`, `funding_payment_report_file/1`) take no symbol, so one in a
+shared options list is not sent to them.
 
 ## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
 
@@ -1002,8 +1026,8 @@ and you will size an order against ten and place it against zero.
 the asset is unbonding; treating the return value as settled spends an asset you do not have
 yet.
 
-`provider_id` is **required** on `stake/3` and `unstake/3`. The same asset stakes with
-several providers at different rates, and this package will not pick one for you.
+`provider_id` is **required** on `stake/3` and `unstake/3`, as a non-blank string. The same asset
+stakes with several providers at different rates, and this package will not pick one for you.
 
 **`get_staking_rewards/1` returns one `StakingReward` per rate period, not per currency.**
 `POST /v1/staking/rewards` answers an object keyed by provider, then by currency, each
@@ -1054,7 +1078,8 @@ present the already-rotated token and lose the new pair. If it returns `{:error,
 outcome is unknown — try the refresh token you hold, and if the venue refuses it, the
 session needs a new consent.
 
-A blank client id or refresh token is refused before anything is sent
+A blank client id or refresh token, or one that is not a string at all (a `nil` from an unset
+variable), is refused before anything is sent
 (`{:error, :client_id_required}`, `{:error, :refresh_token_required}`). The shape of a
 successful reply is **unmeasured**: the vendor's OpenAPI document does not describe
 `/auth/token`, so the decoded body is returned as the venue sent it and is not checked for an

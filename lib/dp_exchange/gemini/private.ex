@@ -164,20 +164,43 @@ defmodule DpExchange.Gemini.Private do
 
   **Read from the specification, not probed.** This repository holds no Gemini credentials
   and tier-3 tests are not run here, so what is claimed is exactly what the vendor's document
-  says and no more. Passing no `:symbol` sends the same empty payload it always did.
+  says and no more. Passing no `:symbol` sends the same empty payload it always did. A
+  `:symbol` that is not a non-blank string is `{:error, {:invalid_option, :symbol, value}}`
+  (`fees_params/1`), not dropped.
   """
   @spec get_fees(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_fees(credentials, opts) do
-    params =
-      case Config.opt(opts, :symbol, nil) do
-        symbol when is_binary(symbol) -> %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
-        _absent -> %{}
-      end
-
     # The vendor's 200 is one `NotionalVolume` object. A `null`, string or list is not a fee
     # schedule, and handing it back inside `{:ok, _}` is a fee tier nobody stated.
-    with {:ok, body, _headers} <- post("/v1/notionalvolume", params, credentials, opts) do
+    with {:ok, params} <- fees_params(opts),
+         {:ok, body, _headers} <- post("/v1/notionalvolume", params, credentials, opts) do
       Rest.object(body)
+    end
+  end
+
+  @doc """
+  The payload `get_fees/2` signs for `opts`, or the refusal for a `:symbol` it cannot send.
+
+  An absent (or `nil`) `:symbol` is the empty payload. A symbol is a non-blank string, else
+  `{:error, {:invalid_option, :symbol, value}}`. A symbol that was not a string used to be
+  dropped silently, so `symbol: :btcusd` answered with the account's general schedule where the
+  caller had asked for the promotion or schedule on one pair: a plausible fee tier for the wrong
+  question. Exposed so `DpExchange.Gemini.Fake` refuses with this function, before the
+  credential.
+  """
+  @spec fees_params(keyword()) :: {:ok, map()} | {:error, {:invalid_option, :symbol, term()}}
+  def fees_params(opts) do
+    case Config.opt(opts, :symbol, nil) do
+      nil ->
+        {:ok, %{}}
+
+      symbol when is_binary(symbol) ->
+        if String.trim(symbol) == "",
+          do: invalid_option(:symbol, symbol),
+          else: {:ok, %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}}
+
+      other ->
+        invalid_option(:symbol, other)
     end
   end
 
@@ -531,6 +554,10 @@ defmodule DpExchange.Gemini.Private do
   and a `since:` `DateTime`. The venue's own default applies where the caller gives none —
   this does not substitute one of its own, because a page size chosen here would silently
   become the caller's answer.
+
+  **`/v1/orders` takes no filter.** `:symbol`, `:limit` and `:since` narrow the history read
+  only; on the default (resting) read the endpoint documents none, so none is sent and every
+  resting order comes back. A caller wanting one symbol's resting orders filters the result.
   """
   @spec get_orders(map(), keyword()) ::
           {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}
@@ -998,15 +1025,39 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp auth_scheme(credentials, opts) do
-    Keyword.get_lazy(opts, :auth_scheme, fn ->
-      case credentials do
-        %{api_key: _key, access_token: _token} -> :ambiguous
-        %{api_key: _key} -> :api_key
-        %{access_token: _token} -> :oauth
-        _other -> nil
-      end
-    end)
+    Keyword.get_lazy(opts, :auth_scheme, fn -> credential_scheme(credentials) end)
   end
+
+  @doc """
+  The authentication scheme the credentials the host supplied imply, when it named none:
+  `:ambiguous` for both a key and a token, `:api_key`, `:oauth`, or `nil` for neither.
+
+  **A key whose value is `nil` is not supplied.** `DpExchange.Gemini.Credentials.wrap/1` — which
+  its own doc makes public for a host that builds its child spec itself — returns a struct that
+  always carries all three fields, so `%{api_key: k, api_secret: s}` became
+  `%Credentials{api_key: k, api_secret: s, access_token: nil}`, and a bare `%{api_key: _,
+  access_token: _}` pattern read that as both families at once: every call made with a wrapped
+  credential was `{:error, {:unsupported_auth_scheme, :ambiguous}}`. Only a non-`nil` value counts
+  towards the ambiguity. A map that names a key with a `nil` value and nothing else is still the
+  scheme of that key, so `Auth.headers/5` answers `{:missing_credentials, scheme}` for it as it
+  always did.
+
+  Exposed so `DpExchange.Gemini.Fake` resolves the scheme with this function.
+  """
+  @spec credential_scheme(term()) :: :ambiguous | :api_key | :oauth | nil
+  def credential_scheme(credentials) do
+    case credentials do
+      %{api_key: key, access_token: token} -> both_named(key, token)
+      %{api_key: _key} -> :api_key
+      %{access_token: _token} -> :oauth
+      _other -> nil
+    end
+  end
+
+  # Both keys present (always, for a `Credentials` struct): only non-`nil` values count.
+  defp both_named(_key, nil), do: :api_key
+  defp both_named(nil, _token), do: :oauth
+  defp both_named(_key, _token), do: :ambiguous
 
   defp base_url(opts) do
     Keyword.get_lazy(opts, :base_url, fn ->
@@ -1619,6 +1670,13 @@ defmodule DpExchange.Gemini.Private do
   defp fee_currency(currency) when is_binary(currency), do: currency
   defp fee_currency(_absent_or_unreadable), do: nil
 
+  # A free-text field the contract types `String.t() | nil` (a memo, a label). A whole number is
+  # the same digits as a string (a destination tag arrives either way); a map, list or boolean
+  # is no text, and `nil` says the venue gave none rather than carrying it into a string field.
+  defp text_or_nil(text) when is_binary(text), do: text
+  defp text_or_nil(number) when is_integer(number), do: Integer.to_string(number)
+  defp text_or_nil(_absent_or_unreadable), do: nil
+
   defp liquidity(true), do: :taker
   defp liquidity(false), do: :maker
   defp liquidity(_other), do: nil
@@ -2204,21 +2262,28 @@ defmodule DpExchange.Gemini.Private do
          {:ok, as_of} <- fx_as_of(body["asOf"]) do
       {:ok,
        %FxRate{
-         pair: body["fxPair"] || native,
+         pair: fx_pair_text(body["fxPair"]) || native,
          rate: parsed_rate,
          # The venue's own `asOf`, and only that. The venue may answer for a nearby moment,
          # so the instant asked for is not a stand-in for the one it answered for.
          as_of: as_of,
          # The institution that computed the rate. Named `provider` by the venue and
          # carried as `source` here, because `provider` in this contract means the venue.
-         source: body["provider"],
-         benchmark: body["benchmark"],
+         source: text_or_nil(body["provider"]),
+         benchmark: text_or_nil(body["benchmark"]),
          provider: :gemini
        }}
     end
   end
 
   defp to_fx_rate(_body, _native, _requested_at), do: {:error, :unexpected_response_shape}
+
+  # The venue's own pair when it is a non-blank string, else the pair that was asked for.
+  defp fx_pair_text(pair) when is_binary(pair) do
+    if String.trim(pair) == "", do: nil, else: pair
+  end
+
+  defp fx_pair_text(_other), do: nil
 
   # `Core.Types.FxRate`: `:as_of` is the instant "echoed by the venue", and "a rate without
   # it is a number with no time attached, which is not a rate". This must not fall back to
@@ -2249,8 +2314,9 @@ defmodule DpExchange.Gemini.Private do
   say whether this one does. `false` would be a claim that no memo is needed; `nil` says
   this package does not know, and a caller must check the network before sending.
 
-  A blank or non-string `network` is `{:error, {:invalid_network, network}}`, and a reply
-  whose own `network` differs from the one asked for is
+  A blank or non-string `network` is `{:error, {:invalid_network, network}}`, a blank or
+  non-string `asset` is `{:error, {:invalid_asset, asset}}` (checked after the network), and a
+  reply whose own `network` differs from the one asked for is
   `{:error, {:network_mismatch, requested, returned}}` — an address on another chain is never
   handed back as the requested one.
   """
@@ -2263,6 +2329,7 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("legacy", Keyword.get(opts, :legacy))
 
     with {:ok, network_segment} <- withdrawal_network(network),
+         {:ok, _ticker} <- withdrawal_ticker(asset),
          # Once: every call generates a NEW address, and nothing in the request lets the venue
          # tell a retry from a second ask, so a retried timeout would create an address the
          # caller never saw. See `post_once/4`.
@@ -2288,11 +2355,11 @@ defmodule DpExchange.Gemini.Private do
          asset: asset,
          network: network,
          address: address,
-         memo: body["memo"],
+         memo: text_or_nil(body["memo"]),
          # Not `false`. This endpoint does not say, and `false` would be a claim that no
          # memo is needed — which on Solana or XRP loses the deposit.
          memo_required: nil,
-         label: body["label"],
+         label: text_or_nil(body["label"]),
          created_at: nil,
          provider: :gemini
        }}
@@ -2383,7 +2450,7 @@ defmodule DpExchange.Gemini.Private do
       network: row["network"] || network,
       status: approval_status(row["status"]),
       asset: nil,
-      label: row["label"],
+      label: text_or_nil(row["label"]),
       # The venue publishes `createdAt` and no activation time. `usable?/2` therefore
       # answers `nil` for a pending address rather than guessing when the lock lifts.
       active_from: nil,
@@ -2545,7 +2612,10 @@ defmodule DpExchange.Gemini.Private do
   Before anything is signed, `asset`, `network` and `address` must be non-blank strings
   (`{:error, {:invalid_asset | :invalid_network | :invalid_address, value}}`) and `amount` a
   finite number above zero (`{:error, {:invalid_decimal | :non_positive_amount, :amount,
-  value}}`). A blank `opts[:client_transfer_id]` is treated as none, and one is generated.
+  value}}`). A `:memo` that is not a string or a non-negative whole number is
+  `{:error, {:invalid_memo, memo}}`. A blank `opts[:client_transfer_id]` is treated as none, and
+  one is generated; one that is neither a string nor absent is
+  `{:error, {:invalid_option, :client_transfer_id, value}}`, never replaced by a generated key.
 
   ## Three preconditions the venue states
 
@@ -2566,8 +2636,9 @@ defmodule DpExchange.Gemini.Private do
          {:ok, ticker} <- withdrawal_ticker(asset),
          {:ok, network_segment} <- withdrawal_network(network),
          {:ok, destination} <- withdrawal_address(address),
-         {:ok, wire_amount} <- wire_positive(amount, :amount) do
-      transfer_id = transfer_id(Keyword.get(opts, :client_transfer_id))
+         {:ok, wire_amount} <- wire_positive(amount, :amount),
+         {:ok, supplied_id} <- client_transfer_id(Keyword.get(opts, :client_transfer_id)) do
+      transfer_id = supplied_id || generate_transfer_id()
 
       params =
         %{
@@ -2610,22 +2681,48 @@ defmodule DpExchange.Gemini.Private do
   # `nil`, so `memo: ""` with `memo_required: true` was refused by the real call and accepted
   # by the fake.
   @doc """
-  Whether a withdrawal's memo satisfies `memo_required`: with `true`, a memo that is not blank
-  (an integer tag counts), else `{:error, :memo_required}`. Anything but `true` is `:ok`.
+  Whether a withdrawal's memo can be sent, and satisfies `memo_required`.
+
+  A memo is a string or a whole number (a destination tag), else `{:error, {:invalid_memo,
+  memo}}`: a map, a list or a float went onto the wire as given, as a JSON value the venue's
+  `type: string` field does not take. With `memo_required: true` a memo that is not blank (an
+  integer tag counts) is also needed, else `{:error, :memo_required}`. Anything but `true` is
+  `:ok`.
   """
-  @spec validate_memo(term(), term()) :: :ok | {:error, :memo_required}
-  def validate_memo(memo, true) do
-    if present?(memo), do: :ok, else: {:error, :memo_required}
+  @spec validate_memo(term(), term()) :: :ok | {:error, :memo_required | {:invalid_memo, term()}}
+  def validate_memo(memo, required) do
+    cond do
+      not valid_memo?(memo) -> {:error, {:invalid_memo, memo}}
+      required == true and not present?(memo) -> {:error, :memo_required}
+      true -> :ok
+    end
   end
 
-  def validate_memo(_memo, _required), do: :ok
+  defp valid_memo?(nil), do: true
+  defp valid_memo?(memo) when is_binary(memo), do: true
+  defp valid_memo?(memo), do: is_integer(memo) and memo >= 0
 
-  # A blank `client_transfer_id` is no key: `"" || generate_transfer_id()` kept the empty
-  # string, because it is truthy, and the withdrawal went out with an idempotency key every
-  # other withdrawal shares.
-  defp transfer_id(supplied) do
-    if present?(supplied), do: supplied, else: generate_transfer_id()
+  @doc """
+  The idempotency key a caller supplied for a transfer, or `nil` for none.
+
+  Absent and blank are none (the caller then gets a generated key). A key that is neither is
+  `{:error, {:invalid_option, :client_transfer_id, value}}`: a number or a map was sent as the
+  venue's `clientTransferId`, and a caller who wanted a stable key across a restart was
+  silently given a different one if it was replaced. Exposed so `DpExchange.Gemini.Fake`
+  refuses with this function.
+  """
+  @spec client_transfer_id(term()) ::
+          {:ok, String.t() | nil} | {:error, {:invalid_option, :client_transfer_id, term()}}
+  def client_transfer_id(nil), do: {:ok, nil}
+
+  def client_transfer_id(supplied) when is_binary(supplied) do
+    # A blank `client_transfer_id` is no key: `"" || generate_transfer_id()` kept the empty
+    # string, because it is truthy, and the withdrawal went out with an idempotency key every
+    # other withdrawal shares.
+    if String.trim(supplied) == "", do: {:ok, nil}, else: {:ok, supplied}
   end
+
+  def client_transfer_id(other), do: invalid_option(:client_transfer_id, other)
 
   # `memo` is `type: string` (`/v2/withdraw` request). A destination tag held as an integer
   # is sent as its digits rather than as a JSON number; a blank memo is not sent at all.
@@ -2878,8 +2975,10 @@ defmodule DpExchange.Gemini.Private do
   def transfer_internal(asset, amount, transfer_opts, credentials, opts) do
     with {:ok, from} <- required_opt(transfer_opts, :from),
          {:ok, to} <- required_opt(transfer_opts, :to),
-         {:ok, currency, wire_amount} <- validate_internal_transfer(asset, amount) do
-      transfer_id = transfer_id(Keyword.get(transfer_opts, :client_transfer_id))
+         {:ok, currency, wire_amount} <- validate_internal_transfer(asset, amount),
+         {:ok, supplied_id} <-
+           client_transfer_id(Keyword.get(transfer_opts, :client_transfer_id)) do
+      transfer_id = supplied_id || generate_transfer_id()
 
       params = %{
         "sourceAccount" => from,
@@ -2963,6 +3062,25 @@ defmodule DpExchange.Gemini.Private do
          {:ok, _ticker} <- withdrawal_ticker(asset),
          {:ok, _segment} <- withdrawal_network(network),
          {:ok, _wire_amount} <- wire_positive(amount, :amount) do
+      :ok
+    end
+  end
+
+  @doc """
+  Whether `asset` and `network` are ones `get_deposit_address/4` would accept: non-blank
+  strings, the network first (`{:error, {:invalid_network, value}}`), then the asset
+  (`{:error, {:invalid_asset, value}}`).
+
+  The asset is not in the path, but it is the `asset` of the `DepositAddress` that comes back,
+  and a `nil` one built a struct `DepositAddress` refuses (`asset` is among its enforced keys)
+  around an address the venue really issued. Exposed so `DpExchange.Gemini.Fake` refuses with
+  this function.
+  """
+  @spec validate_deposit_request(term(), term()) ::
+          :ok | {:error, {:invalid_network | :invalid_asset, term()}}
+  def validate_deposit_request(asset, network) do
+    with {:ok, _segment} <- withdrawal_network(network),
+         {:ok, _ticker} <- withdrawal_ticker(asset) do
       :ok
     end
   end
@@ -3617,10 +3735,30 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp required_provider_id(opts) do
+  defp required_provider_id(opts), do: provider_id(opts)
+
+  @doc """
+  The `opts[:provider_id]` a staking write sends, or its refusal.
+
+  Absent is `{:error, :missing_provider_id}`; a value that is not a non-blank string is
+  `{:error, {:invalid_option, :provider_id, value}}`. Anything was signed into the stake or
+  redemption as given, so a map or a number named a provider the venue's `providerId` (a UUID
+  string) cannot be, on the call that moves the funds. Exposed so `DpExchange.Gemini.Fake`
+  refuses with this function, before the credential.
+  """
+  @spec provider_id(keyword()) ::
+          {:ok, String.t()}
+          | {:error, :missing_provider_id | {:invalid_option, :provider_id, term()}}
+  def provider_id(opts) do
     case Keyword.get(opts, :provider_id) do
-      nil -> {:error, :missing_provider_id}
-      provider_id -> {:ok, provider_id}
+      nil ->
+        {:error, :missing_provider_id}
+
+      id when is_binary(id) ->
+        if String.trim(id) == "", do: invalid_option(:provider_id, id), else: {:ok, id}
+
+      other ->
+        invalid_option(:provider_id, other)
     end
   end
 
@@ -4085,7 +4223,10 @@ defmodule DpExchange.Gemini.Private do
   and sends it as the POST's own URL, so the string that is signed and the string the venue
   receives are the same one.
 
-  `opts[:from]` and `opts[:to]` are dates, `opts[:rows]` a count. The venue's own default is
+  `opts[:from]` and `opts[:to]` are dates (a `Date`, a `DateTime` or an ISO 8601 date string),
+  `opts[:rows]` a positive integer; anything else is
+  `{:error, {:invalid_option, key, value}}` before the path is signed. This report takes no
+  symbol, so a shared `opts[:symbol]` is not sent. The venue's own default is
   **8760 rows** — a year of hourly funding — and this package does not send one, because a
   page size chosen here would silently truncate a report the caller asked for in full.
 
@@ -4098,9 +4239,13 @@ defmodule DpExchange.Gemini.Private do
   @spec funding_payment_report(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def funding_payment_report(credentials, opts) do
-    path = report_path("/v1/perpetuals/fundingpaymentreport/records.json", opts)
-
-    with {:ok, body, _headers} <- post(path, %{}, credentials, opts),
+    with :ok <- validate_report_opts(opts, :no_symbol),
+         path =
+           report_path(
+             "/v1/perpetuals/fundingpaymentreport/records.json",
+             Keyword.delete(opts, :symbol)
+           ),
+         {:ok, body, _headers} <- post(path, %{}, credentials, opts),
          {:ok, rows} <- flattened_rows(body),
          :ok <- page_complete(rows, Keyword.get(opts, :rows), @funding_report_rows_default) do
       {:ok, rows}
@@ -4115,19 +4260,20 @@ defmodule DpExchange.Gemini.Private do
   reader and will not grow one: a parsed cell is a number this package chose from a layout
   the venue can change without notice, and the file is what the venue actually issued.
 
-  `symbol` is required by the venue. `opts[:from]` and `opts[:to]` must be given **together
-  or not at all** — the venue makes each mandatory if the other is present, and sending one
-  alone is refused here rather than silently returning a differently-bounded report.
+  `symbol` is required by the venue, so a `nil`, blank or non-string one is
+  `{:error, {:invalid_option, :symbol, symbol}}`. `opts[:from]` and `opts[:to]` must be given
+  **together or not at all** — the venue makes each mandatory if the other is present, and
+  sending one alone is refused here rather than silently returning a differently-bounded
+  report. Their values, and `opts[:rows]`, are checked as `funding_payment_report/2`'s are.
   """
-  @spec funding_amount_report(String.t(), map(), keyword()) ::
+  @spec funding_amount_report(String.t() | term(), map(), keyword()) ::
           {:ok, binary()} | {:error, term()} | {:refused, term()}
   def funding_amount_report(symbol, credentials, opts) do
-    with :ok <- both_dates_or_neither(opts) do
-      path =
-        report_path(
-          "/v1/fundingamountreport/records.xlsx",
-          Keyword.put(opts, :symbol, symbol)
-        )
+    report_opts = Keyword.put(opts, :symbol, symbol)
+
+    with :ok <- both_dates_or_neither(opts),
+         :ok <- validate_report_opts(report_opts, :symbol_required) do
+      path = report_path("/v1/fundingamountreport/records.xlsx", report_opts)
 
       signed_get_raw(path, credentials, opts)
     end
@@ -4144,11 +4290,60 @@ defmodule DpExchange.Gemini.Private do
   @spec funding_payment_report_file(map(), keyword()) ::
           {:ok, binary()} | {:error, term()} | {:refused, term()}
   def funding_payment_report_file(credentials, opts) do
-    with :ok <- both_dates_or_neither(opts) do
-      path = report_path("/v1/perpetuals/fundingpaymentreport/records.xlsx", opts)
+    with :ok <- both_dates_or_neither(opts),
+         :ok <- validate_report_opts(opts, :no_symbol) do
+      path =
+        report_path(
+          "/v1/perpetuals/fundingpaymentreport/records.xlsx",
+          Keyword.delete(opts, :symbol)
+        )
+
       signed_get_raw(path, credentials, opts)
     end
   end
+
+  # **The report queries are checked before they are signed into a path.** `report_path/2` put
+  # each value through `to_string/1`, which raised in the caller on a map or a tuple, wrote
+  # `numRows=abc` or `numRows=-5` for a bad row count, and wrote `fromDate=yesterday` for a
+  # date: the signed request then failed at the venue as a parameter problem, or returned a
+  # report for a window nobody named. The dates are the vendor's `format: date`, a row count an
+  # `integer`; the amount report's symbol is required, and a `nil` one left the query without it.
+  #
+  # The two payment reports take no symbol (`rest.yaml:7412`, `:7308`), so a `:symbol` a caller
+  # shares across calls is dropped from their query rather than sent as a parameter the vendor
+  # does not define.
+  defp validate_report_opts(opts, symbol) do
+    with :ok <- report_symbol(Keyword.get(opts, :symbol), symbol),
+         :ok <- report_bound(:from, Keyword.get(opts, :from)),
+         :ok <- report_bound(:to, Keyword.get(opts, :to)) do
+      report_rows(Keyword.get(opts, :rows))
+    end
+  end
+
+  defp report_symbol(_ignored, :no_symbol), do: :ok
+
+  defp report_symbol(symbol, :symbol_required) when is_binary(symbol) do
+    if String.trim(symbol) == "", do: invalid_option(:symbol, symbol), else: :ok
+  end
+
+  defp report_symbol(other, :symbol_required), do: invalid_option(:symbol, other)
+
+  defp report_bound(_key, nil), do: :ok
+  defp report_bound(_key, %Date{}), do: :ok
+  defp report_bound(_key, %DateTime{}), do: :ok
+
+  defp report_bound(key, value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, _date} -> :ok
+      {:error, _reason} -> invalid_option(key, value)
+    end
+  end
+
+  defp report_bound(key, other), do: invalid_option(key, other)
+
+  defp report_rows(nil), do: :ok
+  defp report_rows(rows) when is_integer(rows) and rows > 0, do: :ok
+  defp report_rows(other), do: invalid_option(:rows, other)
 
   # The venue: "Mandatory if toDate is specified, else optional", and the same in reverse.
   # One alone comes back bounded by `numRows` instead of by the date the caller gave, which
@@ -4279,8 +4474,12 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # `side` and `type` are read with `to_string/1`, which raises on a map, list or tuple: only
+  # an atom or a string reaches it, and anything else is the same `:missing_order_fields` as a
+  # request with no side.
   defp margin_preview_params(%{symbol: symbol, side: side, type: type} = request)
-       when is_binary(symbol) do
+       when is_binary(symbol) and (is_atom(side) or is_binary(side)) and
+              (is_atom(type) or is_binary(type)) do
     base = %{
       "symbol" => SymbolFormat.to_exchange_symbol(symbol),
       "side" => to_string(side),
@@ -4377,19 +4576,48 @@ defmodule DpExchange.Gemini.Private do
 
   Requires the **Administrator** role.
   """
-  @spec create_account(String.t(), map(), keyword()) ::
+  @spec create_account(String.t() | term(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def create_account(name, credentials, opts) when is_binary(name) do
-    params = put_present(%{"name" => name}, "type", Keyword.get(opts, :type))
-
+  def create_account(name, credentials, opts) do
     # `post_once`. The account NAME is the only thing here a venue could dedupe on, and this
     # package has no evidence it does — Gemini documents no uniqueness constraint on it, and
     # a second subaccount is an artifact only an Administrator can clear up. A caller whose
     # call times out re-issues it deliberately, which is the right way round; guessing that
     # the venue would have refused the duplicate is not.
-    with {:ok, body, _headers} <- post_once("/v1/account/create", params, credentials, opts),
+    with {:ok, params} <- create_account_params(name, opts),
+         {:ok, body, _headers} <- post_once("/v1/account/create", params, credentials, opts),
          do: {:ok, body}
   end
+
+  @doc """
+  The payload `create_account/3` signs, or the refusal for a name or type it cannot send.
+
+  `name` is a non-blank string, else `{:error, :name_required}` — a `nil` (an unset variable)
+  was a `FunctionClauseError` in the caller, and `""` created an account with no name. `:type`
+  is `"exchange"` or `"custody"` (the vendor: "Either `exchange` or `custody` is accepted"), as
+  a string or an atom, or absent; anything else is `{:error, {:invalid_option, :type, value}}`,
+  where it used to be sent as given and left to the venue. Exposed so `DpExchange.Gemini.Fake`
+  refuses with this function, before any credential.
+  """
+  @spec create_account_params(term(), keyword()) ::
+          {:ok, map()} | {:error, :name_required | {:invalid_option, :type, term()}}
+  def create_account_params(name, opts) do
+    with {:ok, name} <- account_name(name),
+         {:ok, type} <- account_type(Config.opt(opts, :type, nil)) do
+      {:ok, put_present(%{"name" => name}, "type", type)}
+    end
+  end
+
+  defp account_name(name) when is_binary(name) do
+    if String.trim(name) == "", do: {:error, :name_required}, else: {:ok, name}
+  end
+
+  defp account_name(_not_a_name), do: {:error, :name_required}
+
+  defp account_type(nil), do: {:ok, nil}
+  defp account_type(type) when type in ["exchange", "custody"], do: {:ok, type}
+  defp account_type(type) when type in [:exchange, :custody], do: {:ok, Atom.to_string(type)}
+  defp account_type(other), do: invalid_option(:type, other)
 
   @doc """
   Renames a subaccount — `POST /v1/account/rename`.
@@ -4406,19 +4634,53 @@ defmodule DpExchange.Gemini.Private do
   """
   @spec rename_account(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def rename_account(credentials, opts) do
-    params =
-      %{}
-      |> put_present("account", Keyword.get(opts, :account))
-      |> put_present("newName", Keyword.get(opts, :name))
-      |> put_present("newAccount", Keyword.get(opts, :shortname))
+    # Once: `account` names the CURRENT shortname, so a rename that took effect and lost its
+    # reply, sent again, finds no such account and reads as a refusal. See `post_once/4`.
+    with {:ok, params} <- rename_account_params(opts),
+         {:ok, body, _headers} <- post_once("/v1/account/rename", params, credentials, opts),
+         do: {:ok, body}
+  end
 
-    if Map.has_key?(params, "newName") or Map.has_key?(params, "newAccount") do
-      # Once: `account` names the CURRENT shortname, so a rename that took effect and lost its
-      # reply, sent again, finds no such account and reads as a refusal. See `post_once/4`.
-      with {:ok, body, _headers} <- post_once("/v1/account/rename", params, credentials, opts),
-           do: {:ok, body}
-    else
-      {:error, :nothing_to_rename}
+  @typedoc "The options `rename_account_params/1` checks."
+  @type rename_key :: :account | :name | :shortname
+
+  @doc """
+  The payload `rename_account/2` signs, or its refusal.
+
+  `:account`, `:name` and `:shortname` are each absent or a non-blank string, else
+  `{:error, {:invalid_option, key, value}}` (a blank new name was sent as a rename to nothing,
+  and a map raised in the JSON encoder's caller). With neither a new name nor a new shortname
+  it is `{:error, :nothing_to_rename}`. Exposed so `DpExchange.Gemini.Fake` refuses with this
+  function, before the credential.
+  """
+  @spec rename_account_params(keyword()) ::
+          {:ok, map()} | {:error, :nothing_to_rename | {:invalid_option, rename_key(), term()}}
+  def rename_account_params(opts) do
+    with {:ok, account} <- rename_text(opts, :account),
+         {:ok, name} <- rename_text(opts, :name),
+         {:ok, shortname} <- rename_text(opts, :shortname) do
+      if is_nil(name) and is_nil(shortname) do
+        {:error, :nothing_to_rename}
+      else
+        {:ok,
+         %{}
+         |> put_present("account", account)
+         |> put_present("newName", name)
+         |> put_present("newAccount", shortname)}
+      end
+    end
+  end
+
+  defp rename_text(opts, key) do
+    case Keyword.get(opts, key) do
+      nil ->
+        {:ok, nil}
+
+      text when is_binary(text) ->
+        if String.trim(text) == "", do: invalid_option(key, text), else: {:ok, text}
+
+      other ->
+        invalid_option(key, other)
     end
   end
 
@@ -4501,16 +4763,36 @@ defmodule DpExchange.Gemini.Private do
   refused refresh is not a reason to discard the stored token. The shape of the success body
   is unmeasured (the vendor spec does not document `/auth/token`), so it is returned as sent.
   """
-  @spec refresh_access_token(String.t(), String.t(), keyword()) ::
+  @spec refresh_access_token(String.t() | term(), String.t() | term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def refresh_access_token(client_id, refresh_token, opts)
-      when is_binary(client_id) and is_binary(refresh_token) do
+  def refresh_access_token(client_id, refresh_token, opts) do
+    # A `nil` (an unset variable) or any other non-string is as absent as a blank one: this was
+    # a `FunctionClauseError` in the caller's process, on the call that keeps a session alive.
     cond do
-      String.trim(client_id) == "" -> {:error, :client_id_required}
-      String.trim(refresh_token) == "" -> {:error, :refresh_token_required}
+      blank_string?(client_id) -> {:error, :client_id_required}
+      blank_string?(refresh_token) -> {:error, :refresh_token_required}
+      not valid_client_secret?(Keyword.get(opts, :client_secret)) -> secret_refusal(opts)
       true -> post_refresh(client_id, refresh_token, opts)
     end
   end
+
+  # The secret is sent only when given, and `client_secret=` with nothing after it is not
+  # "given": a public client must not send one at all. A blank one (an unset `.env` variable) is
+  # left out; a value that is not a string cannot be form-encoded (`URI.encode_query/1` raised)
+  # and is refused, never dropped, because dropping it turns a confidential client's refresh into
+  # a refusal that blames the venue.
+  defp valid_client_secret?(nil), do: true
+  defp valid_client_secret?(secret), do: is_binary(secret)
+
+  defp secret_refusal(opts), do: invalid_option(:client_secret, Keyword.get(opts, :client_secret))
+
+  defp blank_string?(value), do: not is_binary(value) or String.trim(value) == ""
+
+  defp present_secret(secret) when is_binary(secret) do
+    if String.trim(secret) == "", do: nil, else: secret
+  end
+
+  defp present_secret(_absent), do: nil
 
   defp post_refresh(client_id, refresh_token, opts) do
     form =
@@ -4519,7 +4801,7 @@ defmodule DpExchange.Gemini.Private do
         "refresh_token" => refresh_token,
         "grant_type" => "refresh_token"
       }
-      |> put_present("client_secret", Keyword.get(opts, :client_secret))
+      |> put_present("client_secret", present_secret(Keyword.get(opts, :client_secret)))
 
     url = Config.opt(opts, :auth_url, "https://exchange.gemini.com") <> "/auth/token"
     headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
@@ -4666,13 +4948,23 @@ defmodule DpExchange.Gemini.Private do
   the boolean is the fact: an order that is not confirmed has not traded, whatever the
   description says.
   """
-  @spec get_clearing_order(String.t(), map(), keyword()) ::
+  @spec get_clearing_order(String.t() | term(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_clearing_order(clearing_id, credentials, opts) when is_binary(clearing_id) do
-    with {:ok, body, _headers} <-
+  def get_clearing_order(clearing_id, credentials, opts) do
+    with {:ok, clearing_id} <- clearing_id_arg(clearing_id),
+         {:ok, body, _headers} <-
            post("/v1/clearing/status", %{"clearing_id" => clearing_id}, credentials, opts),
          do: {:ok, body}
   end
+
+  # A clearing id is a non-blank string. A `nil`, atom or number was a `FunctionClauseError`
+  # raised in the caller's process on the three calls that act on a clearing order, one of them
+  # the call that executes a trade, and `""` signed `"clearing_id": ""`.
+  defp clearing_id_arg(id) when is_binary(id) do
+    if String.trim(id) == "", do: {:error, {:invalid_clearing_id, id}}, else: {:ok, id}
+  end
+
+  defp clearing_id_arg(other), do: {:error, {:invalid_clearing_id, other}}
 
   @doc """
   Cancels a clearing order — `POST /v1/clearing/cancel`.
@@ -4686,13 +4978,18 @@ defmodule DpExchange.Gemini.Private do
   `{:ok, body}`: a caller matching `{:ok, _}` would have treated an order still standing as
   cancelled. A 200 naming no `result` at all is `{:error, :unexpected_response_shape}`.
   """
-  @spec cancel_clearing_order(String.t(), map(), keyword()) ::
+  @spec cancel_clearing_order(String.t() | term(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def cancel_clearing_order(clearing_id, credentials, opts) when is_binary(clearing_id) do
-    params = %{"clearing_id" => clearing_id}
-
+  def cancel_clearing_order(clearing_id, credentials, opts) do
     # Once: a cancel sent again after it took effect is answered as a cancel that did not.
-    with {:ok, body, _headers} <- post_once("/v1/clearing/cancel", params, credentials, opts) do
+    with {:ok, clearing_id} <- clearing_id_arg(clearing_id),
+         {:ok, body, _headers} <-
+           post_once(
+             "/v1/clearing/cancel",
+             %{"clearing_id" => clearing_id},
+             credentials,
+             opts
+           ) do
       clearing_result(body, "ok")
     end
   end
@@ -4722,11 +5019,11 @@ defmodule DpExchange.Gemini.Private do
   `{:ok, _}` on a call that executes a trade would have recorded a trade that never happened.
   A 200 naming no `result` is `{:error, :unexpected_response_shape}`.
   """
-  @spec confirm_clearing_order(String.t(), map(), map(), keyword()) ::
+  @spec confirm_clearing_order(String.t() | term(), map(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def confirm_clearing_order(clearing_id, request, credentials, opts)
-      when is_binary(clearing_id) do
-    with {:ok, params} <- clearing_order_params(request) do
+  def confirm_clearing_order(clearing_id, request, credentials, opts) do
+    with {:ok, clearing_id} <- clearing_id_arg(clearing_id),
+         {:ok, params} <- clearing_order_params(request) do
       params = Map.put(params, "clearing_id", clearing_id)
 
       # Once, like the create: a confirm that executed and lost its reply, sent again, is

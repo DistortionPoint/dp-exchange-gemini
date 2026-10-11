@@ -1263,13 +1263,9 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def create_account(opts \\ []) do
-    case Keyword.get(opts, :name) do
-      name when is_binary(name) ->
-        Private.create_account(name, credentials(opts), with_limiter(opts))
-
-      _missing ->
-        {:error, :name_required}
-    end
+    # `Private.create_account/3` refuses a missing, blank or non-string name as
+    # `{:error, :name_required}`, before any credential is read.
+    Private.create_account(Keyword.get(opts, :name), credentials(opts), with_limiter(opts))
   end
 
   @doc """

@@ -161,13 +161,14 @@ defmodule DpExchange.Gemini.Socket do
 
   require Logger
 
-  # Chosen against `Feed.@call_timeout` (15s), not inherited from `websockex`'s own
-  # general-purpose defaults (6s connect + 5s recv — measured from
+  # Chosen against `Feed.@call_timeout` (25s: five 5s frame windows), not inherited from
+  # `websockex`'s own general-purpose defaults (6s connect + 5s recv — measured from
   # `deps/websockex/lib/websockex/conn.ex:10-11`, which `start_link/1` used to pass no
   # opts at all and so accepted by accident). `ensure_socket/1` connects synchronously
   # inside a `Feed`/`SandboxFeed` `handle_call`, and one `send_frame` for the subscribe
-  # that follows (`@frame_window_ms`, 5s) rides the same call: 3s + 2s + 5s = 10s, leaving
-  # 5s of `@call_timeout` for everything else in that call. See `Feed`'s moduledoc.
+  # that follows (`@frame_window_ms`, 5s; two with `:trades` on) rides the same call:
+  # 3s + 2s + 5s = 10s (15s with two frames), leaving the rest of `@call_timeout` for
+  # everything else in that call. See `Feed`'s moduledoc.
   @socket_connect_timeout_ms 3_000
   @socket_recv_timeout_ms 2_000
 
