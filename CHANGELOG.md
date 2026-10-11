@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.120] - 2026-10-11
+
 ### Changed (BREAKING)
 
 - **A missing or blank credential answers the venue atom, not the scheme.**
