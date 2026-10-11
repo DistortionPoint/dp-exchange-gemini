@@ -914,6 +914,14 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:error, {:invalid_symbols, [nil]}} = Fake.unsubscribe([nil])
       assert Fake.coverage() == %{}
     end
+
+    test "a subscriber that is neither a pid nor a name is refused, as the real feed refuses it" do
+      assert {:error, {:invalid_subscriber, "consumer"}} =
+               Fake.subscribe(["BTC-USD"], to: "consumer")
+
+      assert {:error, {:invalid_subscriber, true}} = Fake.subscribe_notices(to: true)
+      assert Fake.coverage() == %{}
+    end
   end
 
   describe "the asset direction of list_networks/2 is signed, as the real one is" do

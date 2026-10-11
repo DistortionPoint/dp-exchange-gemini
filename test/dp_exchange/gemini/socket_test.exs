@@ -402,17 +402,53 @@ defmodule DpExchange.Gemini.SocketTest do
       assert_received {:dp_exchange, :gemini, %Notice{kind: :refusal}}
     end
 
-    test "two requests out and one answered keeps the deadline armed" do
-      armed = state() |> awaiting() |> awaiting()
-      deadline = armed.ack_deadline
+    test "each request has its own deadline, so an answer to the first does not leave the " <>
+           "second on the first's clock" do
+      # One deadline used to cover every request outstanding when it was armed. A request sent
+      # 14s into it was closed 1s after it was sent.
+      first = awaiting(state())
+      second = awaiting(first)
+      first_deadline = first.ack_deadline
+      assert second.ack_deadline == first_deadline
 
-      {:ok, half} = Socket.handle_frame({:text, Jason.encode!(@ack)}, armed)
-      assert half.ack_deadline == deadline
+      assert [{^first_deadline, _first_timer}, {second_deadline, _second_timer}] =
+               second.ack_requests
 
-      assert {:close, _state} = Socket.handle_info({:ack_deadline, deadline}, half)
+      assert second_deadline != first_deadline
+
+      {:ok, half} = Socket.handle_frame({:text, Jason.encode!(@ack)}, second)
+      assert half.unanswered_subscribes == 1
+      assert half.ack_deadline == second_deadline
+
+      # The first request's clock running out is not about the second request.
+      assert {:ok, ^half} = Socket.handle_info({:ack_deadline, first_deadline}, half)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+
+      assert {:close, closed} = Socket.handle_info({:ack_deadline, second_deadline}, half)
+      assert closed.ack_requests == []
 
       assert_received {:dp_exchange, :gemini,
                        %Notice{details: %{reason: :subscribe_unanswered, unanswered: 1}}}
+    end
+
+    test "a request whose frame never went out retires the newest, not the oldest" do
+      first = awaiting(state())
+      second = awaiting(first)
+      first_deadline = first.ack_deadline
+      [_oldest, {second_deadline, _second_timer}] = second.ack_requests
+
+      {:ok, withdrawn} = Socket.handle_info(:ack_withdrawn, second)
+
+      assert withdrawn.unanswered_subscribes == 1
+      assert withdrawn.ack_deadline == first_deadline
+      assert {:ok, ^withdrawn} = Socket.handle_info({:ack_deadline, second_deadline}, withdrawn)
+      assert {:close, _state} = Socket.handle_info({:ack_deadline, first_deadline}, withdrawn)
+    end
+
+    test "an answer with nothing outstanding changes nothing" do
+      idle = state()
+      assert {:ok, answered} = Socket.handle_frame({:text, Jason.encode!(@ack)}, idle)
+      assert Map.get(answered, :unanswered_subscribes, 0) == 0
     end
 
     test "a reconnect forgets what the old connection was owed" do

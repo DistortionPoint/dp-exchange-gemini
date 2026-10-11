@@ -30,6 +30,30 @@ defmodule DpExchange.Gemini.FeedTest do
     pid
   end
 
+  # Makes `symbols` wanted without a `subscribe/3`, for tests of the periodic path against a
+  # socket on which `subscribe/3` itself would fail and (rightly) record nothing.
+  defp want(feed, symbols) do
+    :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(symbols)})
+  end
+
+  # Answers a subscribe `:ok` and an unsubscribe `{:error, :send_timeout}`, forwarding every
+  # frame as `{:frame_sent, _}`.
+  defp unsubscribe_fails_socket(report_to) do
+    spawn_link(fn -> unsubscribe_fails_frames(report_to) end)
+  end
+
+  defp unsubscribe_fails_frames(report_to) do
+    receive do
+      {:"$websockex_send", from, {:text, frame}} ->
+        decoded = Jason.decode!(frame)
+        send(report_to, {:frame_sent, decoded})
+
+        reply = if decoded["method"] == "unsubscribe", do: {:error, :send_timeout}, else: :ok
+        :gen.reply(from, reply)
+        unsubscribe_fails_frames(report_to)
+    end
+  end
+
   # A stand-in socket whose `Socket.subscribe/2` result is controlled from the test —
   # `fake_socket/1` above always answers `:ok`, which cannot exercise the resubscribe
   # failure-latch path. Every send is still forwarded to `report_to` as `{:frame_sent,
@@ -728,10 +752,10 @@ defmodule DpExchange.Gemini.FeedTest do
       feed = start_feed(socket: socket)
       :ok = Feed.subscribe_notices(feed, to: self())
 
-      # The initial subscribe also fails against this socket — irrelevant here, since the
-      # resubscribe latch is only ever touched by the periodic path, not by `subscribe/3`.
-      Feed.subscribe(feed, ["BTC-USD"], to: self())
-      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      # A failed `subscribe/3` records nothing, so the wanted set the periodic path re-issues
+      # is seeded directly. The resubscribe latch is only ever touched by the periodic path,
+      # not by `subscribe/3`.
+      want(feed, ["BTC-USD"])
 
       send(feed, :resubscribe)
 
@@ -756,14 +780,14 @@ defmodule DpExchange.Gemini.FeedTest do
     end
 
     test "a resubscribe that recovers after a latched failure emits an info notice, once" do
-      # Fails the initial subscribe and the first resubscribe, then succeeds forever
-      # after — the shape a real busy-then-recovered socket takes.
-      socket = flaky_socket(self(), 2)
+      # Fails the first resubscribe, then succeeds forever after — the shape a real
+      # busy-then-recovered socket takes. The wanted set is seeded: a failed `subscribe/3`
+      # records nothing.
+      socket = flaky_socket(self(), 1)
       feed = start_feed(socket: socket)
       :ok = Feed.subscribe_notices(feed, to: self())
 
-      Feed.subscribe(feed, ["BTC-USD"], to: self())
-      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      want(feed, ["BTC-USD"])
 
       send(feed, :resubscribe)
 
@@ -1188,10 +1212,10 @@ defmodule DpExchange.Gemini.FeedTest do
     test "a wire unsubscribe that failed is retried on the next tick" do
       # It was forgotten: `wanted` narrowed, and the venue kept streaming the symbol to this
       # connection until it next reconnected.
-      socket = always_fails_socket(self())
+      socket = unsubscribe_fails_socket(self())
       feed = start_feed(socket: socket)
 
-      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
       assert_receive {:frame_sent, %{"method" => "subscribe"}}
 
       assert {:error, :send_timeout} = Feed.unsubscribe(feed, ["BTC-USD"])
@@ -1206,14 +1230,14 @@ defmodule DpExchange.Gemini.FeedTest do
     end
 
     test "a symbol wanted again is not unsubscribed by an old retry" do
-      socket = always_fails_socket(self())
+      socket = unsubscribe_fails_socket(self())
       feed = start_feed(socket: socket)
 
-      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
       assert_receive {:frame_sent, %{"method" => "subscribe"}}
-      Feed.unsubscribe(feed, ["BTC-USD"])
+      {:error, :send_timeout} = Feed.unsubscribe(feed, ["BTC-USD"])
       assert_receive {:frame_sent, %{"method" => "unsubscribe"}}
-      Feed.subscribe(feed, ["BTC-USD"], to: self())
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
       assert_receive {:frame_sent, %{"method" => "subscribe"}}
 
       send(feed, :resubscribe)
@@ -1248,6 +1272,214 @@ defmodule DpExchange.Gemini.FeedTest do
     test "canonical_symbols/1 spells every pair one way, once" do
       assert {:ok, ["BTC-USD", "SOL-RLUSD"]} =
                Feed.canonical_symbols(["btcusd", "BTC-USD", "SOLRLUSD"])
+    end
+  end
+
+  describe "an {:error, _} from subscribe or update_symbols means nothing was recorded" do
+    # The intent used to be recorded first and kept on failure, to be dialled and sent on the
+    # next resubscribe tick. A caller told "error" gave up on the symbols and then received
+    # them from a connection and a registration it had been told did not exist.
+    test "a connect that fails leaves no subscriber, no wanted symbol and no monitor" do
+      {:ok, feed} =
+        Feed.start_link(
+          name: :"badsock_#{System.unique_integer([:positive])}",
+          url: "wss://127.0.0.1:1/nowhere"
+        )
+
+      assert {:error, _reason} = Feed.subscribe(feed, ["BTC-USD"], to: self())
+
+      state = :sys.get_state(feed)
+      assert state.wanted == MapSet.new()
+      assert state.subscribers == MapSet.new()
+      assert state.monitors == %{}
+    end
+
+    test "a failed send takes back the new symbols, keeps the old, and queues an unsubscribe" do
+      feed = start_feed(socket: always_fails_socket(self()))
+      me = self()
+      seed = &%{&1 | wanted: MapSet.new(["ETH-USD"]), subscribers: MapSet.new([me])}
+      :sys.replace_state(feed, seed)
+
+      assert {:error, :send_timeout} = Feed.subscribe(feed, ["ETH-USD", "BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      state = :sys.get_state(feed)
+      assert state.wanted == MapSet.new(["ETH-USD"])
+      assert state.subscribers == MapSet.new([self()])
+      assert state.unsubscribe_pending == MapSet.new(["BTC-USD"])
+    end
+
+    test "a failed subscribe's frame is unsubscribed on the next tick, not left streaming" do
+      feed = start_feed(socket: always_fails_socket(self()))
+
+      assert {:error, :send_timeout} = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      assert :sys.get_state(feed).subscribers == MapSet.new()
+
+      send(feed, :resubscribe)
+
+      assert_receive {:frame_sent,
+                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
+
+      refute_receive {:frame_sent, %{"method" => "subscribe"}}, 100
+    end
+
+    test "a failed subscribe leaves a notice subscriber's monitor alone" do
+      feed = start_feed(socket: always_fails_socket(self()))
+      :ok = Feed.subscribe_notices(feed, to: self())
+      monitors = :sys.get_state(feed).monitors
+      assert Map.has_key?(monitors, self())
+
+      assert {:error, :send_timeout} = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      assert :sys.get_state(feed).monitors == monitors
+    end
+
+    test "a failed update_symbols restores the wanted set it replaced" do
+      feed = start_feed(socket: always_fails_socket(self()))
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["ETH-USD"])})
+
+      assert {:error, :send_timeout} = Feed.update_symbols(feed, ["BTC-USD"])
+      assert_receive {:frame_sent, %{"method" => "unsubscribe"}}
+
+      state = :sys.get_state(feed)
+      assert state.wanted == MapSet.new(["ETH-USD"])
+      assert state.unsubscribe_pending == MapSet.new(["BTC-USD"])
+    end
+
+    test "a successful subscribe and update_symbols still record" do
+      feed = start_feed()
+      assert :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      assert :ok = Feed.update_symbols(feed, ["ETH-USD"])
+      assert_receive {:frame_sent, %{"method" => "unsubscribe"}}
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+
+      assert :sys.get_state(feed).wanted == MapSet.new(["ETH-USD"])
+    end
+  end
+
+  describe "a subscriber that cannot be sent to is refused in the caller" do
+    test "subscribe/3 and subscribe_notices/2 answer an error and leave the feed alone" do
+      feed = start_feed()
+      monitor = Process.monitor(feed)
+
+      for bad <- ["consumer", {:via, Registry, :x}, true, false, make_ref(), 1] do
+        assert {:error, {:invalid_subscriber, ^bad}} =
+                 Feed.subscribe(feed, ["BTC-USD"], to: bad)
+
+        assert {:error, {:invalid_subscriber, ^bad}} = Feed.subscribe_notices(feed, to: bad)
+      end
+
+      refute_receive {:DOWN, ^monitor, :process, _pid, _reason}, 50
+
+      state = :sys.get_state(feed)
+      assert state.subscribers == MapSet.new()
+      assert state.notice_subscribers == MapSet.new()
+      assert state.wanted == MapSet.new()
+    end
+
+    test "a registered name is a subscriber" do
+      feed = start_feed()
+      assert :ok = Feed.subscribe(feed, ["BTC-USD"], to: :some_registered_consumer)
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      assert :ok = Feed.subscribe_notices(feed, to: :some_registered_consumer)
+    end
+  end
+
+  describe "a notice flood is throttled" do
+    defp bad_frame_notice(symbol) do
+      Notice.new(:data_quality, :gemini,
+        details: %{reason: "unreadable bookTicker level", symbol: symbol}
+      )
+    end
+
+    test "a repeated per-frame notice is forwarded once, and the next window carries the count" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+      notice = bad_frame_notice("BTC-USD")
+
+      for _each <- 1..5, do: send(feed, {:dp_exchange, :gemini, notice})
+      _settled = Feed.coverage(feed)
+
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality} = first}
+      refute Map.has_key?(first.details, :suppressed)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
+
+      # Age the window rather than wait it out.
+      :sys.replace_state(feed, fn state ->
+        aged = Map.new(state.notice_seen, fn {key, {start, n}} -> {key, {start - 31_000, n}} end)
+        %{state | notice_seen: aged}
+      end)
+
+      send(feed, {:dp_exchange, :gemini, notice})
+      _settled = Feed.coverage(feed)
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :data_quality, details: %{suppressed: 4}}}
+
+      refute_received {:dp_exchange, :gemini, %Notice{}}
+    end
+
+    test "a wanted symbol and a different reason are keys of their own" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD", "ETH-USD"])})
+
+      send(feed, {:dp_exchange, :gemini, bad_frame_notice("BTC-USD")})
+      send(feed, {:dp_exchange, :gemini, bad_frame_notice("ETH-USD")})
+
+      send(
+        feed,
+        {:dp_exchange, :gemini,
+         Notice.new(:data_quality, :gemini, details: %{reason: "undecodable trade"})}
+      )
+
+      _settled = Feed.coverage(feed)
+
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{symbol: "BTC-USD"}}}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{symbol: "ETH-USD"}}}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "undecodable trade"}}}
+    end
+
+    test "a symbol this feed does not want shares one key, so the table cannot be grown by it" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      for n <- 1..20, do: send(feed, {:dp_exchange, :gemini, bad_frame_notice("junk#{n}")})
+      _settled = Feed.coverage(feed)
+
+      assert map_size(:sys.get_state(feed).notice_seen) == 1
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
+    end
+
+    test "the table is capped, expired windows first" do
+      feed = start_feed()
+      long_ago = System.monotonic_time(:millisecond) - 120_000
+
+      :sys.replace_state(feed, fn state ->
+        seen = Map.new(1..5_000, fn n -> {{:data_quality, "reason #{n}", nil}, {long_ago, 0}} end)
+        %{state | notice_seen: seen}
+      end)
+
+      send(feed, {:dp_exchange, :gemini, bad_frame_notice("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert map_size(:sys.get_state(feed).notice_seen) == 1
+    end
+
+    test "lifecycle notices are never throttled" do
+      feed = start_feed()
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      for _each <- 1..3, do: send(feed, {:dp_exchange, :gemini, Notice.new(:link_up, :gemini)})
+      _settled = Feed.coverage(feed)
+
+      for _each <- 1..3 do
+        assert_received {:dp_exchange, :gemini, %Notice{kind: :link_up}}
+      end
     end
   end
 end

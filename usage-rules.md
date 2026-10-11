@@ -885,6 +885,30 @@ subscribed on an error. This used to raise inside the shared feed process, which
 and, on its restart from the static options, dropped every other consumer's subscription.
 `DpExchange.Gemini.Fake` answers the same.
 
+## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded
+
+If `subscribe/2` answers `{:error, _}` (the connection could not be dialled, or the frame
+could not be sent) the symbols and your subscriber are not registered, and a frame that may
+have landed is unsubscribed on the next resubscribe tick. Retry if you still want them. A
+failed `update_symbols/2` leaves the previous symbol set in force. Before this, the error was
+returned but the symbols stayed registered and were dialled and sent on the next tick, so a
+caller that gave up on them received them anyway.
+
+`unsubscribe/2` is the other way round on purpose: it stops delivery at once even when the
+wire send fails, answers the error, and retries the wire unsubscribe on the tick.
+
+`to:` must be a pid or a registered name. Anything else (`to: "consumer"`, `to: true`) is
+`{:error, {:invalid_subscriber, value}}` from `subscribe/2` and `subscribe_notices/1`, before
+the shared feed process sees it. `DpExchange.Gemini.Fake` answers the same.
+
+## A repeating notice is forwarded once per 30 seconds
+
+`:data_quality`, `:refusal` and `:degraded` notices that arrive per frame (an unreadable
+bookTicker level, a refused subscribe, a depth gap) are forwarded once per
+`{kind, reason, symbol}` per 30 seconds. The first one after the window carries
+`details.suppressed`, the number it covers. Lifecycle notices (`:link_up`, `:link_down`,
+`:coverage_change`) are never throttled.
+
 ## Two session behaviours this package deliberately leaves to you
 
 - **Requires Heartbeat** is a per-key setting. If enabled and no authenticated request or

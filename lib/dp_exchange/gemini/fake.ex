@@ -755,7 +755,8 @@ defmodule DpExchange.Gemini.Fake do
   # less careful fake would reach for.
   @impl true
   def subscribe(symbols, opts \\ []) do
-    with {:ok, symbols} <- Feed.canonical_symbols(symbols) do
+    with {:ok, symbols} <- Feed.canonical_symbols(symbols),
+         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
       do_subscribe(symbols, opts)
     end
   end
@@ -901,8 +902,7 @@ defmodule DpExchange.Gemini.Fake do
     # Registers, and sends nothing: the real Feed answers `:ok` and notifies on the next
     # event, so a `:link_up` here was a notice a consumer's test saw that production never
     # sends. Found 2026-10-10.
-    _registered = Config.opt(opts, :to, self())
-    :ok
+    with {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())), do: :ok
   end
 
   @impl true

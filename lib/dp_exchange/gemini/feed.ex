@@ -214,6 +214,46 @@ defmodule DpExchange.Gemini.Feed do
   `[:quotes, :top_of_book, :trades]`) gets an `ArgumentError` from `start_link/1` —
   fail closed, per this family's own rule, rather than starting a feed that silently
   never carries what was asked for.
+
+  ## An `{:error, _}` from `subscribe/3` or `update_symbols/2` means nothing was recorded
+
+  Both used to record the subscriber and the symbols first, then try to connect and send, and
+  answer `{:error, _}` if that failed while leaving the record in place for the next
+  resubscribe tick to dial and send. A caller told "error" reasonably gave up on the symbols
+  (fell back to polling, reported the failure) and then received them anyway, from a
+  connection it had been told did not exist, on a subscriber it had been told was not
+  registered. The intent is now recorded only if the request succeeds. On failure the
+  subscriber (unless already registered) and the new symbols are taken back; because a send
+  that reported failure may have landed (`Socket.subscribe/3`), the new symbols are queued
+  for a wire unsubscribe on the next tick, which skips any symbol wanted again by then. A
+  failed `update_symbols/2` restores the previous wanted set and its delivery records stay
+  narrowed to the requested one, so coverage under-reports for a moment rather than claiming
+  delivery nobody saw. A caller that wants the symbols retries.
+
+  `unsubscribe/2` is deliberately the other way: it narrows `wanted` even when the wire send
+  fails, because "stop delivering these" is safe to apply at once, and the unsubscribe is
+  retried on the tick.
+
+  ## A subscriber that cannot be sent to is refused in the caller
+
+  `to:` must be a pid or a registered name (an atom other than `nil`, `true` or `false`),
+  which is all `Core.Fanout.resolve/1` has a clause for. Anything else used to be stored
+  and raised `FunctionClauseError` inside this shared process on the first payload or notice
+  sent to it. `subscribe/3` and `subscribe_notices/2` answer
+  `{:error, {:invalid_subscriber, term}}` before the call, as bad symbols already answer
+  `{:error, {:invalid_symbols, term}}`.
+
+  ## A notice flood is throttled here
+
+  `Socket` raises a notice per unreadable frame, per refused subscribe and per depth gap, and
+  they were all forwarded. A field that stays malformed arrives at the stream's rate. For the
+  kinds `:data_quality`, `:refusal` and `:degraded`, the first notice per
+  `{kind, reason, symbol}` is forwarded at once and the rest within 30 seconds are counted,
+  with the next one after the window carrying `details.suppressed`. The symbol is part of the
+  key only if it is wanted, and the table is capped, so a venue-supplied string cannot grow
+  it. `:link_up`, `:link_down` and `:coverage_change` are bounded by reconnect backoff and
+  the resubscribe latch, and pass untouched. The data-path `:degraded` notice for a stalled
+  subscriber is sent from `deliver/2`, not here, and already latches.
   """
 
   use GenServer
@@ -253,33 +293,89 @@ defmodule DpExchange.Gemini.Feed do
   # this one has not been tuned against a wide production scope.
   @resubscribe_interval_ms 60_000
 
+  # Notices that arrive once per bad FRAME (`:data_quality`, `:refusal`) or per bad condition
+  # that can repeat at stream rate (`:degraded`) are forwarded at most once per key per
+  # window. See the moduledoc's "A notice flood". Lifecycle notices (`:link_up`,
+  # `:link_down`, `:coverage_change`) are bounded by reconnect backoff and pass untouched.
+  @throttled_notice_kinds [:data_quality, :refusal, :degraded]
+  @notice_window_ms 30_000
+  @max_notice_keys 4_096
+
+  @doc """
+  Starts the feed. See the moduledoc for the options it forwards to `Socket`.
+  """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  @doc """
+  Subscribes `symbols` and registers `opts[:to]` (default: the caller) for their data.
+
+  **`:ok` means it was recorded and the request went out; `{:error, _}` means nothing was
+  recorded.** A failure to connect or to send used to leave the subscriber and the symbols
+  registered anyway, to be dialled and sent on the next resubscribe tick: a caller told
+  "error" reasonably gave up on the symbols and then received them. Now the registration is
+  undone, and a symbol whose frame may have landed is queued for a wire unsubscribe so the
+  venue stops streaming it. A caller that wants the symbols retries.
+
+  Refuses what it cannot hold in the caller, before the shared feed process sees it:
+  `{:error, {:invalid_symbols, term}}` (see `canonical_symbols/1`) and
+  `{:error, {:invalid_subscriber, term}}` for a `:to` that is neither a pid nor a registered
+  name.
+  """
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts) do
-    with {:ok, symbols} <- canonical_symbols(symbols) do
-      GenServer.call(
-        feed,
-        {:subscribe, symbols, Config.opt(opts, :to, self())},
-        @call_timeout
-      )
+    with {:ok, symbols} <- canonical_symbols(symbols),
+         {:ok, subscriber} <- valid_subscriber(Config.opt(opts, :to, self())) do
+      GenServer.call(feed, {:subscribe, symbols, subscriber}, @call_timeout)
     end
   end
 
+  @doc """
+  Stops delivering `symbols` and sends the venue an unsubscribe for them.
+
+  Unlike `subscribe/3`, a failed wire send still narrows what is wanted: the local effect
+  (no more delivery, no coverage) is what the caller asked for and is safe to apply, and the
+  unsubscribe is retried on the next resubscribe tick. The error reports the wire failure.
+  """
   @spec unsubscribe(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
   def unsubscribe(feed, symbols) do
     with {:ok, symbols} <- canonical_symbols(symbols),
          do: GenServer.call(feed, {:unsubscribe, symbols}, @call_timeout)
   end
 
+  @doc """
+  Makes `symbols` the whole wanted set.
+
+  Like `subscribe/3`, `{:error, _}` means the wanted set is unchanged. Symbols that were to
+  be added are queued for a wire unsubscribe in case their frame landed.
+  """
   @spec update_symbols(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
   def update_symbols(feed, symbols) do
     with {:ok, symbols} <- canonical_symbols(symbols),
          do: GenServer.call(feed, {:update_symbols, symbols}, @call_timeout)
   end
+
+  @doc """
+  The subscriber as given if it is a pid or a registered name, or the refusal.
+
+  That is all `Core.Fanout.resolve/1` has a clause for. Anything else (`"consumer"`,
+  `{:via, ...}`, a ref) was accepted and raised `FunctionClauseError` inside this shared
+  process on the first payload or notice sent to it, taking every other consumer's
+  subscription with it. `nil` and booleans are atoms and would resolve to no process: a
+  subscriber that silently receives nothing.
+
+  Exposed so `DpExchange.Gemini.Fake` refuses exactly as the real feed does.
+  """
+  @spec valid_subscriber(term()) ::
+          {:ok, pid() | atom()} | {:error, {:invalid_subscriber, term()}}
+  def valid_subscriber(pid) when is_pid(pid), do: {:ok, pid}
+
+  def valid_subscriber(name) when is_atom(name) and name not in [nil, true, false],
+    do: {:ok, name}
+
+  def valid_subscriber(other), do: {:error, {:invalid_subscriber, other}}
 
   @doc """
   The canonical, de-duplicated spelling this feed holds `symbols` in, or the refusal for a
@@ -328,9 +424,15 @@ defmodule DpExchange.Gemini.Feed do
   # The blocking is fixed at its sources rather than papered over here; this is the second
   # line of defence. A read that has to queue behind something should WAIT for it, never
   # die of it.
+  @doc """
+  Which symbols have delivered, observed and never intended. See the moduledoc.
+  """
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
   def coverage(feed), do: GenServer.call(feed, :coverage, @call_timeout)
 
+  @doc """
+  `coverage/1` split by data kind, always carrying every kind this venue streams.
+  """
   @spec coverage_by_kind(GenServer.server()) :: %{
           Capabilities.data_kind() => %{String.t() => :stream | :internal_poll | :not_covered}
         }
@@ -349,9 +451,17 @@ defmodule DpExchange.Gemini.Feed do
   # A `GenServer.call/3` timeout exits in the CALLER, not in the feed. So the channel a host
   # uses to *hear that something is wrong* was the one call that could kill the host's
   # calling process for asking during exactly the conditions it exists to report.
-  @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
-  def subscribe_notices(feed, opts),
-    do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
+  @doc """
+  Registers `opts[:to]` (default: the caller) for this feed's notices.
+
+  `{:error, {:invalid_subscriber, term}}` for a `:to` that is neither a pid nor a registered
+  name, for the reason `subscribe/3` gives.
+  """
+  @spec subscribe_notices(GenServer.server(), keyword()) :: :ok | {:error, term()}
+  def subscribe_notices(feed, opts) do
+    with {:ok, subscriber} <- valid_subscriber(Config.opt(opts, :to, self())),
+         do: GenServer.call(feed, {:subscribe_notices, subscriber}, @call_timeout)
+  end
 
   # --- server ------------------------------------------------------------
 
@@ -408,6 +518,9 @@ defmodule DpExchange.Gemini.Feed do
        # walked on every message for the life of this feed — see the `:DOWN` clause and
        # `Core.Fanout.watch/2`. A registered-name subscriber never appears here.
        monitors: %{},
+       # `{kind, reason, symbol}` => `{window start, suppressed count}` for the notice kinds in
+       # `@throttled_notice_kinds`. Bounded: see `put_notice_seen/4`.
+       notice_seen: %{},
        # Back-pressure, per `Core.Venue`'s `subscribe/2` doc and implemented by
        # `Core.Fanout`: `dropping` is the set of subscribers currently over their mailbox
        # bound, carried across calls so a stalled consumer produces one `:degraded` notice
@@ -419,20 +532,24 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   @impl true
+  # `{:error, _}` leaves nothing registered — see `subscribe/3`. A failure to connect undoes
+  # the registration. A failure to send undoes it too, keeps the socket this call dialled, and
+  # queues the new symbols for a wire unsubscribe (`settle_subscribe/5`).
   def handle_call({:subscribe, symbols, subscriber}, _from, state) do
-    state = %{
+    registered = %{
       state
       | subscribers: MapSet.put(state.subscribers, subscriber),
         monitors: Fanout.watch(subscriber, state.monitors),
         wanted: MapSet.union(state.wanted, MapSet.new(symbols))
     }
 
-    case ensure_socket(state) do
-      {:ok, state} ->
-        {:reply, when_linked(state, &subscribe_channels(&1, symbols, state)), state}
+    case ensure_socket(registered) do
+      {:ok, connected} ->
+        sent = when_linked(connected, &subscribe_channels(&1, symbols, connected))
+        {:reply, sent, settle_subscribe(sent, connected, state, subscriber, symbols)}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:reply, {:error, reason}, undo_registration(registered, state, subscriber, symbols)}
     end
   end
 
@@ -445,15 +562,24 @@ defmodule DpExchange.Gemini.Feed do
     {:reply, result, state |> drop(symbols) |> unsubscribe_later(result, symbols)}
   end
 
+  # `{:error, _}` leaves the wanted set as it was — see `update_symbols/2`. The delivery
+  # records stay narrowed to the new set: a record is only ever evidence that a frame arrived,
+  # and dropping one for a symbol still wanted costs a reading until its next frame, where
+  # keeping one for a symbol whose stream may have been cut would claim delivery nobody saw.
   def handle_call({:update_symbols, symbols}, _from, state) do
     wanted = MapSet.new(symbols)
     added = state.wanted |> then(&MapSet.difference(wanted, &1)) |> MapSet.to_list()
     removed = wanted |> then(&MapSet.difference(state.wanted, &1)) |> MapSet.to_list()
 
-    state = %{state | wanted: wanted, delivering_by_kind: narrow_delivery(state, symbols)}
-    result = apply_delta(state, added, removed)
+    updated = %{state | wanted: wanted, delivering_by_kind: narrow_delivery(state, symbols)}
 
-    {:reply, result, unsubscribe_later(state, result, removed)}
+    case apply_delta(updated, added, removed) do
+      :ok ->
+        {:reply, :ok, updated}
+
+      {:error, _reason} = error ->
+        {:reply, error, queue_unsubscribe(%{updated | wanted: state.wanted}, added)}
+    end
   end
 
   def handle_call(:coverage, _from, state) do
@@ -529,8 +655,14 @@ defmodule DpExchange.Gemini.Feed do
 
   @impl true
   def handle_info({:dp_exchange, :gemini, %Notice{} = notice}, state) do
-    fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
-    {:noreply, state}
+    case throttle_notice(state, notice) do
+      {:forward, notice, state} ->
+        fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
+        {:noreply, state}
+
+      {:suppress, state} ->
+        {:noreply, state}
+    end
   end
 
   # `track_delivery/2` runs whether or not the payload reached anybody. `coverage/1` reports
@@ -864,6 +996,106 @@ defmodule DpExchange.Gemini.Feed do
       true ->
         %{state | unsubscribe_pending: pending}
     end
+  end
+
+  # **A notice flood.** `Socket` raises one notice per unreadable frame (`data_quality`), per
+  # refused subscribe (`refusal`) and per depth gap or undecodable diff (`degraded`), and this
+  # clause forwarded every one. A venue field that stays malformed arrives at the rate of the
+  # stream, so one bad symbol turned into a notice per frame into every subscriber's mailbox:
+  # the same amplification `Core.Fanout` documents for a stalled consumer. Now the first
+  # notice for a `{kind, reason, symbol}` goes out at once, the rest inside
+  # `@notice_window_ms` are counted, and the next one after the window carries the count in
+  # `details.suppressed`. `symbol` is part of the key only when it is a symbol this feed wants,
+  # so a venue-supplied string cannot grow the table; the table itself is capped
+  # (`put_notice_seen/4`). Other kinds are lifecycle events bounded by reconnect backoff.
+  defp throttle_notice(state, %Notice{kind: kind} = notice)
+       when kind in @throttled_notice_kinds do
+    now = System.monotonic_time(:millisecond)
+    key = notice_key(notice, state.wanted)
+
+    case Map.get(state.notice_seen, key) do
+      {window_start, suppressed} when now - window_start < @notice_window_ms ->
+        {:suppress, put_notice_seen(state, key, {window_start, suppressed + 1}, now)}
+
+      previous ->
+        {:forward, with_suppressed(notice, suppressed_count(previous)),
+         put_notice_seen(state, key, {now, 0}, now)}
+    end
+  end
+
+  defp throttle_notice(state, notice), do: {:forward, notice, state}
+
+  defp notice_key(%Notice{kind: kind, details: details}, wanted) when is_map(details) do
+    symbol = Map.get(details, :symbol)
+    known = if is_binary(symbol) and MapSet.member?(wanted, symbol), do: symbol
+    {kind, Map.get(details, :reason), known}
+  end
+
+  defp notice_key(%Notice{kind: kind}, _wanted), do: {kind, nil, nil}
+
+  defp suppressed_count({_window_start, suppressed}), do: suppressed
+  defp suppressed_count(nil), do: 0
+
+  defp with_suppressed(notice, 0), do: notice
+
+  defp with_suppressed(%Notice{details: details} = notice, suppressed) when is_map(details),
+    do: %{notice | details: Map.put(details, :suppressed, suppressed)}
+
+  defp with_suppressed(notice, _suppressed), do: notice
+
+  defp put_notice_seen(state, key, entry, now) do
+    %{state | notice_seen: state.notice_seen |> Map.put(key, entry) |> bound_notice_seen(now)}
+  end
+
+  # Over the cap, expired windows go; still over, the table starts again. Losing a count is
+  # better than holding a table a hostile or broken stream can grow.
+  defp bound_notice_seen(seen, now) when map_size(seen) > @max_notice_keys do
+    live = Map.reject(seen, fn {_key, {start, _count}} -> now - start >= @notice_window_ms end)
+    if map_size(live) > @max_notice_keys, do: %{}, else: live
+  end
+
+  defp bound_notice_seen(seen, _now), do: seen
+
+  defp settle_subscribe(:ok, connected, _previous, _subscriber, _symbols), do: connected
+
+  defp settle_subscribe({:error, _reason}, connected, previous, subscriber, symbols) do
+    connected
+    |> undo_registration(previous, subscriber, symbols)
+    |> queue_unsubscribe(newly_wanted(previous, symbols))
+  end
+
+  defp newly_wanted(previous, symbols),
+    do: Enum.reject(symbols, &MapSet.member?(previous.wanted, &1))
+
+  # Takes back what a failed `subscribe/3` registered, and only that: a symbol or subscriber
+  # that was already there before the call stays. A subscriber's monitor is released only when
+  # nothing else registered it, since the same pid may also be a notice subscriber.
+  defp undo_registration(state, previous, subscriber, symbols) do
+    added = MapSet.new(newly_wanted(previous, symbols))
+    state = %{state | wanted: MapSet.difference(state.wanted, added)}
+
+    if MapSet.member?(previous.subscribers, subscriber) do
+      state
+    else
+      %{
+        state
+        | subscribers: MapSet.delete(state.subscribers, subscriber),
+          monitors: release_monitor(state, subscriber)
+      }
+    end
+  end
+
+  defp release_monitor(state, subscriber) do
+    if MapSet.member?(state.notice_subscribers, subscriber),
+      do: state.monitors,
+      else: Fanout.forget(subscriber, state.monitors)
+  end
+
+  # The frame may have landed even though the send reported failure (`Socket.subscribe/3`:
+  # "the frame may well have landed"), so the venue may be streaming symbols nobody wants. The
+  # next resubscribe tick unsubscribes them, unless they are wanted again by then.
+  defp queue_unsubscribe(state, symbols) do
+    %{state | unsubscribe_pending: MapSet.union(state.unsubscribe_pending, MapSet.new(symbols))}
   end
 
   defp drop(state, symbols) do

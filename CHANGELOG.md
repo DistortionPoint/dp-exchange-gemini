@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A subscribe request's ack deadline covered later requests too.** `Socket` armed one
+  deadline for the first unanswered subscribe and let every request sent before it fired share
+  it, so a request sent 14s after the deadline was armed could be closed 1s after it was sent.
+  Each request now arms a deadline of its own (`ack_requests`, oldest first). An answer retires
+  the oldest outstanding request, since the venue's answers say only `id: 1`, and a request
+  whose frame never went out retires the newest.
+- **`Feed.subscribe/3` and `Feed.update_symbols/2` recorded the intent and then reported
+  failure.** On a failed connect or send they answered `{:error, _}` but kept the subscriber
+  and symbols registered, to be dialled and sent on the next resubscribe tick, so a caller
+  that gave up on the symbols received them anyway. An error now means nothing was recorded:
+  the subscriber and new symbols are taken back, a failed `update_symbols/2` restores the
+  previous set, and symbols whose frame may have landed are queued for a wire unsubscribe.
+  `unsubscribe/2` still narrows at once and retries on the tick. Four tests that seeded their
+  wanted set through a failing `subscribe/3` now seed it directly.
+- **A `to:` that was not a pid or a registered name crashed the shared `Feed`.** `"consumer"`
+  or `{:via, ...}` was stored and raised `FunctionClauseError` in `Core.Fanout.resolve/1` on
+  the first payload or notice, dropping every other consumer's subscription. `subscribe/3`
+  and `subscribe_notices/2` now answer `{:error, {:invalid_subscriber, value}}` in the caller,
+  and `Fake` answers the same.
+- **A notice per bad frame.** `Feed` forwarded every `:data_quality`, `:refusal` and
+  `:degraded` notice `Socket` raised, at the rate of the stream when a field stayed
+  malformed. The first per `{kind, reason, symbol}` now goes out at once, the rest within 30s
+  are counted, and the next carries `details.suppressed`. The table is capped. Lifecycle
+  notices pass untouched.
+- `Feed`'s public functions now carry `@doc`.
+
 ## [0.2.110] - 2026-10-11
 
 ### Fixed

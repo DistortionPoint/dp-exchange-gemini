@@ -129,12 +129,21 @@ defmodule DpExchange.Gemini.Socket do
   2026-10-02 against both `ws.gemini.com` and `ws.sandbox.gemini.com`: a first subscribe, the
   same streams again, and a mix of subscribed and new streams were each answered within about
   550ms. A repeat is answered too, which matters because `Feed` resubscribes every 60s to
-  streams already subscribed. So `subscribe/3` tells this process a request is out, and if `@ack_timeout_ms` passes with
-  any subscribe still unanswered, it raises a `:degraded` notice
+  streams already subscribed. So `subscribe/3` tells this process a request is out, and if
+  `@ack_timeout_ms` passes with that request still unanswered, it raises a `:degraded` notice
   (`details.reason: :subscribe_unanswered`) and closes, taking the same reconnect path as a
   silent connection. Silence in the market data alone is never the trigger, because a feed
   watching a few illiquid pairs can be quiet for minutes. An unanswered request has no such
   innocent reading.
+
+  **Each request has its own deadline, armed when it is announced.** One deadline used to
+  cover every request outstanding when it was armed, so a request sent 14s after it was armed
+  could be closed 1s after it was sent, long before the venue had been given the window the
+  first one was. Answers carry only the request kind (`id: 1`), not which request they answer,
+  so they are matched in order: an answer retires the OLDEST outstanding request, and a
+  request whose frame never went out retires the NEWEST (it was announced last, by the caller
+  that is now withdrawing it). `ack_requests` holds `{ref, timer}` oldest first; `ack_deadline`
+  is the oldest one's ref and `unanswered_subscribes` the count.
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
@@ -677,6 +686,7 @@ defmodule DpExchange.Gemini.Socket do
     if state.connected_once?, do: report_reconnected(state)
     liveness = make_ref()
     schedule_liveness(liveness)
+    cancel_ack_timers(state)
 
     # `Map.merge/2`, not `%{state | ...}` — the four keys below are self-initialising
     # (`Map.get(state, :key, default)` everywhere they are read) rather than required at
@@ -716,6 +726,7 @@ defmodule DpExchange.Gemini.Socket do
        # A request sent on the old connection is not owed an answer on this one.
        unanswered_subscribes: 0,
        ack_deadline: nil,
+       ack_requests: [],
        # When this session came up. See `handle_disconnect/2`'s short-session backoff.
        connected_at: now_ms()
      })}
@@ -751,47 +762,82 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   # See the moduledoc's "A connection that answers pings but not subscribes is not serving".
-  # One deadline covers every request outstanding when it was armed; an answer that clears
-  # them all disarms it, and a stale deadline's ref no longer matches.
+  # Each announced request arms a deadline of its own, so a request is never closed on the
+  # strength of a clock that started before it was sent.
   def handle_info(:awaiting_ack, state) do
-    state = Map.update(state, :unanswered_subscribes, 1, &(&1 + 1))
+    deadline = make_ref()
+    timer = Process.send_after(self(), {:ack_deadline, deadline}, @ack_timeout_ms)
+    {:ok, put_ack_requests(state, ack_requests(state) ++ [{deadline, timer}])}
+  end
 
-    if Map.get(state, :ack_deadline) do
-      {:ok, state}
-    else
-      deadline = make_ref()
-      Process.send_after(self(), {:ack_deadline, deadline}, @ack_timeout_ms)
-      {:ok, Map.put(state, :ack_deadline, deadline)}
+  # The announced request's frame never went out. It was announced last, so it is the newest.
+  def handle_info(:ack_withdrawn, state) do
+    case Enum.reverse(ack_requests(state)) do
+      [] ->
+        {:ok, state}
+
+      [{_deadline, timer} | older] ->
+        Process.cancel_timer(timer)
+        {:ok, put_ack_requests(state, Enum.reverse(older))}
     end
   end
 
-  def handle_info(:ack_withdrawn, state),
-    do: {:ok, note_answer(%{"id" => @subscribe_id, "status" => 200}, state)}
+  # A deadline whose request was answered, withdrawn or forgotten by a reconnect is no longer
+  # in `ack_requests` and does nothing.
+  def handle_info({:ack_deadline, deadline}, state) do
+    if List.keymember?(ack_requests(state), deadline, 0) do
+      unanswered = length(ack_requests(state))
 
-  def handle_info({:ack_deadline, deadline}, %{ack_deadline: deadline} = state) do
-    unanswered = Map.get(state, :unanswered_subscribes, 0)
-
-    notify(
-      state,
-      Notice.new(:degraded, :gemini,
-        message:
-          "#{unanswered} subscribe request(s) unanswered after #{@ack_timeout_ms}ms while " <>
-            "the connection still answers pings — closing the connection and reconnecting",
-        details: %{reason: :subscribe_unanswered, unanswered: unanswered}
+      notify(
+        state,
+        Notice.new(:degraded, :gemini,
+          message:
+            "#{unanswered} subscribe request(s) unanswered, the oldest after " <>
+              "#{@ack_timeout_ms}ms, while the connection still answers pings — closing the " <>
+              "connection and reconnecting",
+          details: %{reason: :subscribe_unanswered, unanswered: unanswered}
+        )
       )
-    )
 
-    {:close, %{state | ack_deadline: nil, unanswered_subscribes: 0}}
+      cancel_ack_timers(state)
+      {:close, put_ack_requests(state, [])}
+    else
+      {:ok, state}
+    end
   end
 
   def handle_info(_message, state), do: {:ok, state}
 
+  defp ack_requests(state), do: Map.get(state, :ack_requests, [])
+
+  # `ack_deadline` and `unanswered_subscribes` are derived from `ack_requests` on every
+  # change, so the three cannot disagree.
+  defp put_ack_requests(state, requests) do
+    Map.merge(state, %{
+      ack_requests: requests,
+      ack_deadline: requests |> List.first() |> deadline_ref(),
+      unanswered_subscribes: length(requests)
+    })
+  end
+
+  defp deadline_ref(nil), do: nil
+  defp deadline_ref({deadline, _timer}), do: deadline
+
+  defp cancel_ack_timers(state) do
+    Enum.each(ack_requests(state), fn {_deadline, timer} -> Process.cancel_timer(timer) end)
+  end
+
   # Any answer counts, a refusal included: the question is whether the connection is being
-  # served, and a non-200 is already reported on its own by `handle_message/2`.
+  # served, and a non-200 is already reported on its own by `handle_message/2`. It retires the
+  # oldest outstanding request: the venue's answers do not say which request they answer.
   defp note_answer(%{"id" => @subscribe_id, "status" => _status}, state) do
-    case Map.get(state, :unanswered_subscribes, 0) - 1 do
-      remaining when remaining > 0 -> Map.put(state, :unanswered_subscribes, remaining)
-      _none -> Map.merge(state, %{unanswered_subscribes: 0, ack_deadline: nil})
+    case ack_requests(state) do
+      [] ->
+        state
+
+      [{_deadline, timer} | newer] ->
+        Process.cancel_timer(timer)
+        put_ack_requests(state, newer)
     end
   end
 
