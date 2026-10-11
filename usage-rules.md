@@ -718,6 +718,16 @@ rather than truncate or loop forever — `Core.Venue` types the result `[map()]`
 nowhere to hand a page cursor back to the caller. Passing `opts[:limit]` returns exactly one
 page of at most that many rows.
 
+**Every one of these reads checks its paging and window options before anything is signed.**
+`:limit` (`:limit_transfers` on `get_transfers/2`) is a whole number from 1 to the vendor's
+maximum for that endpoint — 500 for closed orders, trade history, accounts and staking
+history, 50 for transfers and custody fees, 300 for clearing trades and `get_transactions/1` —
+and a window bound is a `DateTime`, a non-negative integer or a string of digits (the staking
+windows: a `DateTime` or an ISO 8601 string). Anything else — `limit: 0`, `limit: "ten"`,
+`since: ~D[2026-01-01]` — is `{:error, {:invalid_option, key, value}}`. A larger limit is
+refused rather than clamped, because the vendor does not say what it does with one.
+`DpExchange.Gemini.Fake` refuses the same values, and narrows its answers by the same options.
+
 ## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
 
 If your process falls far enough behind that its mailbox reaches **10,000 queued
@@ -1022,7 +1032,9 @@ other meant.
 Keep what came back, not what you sent.
 
 `list_accounts/1` **caps at 500 and does not paginate.** A larger group comes back truncated
-with nothing to say it was; there is no cursor to follow.
+with nothing to say it was; there is no cursor to follow. With no `:limit`, a page that full is
+`{:error, {:history_truncated, 500}}` rather than a list that reads as complete; pass `:limit`
+to take one page on purpose.
 
 `get_roles/1` answers with three booleans rather than one role, because `Fund Manager` and
 `Trader` combine and `Auditor` combines with nothing.
@@ -1094,9 +1106,13 @@ second order, and you see one call and one answer either way.
 
 So order-creating and order-changing calls here are sent once, and so are
 `transfer_internal/5`, `create_clearing_order/3` and `create_broker_clearing_order/3`.
-Under API-key auth the nonce happens to make a repeated request fail, but under OAuth
-there is no nonce and a retry takes effect again. Before 0.2.54 those three were retried.
-A transport failure comes back
+Every attempt is signed with a fresh nonce, so a retry is a new request under API-key auth
+as well as under OAuth (which has no nonce): it takes effect again, or is refused because the
+first already did. Before 0.2.54 those three were retried.
+`commit_conversion/2`, `confirm_clearing_order/4`, `cancel_clearing_order/3`,
+`rename_account/3` and `revoke_access_token/1` are sent once too: a repeat of any of them is
+answered as a refusal ("quote spent", "already confirmed", "no such account", 401) for
+something that worked. A transport failure comes back
 to you as an error, and **the outcome of that attempt is genuinely unknown** — the order may
 or may not exist at the venue. Read your open orders before placing again; do not treat the
 error as "it did not happen".

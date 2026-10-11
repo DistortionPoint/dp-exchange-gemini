@@ -94,6 +94,20 @@ defmodule DpExchange.Gemini.WriteOnceTest do
     assert [] = requests()
   end
 
+  test "committing a conversion is sent once, so a lost reply is not read as a refusal" do
+    terms = [
+      symbol: "BTC-USD",
+      side: :buy,
+      amount: Decimal.new("1"),
+      price: Decimal.new("100"),
+      fee: Decimal.new("0.3"),
+      credentials: @oauth
+    ]
+
+    assert {:error, _transport} = Private.commit_conversion("20930", opts(terms))
+    assert [_one] = requests()
+  end
+
   test "a new deposit address is requested once" do
     Private.get_deposit_address("ETH", "ethereum", @oauth, opts([]))
     assert [_one] = requests()
@@ -132,6 +146,22 @@ defmodule DpExchange.Gemini.WriteOnceTest do
   test "a clearing order is sent once" do
     Private.create_clearing_order(@terms, @oauth, opts(counterparty_id: "cp-1"))
     assert [_one] = requests()
+  end
+
+  test "confirming and cancelling a clearing order are sent once" do
+    Private.confirm_clearing_order("c-1", @terms, @oauth, opts([]))
+    assert ["/v1/clearing/confirm"] = requests()
+
+    Private.cancel_clearing_order("c-1", @oauth, opts([]))
+    assert ["/v1/clearing/cancel"] = requests()
+  end
+
+  test "a rename and a revoke are sent once" do
+    Private.rename_account(@oauth, opts(account: "old", name: "New"))
+    assert ["/v1/account/rename"] = requests()
+
+    Private.revoke_access_token(@oauth, opts([]))
+    assert ["/v1/oauth/revokeByToken"] = requests()
   end
 
   test "a broker clearing order is sent once" do

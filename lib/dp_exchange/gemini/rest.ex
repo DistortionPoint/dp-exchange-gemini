@@ -1170,8 +1170,10 @@ defmodule DpExchange.Gemini.Rest do
       {:ok, %{status: status, body: body}} when status in [400, 404] ->
         {:refused, refusal(body)}
 
+      # Quoted bounded, as Core and `Private` do: a CDN error page is not an error message.
       {:ok, %{status: status, body: body}} ->
-        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+        message = "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"
+        {:error, {:exchange_error, :gemini, message}}
 
       # Rate limiting arrives as an ordinary two-element error carrying the retry interval
       # in its message — both the venue's 429 and our own limiter's refusal, which Core

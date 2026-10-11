@@ -20,6 +20,74 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A public-data read's unexpected status quoted the whole body.** `Rest`'s symbol-scoped
+  GETs put `inspect(body)` into `{:exchange_error, :gemini, _}`, so a CDN error page became
+  the message. Quoted bounded now (`limit: 50`, `printable_limit: 2_048`), as `Private`
+  and Core do.
+
+- **History reads sent whatever page size and window they were given.** `get_orders/2`
+  (`history: true`), `get_trade_history/2`, `get_transfers/2`, `list_custody_fees/2`,
+  `list_accounts/2`, `get_staking_history/2`, `get_staking_rewards/2`, `list_clearing_trades/2`,
+  `list_clearing_orders/2`, `list_clearing_brokers/2`, `get_transactions/2` and
+  `list_funding_payments/2` put `limit: 0`, `limit: "ten"`, `since: ~D[2026-01-01]` and
+  `symbol: :btcusd` straight on the wire (or raised in the caller): a venue 400 read as a
+  credential problem, or a `since` JSON-encoded as an ISO string where the endpoint takes an
+  epoch number, so the filter narrowed nothing. They are now
+  `{:error, {:invalid_option, key, value}}` before anything is signed, from the new
+  `Private.validate_history_opts/2`: a limit is a whole number from 1 to the vendor's maximum
+  for that endpoint (500 orders, trades, accounts and staking history; 50 transfers and custody
+  fees; 300 clearing trades and `/v1/transactions`), a window bound a `DateTime`, a
+  non-negative integer or a string of digits (the staking windows a `DateTime` or an ISO 8601
+  string), a symbol, currency, network or provider id a non-blank string, a clearing `side`
+  `:buy` or `:sell`. What the venue does with a larger limit is undocumented, so it is refused
+  rather than clamped.
+- **`request_approved_address/5`, `remove_approved_address/4` and `list_approved_addresses/2`
+  signed a `nil` or blank network or address.** `nil` built `/v1/approvedAddresses//request`
+  and went into the allowlist payload as JSON `null`. They are `{:error, {:invalid_network,
+  value}}` / `{:error, {:invalid_address, value}}` first, after the label.
+- **`Withdrawal.amount` and `.memo` came back as the caller held them.** An integer or string
+  amount, or an integer destination tag, was returned in fields typed `Decimal` and string.
+  The amount is the `Decimal` that was sent and the memo its string; a blank memo is `nil`.
+- **A conversion commit, a clearing confirm, a clearing cancel, an account rename and a token
+  revoke were retried after a transport error.** The signer signs every attempt afresh, so the
+  repeat is a new request: answered "quote spent", "already confirmed", "no such account" or
+  401, and reported as `{:refused, _}` for something that had worked. They are sent once, like
+  the other writes the venue cannot tell from their repeat; the transport error says the
+  outcome is unknown. (`post_once/4`'s comment still described the pre-signer behaviour, a
+  repeat refused for its nonce.)
+- **`validate_fx_pair/1` raised `Protocol.UndefinedError`** on a map, tuple or list. It is
+  `{:error, {:unsupported_fx_pair, inspect(pair)}}`.
+- **`add_payment_method/3` raised on details that were not a map**, and `Auth.headers/5` raised
+  `Jason.EncodeError` on a payload holding a tuple or pid. They are
+  `{:error, {:invalid_details, details}}` and `{:error, :unencodable_payload}`.
+
+### Changed
+
+- **`Fake` refuses what the real call refuses, and filters by the same options.**
+  `get_orders/2` (history) narrows its one closed order by `:symbol`, `:since` and `:limit`
+  where it returned it whatever was asked; `list_custody_fees/2`, `get_transactions/2` (whose
+  `:since` is nanoseconds), `get_staking_history/2` (now dated) and `get_staking_rewards/2`
+  filter by their windows, limits and `:provider_id`. `withdraw/5` shares the memo rule
+  (`memo: ""` with `memo_required: true` was accepted by the fake and refused by the real
+  call), treats a blank `client_transfer_id` as none, and returns a `Decimal` amount and string
+  memo. `stake/3`, `unstake/3`, `convert/4` and `quote_conversion/4` return `Decimal` amounts
+  whatever the caller passed; `commit_conversion/2` returns the id as a string;
+  `request_approved_address/4`, `remove_approved_address/3`, `list_approved_addresses/1` and
+  `add_payment_method/2` run the real validators; `test_connection/2` answers the real call's
+  three keys (`reachable`, `environment`, `response`).
+
+### Unmeasured, left alone
+
+- `opts[:account]` is added to every private payload except `/v1/account/create`,
+  `/v1/account/list` and `/v1/roles`. The vendor's request schemas for `/v1/account/transfer`,
+  `/v1/transactions`, `/v1/oauth/revokeByToken`, `/v1/heartbeat` and `/v2/withdraw/...` list no
+  `account` field; whether the venue ignores it there is unknown, and a host sharing one
+  options list across calls will send it.
+- What `timestamp` means on `/v1/orders/history` (the vendor's paging recipe contradicts
+  itself). The fake reads it as "on or after".
+
 ## [0.2.115] - 2026-10-11
 
 ### Fixed

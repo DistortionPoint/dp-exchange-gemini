@@ -259,7 +259,9 @@ defmodule DpExchange.Gemini.Auth do
   credential-shaped was supplied and no `:auth_scheme` was named, so there is no scheme to
   be unsupported, only a credential that never arrived. Never a partially-signed request,
   which would fail at the venue with an error about signatures rather than about the
-  missing field.
+  missing field. `{:error, :unencodable_payload}` is a `params` map the JSON encoder cannot
+  write (a tuple, a pid): nothing is signed, and it no longer raises `Jason.EncodeError` in
+  the caller.
 
   ## `nil` is not a scheme the venue could reject
 
@@ -321,12 +323,9 @@ defmodule DpExchange.Gemini.Auth do
   end
 
   defp signed_headers(path, params, key, secret, mode) do
-    with {:ok, nonce} <- signing_nonce(mode) do
-      payload =
-        params
-        |> Map.merge(%{"request" => path, "nonce" => nonce})
-        |> Jason.encode!()
-        |> Base.encode64()
+    with {:ok, nonce} <- signing_nonce(mode),
+         {:ok, json} <- encode_payload(params, path, nonce) do
+      payload = Base.encode64(json)
 
       {:ok,
        [
@@ -337,6 +336,17 @@ defmodule DpExchange.Gemini.Auth do
          {"X-GEMINI-PAYLOAD", payload},
          {"X-GEMINI-SIGNATURE", sign(payload, secret)}
        ]}
+    end
+  end
+
+  # A payload the JSON encoder cannot write (a tuple, a pid, a struct with no encoder, as a
+  # caller's own `add_payment_method/3` details map may hold) is a refusal to sign, not a
+  # `Jason.EncodeError` raised in the caller's process. A nonce has been drawn by then, which
+  # costs an incremental key nothing: a nonce is only recorded when the venue accepts one.
+  defp encode_payload(params, path, nonce) do
+    case params |> Map.merge(%{"request" => path, "nonce" => nonce}) |> Jason.encode() do
+      {:ok, json} -> {:ok, json}
+      {:error, _reason} -> {:error, :unencodable_payload}
     end
   end
 

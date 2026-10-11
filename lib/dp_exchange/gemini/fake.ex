@@ -62,7 +62,7 @@ defmodule DpExchange.Gemini.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Config, FakeInjection, Timeframe, Types, Venue}
-  alias DpExchange.Gemini.{Feed, Private, Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Environment, Feed, Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
 
@@ -75,6 +75,10 @@ defmodule DpExchange.Gemini.Fake do
 
   # Fixed, not `utc_now/0`.
   @at ~U[2026-08-28 12:00:00Z]
+
+  # When the ledger rows `list_custody_fees/2` and `get_transactions/2` answer with are dated,
+  # in epoch milliseconds, so the `:since` filters have something to compare against.
+  @ledger_ms 1_700_000_000_000
 
   # `subscribe/2`'s `:channels` default — matches `DpExchange.Gemini.Feed`'s own
   # `@default_channels` exactly, so a caller of neither sees any change from before
@@ -584,7 +588,11 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_transfers(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts), do: {:ok, []}
+      # The window and page options are refused by the real function, before the credential:
+      # `Private.get_transfers/2` signs nothing for a `limit_transfers: 0`.
+      with :ok <- Private.validate_history_opts(:transfers, opts),
+           :ok <- authenticated(credentials, opts),
+           do: {:ok, []}
     end)
   end
 
@@ -655,13 +663,40 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # Open and historical are two endpoints on this venue, not one with a filter, and the
       # fake says so rather than answering the same empty list to both.
-      with :ok <- authenticated(credentials, opts) do
+      #
+      # **The history read filters by what it is given**, as the venue does: `:symbol`, `:since`
+      # and `:limit` narrow the one closed order this fake holds, and are refused as
+      # `Private.validate_history_opts/2` refuses them. This returned the same order whatever
+      # the symbol asked for, so a consumer's test of "orders for ETH-USD" saw a BTC-USD fill.
+      # What the venue's `timestamp` means for orders is unmeasured (its own recipe
+      # contradicts itself); the fake reads it as "on or after".
+      with :ok <- Private.validate_history_opts(:orders, opts),
+           :ok <- authenticated(credentials, opts) do
         if Keyword.get(opts, :history, false),
-          do: {:ok, [%{order(%{}) | status: :filled}]},
+          do: {:ok, closed_orders(opts)},
           else: {:ok, []}
       end
     end)
   end
+
+  defp closed_orders(opts) do
+    symbol = Keyword.get(opts, :symbol)
+    since = Keyword.get(opts, :since)
+
+    [%{order(%{}) | status: :filled}]
+    |> Enum.filter(&(is_nil(symbol) or &1.symbol == canonical(symbol)))
+    |> Enum.filter(&(is_nil(since) or on_or_after?(&1.created_at, since)))
+    |> Enum.take(Keyword.get(opts, :limit) || 500)
+  end
+
+  # Whether `at` is on or after a window bound given as the options accept it: a `DateTime`,
+  # or an epoch number or string of digits read the way `since_instant/1` reads one.
+  defp on_or_after?(at, %DateTime{} = bound), do: DateTime.compare(at, bound) != :lt
+
+  defp on_or_after?(at, bound) when is_binary(bound),
+    do: on_or_after?(at, String.to_integer(bound))
+
+  defp on_or_after?(at, bound), do: DateTime.compare(at, since_instant(bound)) != :lt
 
   @impl true
   def cancel_all_orders(credentials, opts \\ []) do
@@ -685,7 +720,8 @@ defmodule DpExchange.Gemini.Fake do
       # (`rest.yaml:8294-8298`) names only `request` and `nonce` as required — so the fake
       # no longer refuses a call with none. This used to require one; a fake that refused
       # what the real venue accepts is differently capable, not less.
-      with :ok <- authenticated(credentials, opts) do
+      with :ok <- Private.validate_history_opts(:trades, opts),
+           :ok <- authenticated(credentials, opts) do
         {:ok, []}
       end
     end)
@@ -999,7 +1035,16 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def test_connection(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts), do: {:ok, %{reachable: true}}
+      # The same three keys `Private.test_connection/2` answers, with the venue's own
+      # heartbeat body (`{"result": "ok"}`, rest.yaml `/v1/heartbeat`).
+      with :ok <- authenticated(credentials, opts) do
+        {:ok,
+         %{
+           reachable: true,
+           environment: Environment.resolve(opts),
+           response: %{"result" => "ok"}
+         }}
+      end
     end)
   end
 
@@ -1247,23 +1292,32 @@ defmodule DpExchange.Gemini.Fake do
       # refused before anything is signed, and was asked for its credential first here. The
       # staking writes below do the same with `:provider_id`.
       with {:ok, _since} <- fake_required_since(opts),
+           :ok <- Private.validate_history_opts(:staking_rewards, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
-        {:ok,
-         [
-           %Types.StakingReward{
-             asset: "ETH",
-             amount: Decimal.new("0.0031"),
-             provider_id: "provider-a",
-             apy_pct: Decimal.new("4.07"),
-             accrual_count: 7,
-             period_start: ~U[2026-08-25 00:00:00Z],
-             period_end: ~U[2026-09-01 00:00:00Z],
-             provider: :gemini
-           }
-         ]}
+        # `:provider_id` narrows it, as the venue's `providerId` does. The window cannot: the
+        # venue computes the periods itself and a fake that clipped them would invent some.
+        {:ok, staking_rewards(Keyword.get(opts, :provider_id))}
       end
     end)
   end
+
+  defp staking_rewards(provider_id) do
+    reward = %Types.StakingReward{
+      asset: "ETH",
+      amount: Decimal.new("0.0031"),
+      provider_id: "provider-a",
+      apy_pct: Decimal.new("4.07"),
+      accrual_count: 7,
+      period_start: ~U[2026-08-25 00:00:00Z],
+      period_end: ~U[2026-09-01 00:00:00Z],
+      provider: :gemini
+    }
+
+    Enum.filter([reward], &provider_matches?(&1, provider_id))
+  end
+
+  defp provider_matches?(_row, nil), do: true
+  defp provider_matches?(row, provider_id), do: row.provider_id == provider_id
 
   defp fake_required_since(opts) do
     case Keyword.get(opts, :since) do
@@ -1275,32 +1329,61 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_staking_history(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(fake_credentials(opts), opts) do
+      with :ok <- Private.validate_history_opts(:staking_history, opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
         # A redemption mid-unbond: requested, part paid, part outstanding. A fake whose rows
         # all settled would never exercise the field this type exists for.
-        {:ok,
-         [
-           %Types.StakingTransaction{
-             id: "stk-1",
-             type: :unstake,
-             venue_type: "Redeem",
-             asset: "ETH",
-             amount: Decimal.new("10"),
-             amount_paid_so_far: Decimal.new("4"),
-             amount_remaining: Decimal.new("6"),
-             provider_id: "provider-a",
-             provider: :gemini
-           }
-         ]}
+        #
+        # **Dated, and filtered by what it is given**: `:since` and `:until` (inclusive),
+        # `:provider_id` and `:limit` narrow it as the venue's request does. It carried no
+        # `venue_time` and ignored all four.
+        {:ok, staking_history(opts)}
       end
     end)
   end
+
+  defp staking_history(opts) do
+    redemption = %Types.StakingTransaction{
+      id: "stk-1",
+      type: :unstake,
+      venue_type: "Redeem",
+      asset: "ETH",
+      amount: Decimal.new("10"),
+      amount_paid_so_far: Decimal.new("4"),
+      amount_remaining: Decimal.new("6"),
+      provider_id: "provider-a",
+      venue_time: @at,
+      provider: :gemini
+    }
+
+    [redemption]
+    |> Enum.filter(&provider_matches?(&1, Keyword.get(opts, :provider_id)))
+    |> Enum.filter(&within_iso_window?(&1.venue_time, opts))
+    |> Enum.take(Keyword.get(opts, :limit) || 500)
+  end
+
+  defp within_iso_window?(at, opts) do
+    bound_ok?(at, Keyword.get(opts, :since), :lower) and
+      bound_ok?(at, Keyword.get(opts, :until), :upper)
+  end
+
+  # `at` against an inclusive bound: a `:lower` one means `at` must not be before it, an
+  # `:upper` one not after it. A string bound has already passed `validate_history_opts/2`.
+  defp bound_ok?(_at, nil, _side), do: true
+
+  defp bound_ok?(at, bound, side) when is_binary(bound) do
+    {:ok, parsed, _offset} = DateTime.from_iso8601(bound)
+    bound_ok?(at, parsed, side)
+  end
+
+  defp bound_ok?(at, %DateTime{} = bound, :lower), do: DateTime.compare(at, bound) != :lt
+  defp bound_ok?(at, %DateTime{} = bound, :upper), do: DateTime.compare(at, bound) != :gt
 
   @impl true
   def stake(asset, amount, opts \\ []) do
     with_injection(fn ->
       with {:ok, provider_id} <- fake_provider_id(opts),
-           {:ok, _currency, _wire_amount} <- Private.validate_staking_terms(asset, amount),
+           {:ok, _currency, wire_amount} <- Private.validate_staking_terms(asset, amount),
            :ok <- authenticated(fake_credentials(opts), opts) do
         {:ok,
          %Types.StakingTransaction{
@@ -1312,7 +1395,9 @@ defmodule DpExchange.Gemini.Fake do
            # word the real reply never sends is more capable than the endpoint it fakes.
            venue_type: nil,
            asset: String.upcase(asset),
-           amount: amount,
+           # A `Decimal`, as the real decode makes it from the venue's reply, whatever shape
+           # the caller held the amount in (a string or an integer came back unchanged).
+           amount: Decimal.new(wire_amount),
            amount_paid_so_far: nil,
            amount_remaining: nil,
            provider_id: provider_id,
@@ -1326,10 +1411,12 @@ defmodule DpExchange.Gemini.Fake do
   def unstake(asset, amount, opts \\ []) do
     with_injection(fn ->
       with {:ok, provider_id} <- fake_provider_id(opts),
-           {:ok, _currency, _wire_amount} <- Private.validate_staking_terms(asset, amount),
+           {:ok, _currency, wire_amount} <- Private.validate_staking_terms(asset, amount),
            :ok <- authenticated(fake_credentials(opts), opts) do
         # Nothing has arrived yet. A fake reporting the full amount paid would teach a
         # consumer to spend an asset that is still unbonding.
+        requested = Decimal.new(wire_amount)
+
         {:ok,
          %Types.StakingTransaction{
            id: "stk-redeem",
@@ -1340,9 +1427,9 @@ defmodule DpExchange.Gemini.Fake do
            # given there.
            venue_type: nil,
            asset: String.upcase(asset),
-           amount: amount,
+           amount: requested,
            amount_paid_so_far: Decimal.new("0"),
-           amount_remaining: amount,
+           amount_remaining: requested,
            provider_id: provider_id,
            venue_time: @at,
            provider: :gemini
@@ -1381,7 +1468,7 @@ defmodule DpExchange.Gemini.Fake do
            status: :quoted,
            from_asset: from,
            to_asset: to,
-           from_amount: amount,
+           from_amount: Decimal.new(wire_amount),
            to_amount: Decimal.div(Decimal.new(wire_amount), Decimal.new("40000")),
            rate: Decimal.new("40000"),
            fee: Decimal.new("0.30"),
@@ -1408,7 +1495,9 @@ defmodule DpExchange.Gemini.Fake do
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.Conversion{
-           id: id,
+           # A string, as the real decode makes it; the id may arrive as the integer the venue
+           # names, which `validate_commit_terms/2` also accepts.
+           id: to_string(id),
            status: :settled,
            from_asset: "USD",
            to_asset: "BTC",
@@ -1426,16 +1515,19 @@ defmodule DpExchange.Gemini.Fake do
       # One step and already settled — no rate was held, which is the whole difference from
       # quote_conversion/4.
       with {:ok, _symbol, _side} <- Private.instant_pair(from, to, opts),
-           {:ok, _wire_amount} <- Private.validate_amount(amount, :amount),
+           {:ok, wire_amount} <- Private.validate_amount(amount, :amount),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+        # A `Decimal` whatever shape the caller held the amount in, as the real decode makes it.
+        settled = Decimal.new(wire_amount)
+
         {:ok,
          %Types.Conversion{
            id: "fake-gemini-wrap-1",
            status: :settled,
            from_asset: from,
            to_asset: to,
-           from_amount: amount,
-           to_amount: amount,
+           from_amount: settled,
+           to_amount: settled,
            rate: Decimal.new("1"),
            expires_at: nil,
            venue_time: @at,
@@ -1495,7 +1587,10 @@ defmodule DpExchange.Gemini.Fake do
           {:error, {:missing_option, :network}}
 
         network ->
-          with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+          # A blank or non-string network is refused by the real function before it signs
+          # anything: it would build `/v1/approvedAddresses/account/` for the route.
+          with :ok <- Private.validate_deposit_network(network),
+               :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
             # One active and one still time-locked, because a consumer that only ever sees
             # active addresses never handles the pending case — and a withdrawal to a pending
             # address is refused.
@@ -1549,23 +1644,31 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # The memo rule first, then the credential: `Private.withdraw/6` refuses a required
       # memo that is missing "here, where nothing has moved", before it signs anything.
-      with :ok <- fake_memo(Keyword.get(opts, :memo), Keyword.get(opts, :memo_required, false)),
+      #
+      # The memo rule is the real function's: a blank memo does not satisfy `memo_required`,
+      # where this tested only for `nil` and accepted `memo: ""`.
+      memo = Keyword.get(opts, :memo)
+
+      with :ok <- Private.validate_memo(memo, Keyword.get(opts, :memo_required, false)),
            :ok <- Private.validate_withdrawal(asset, network, amount, address),
+           {:ok, wire_amount} <- Private.validate_amount(amount, :amount),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.Withdrawal{
            # The idempotency key the real package always sends, echoed so a consumer can
-           # assert its own was used.
-           id: Config.opt(opts, :client_transfer_id, "fake-transfer-1"),
+           # assert its own was used. A blank one is no key there, and is none here.
+           id: fake_transfer_id(Keyword.get(opts, :client_transfer_id)),
            # **`:pending`, never `:completed`.** The venue accepting a withdrawal is not the
            # chain confirming it, and a fake that reported completion would teach a consumer
            # the money has arrived.
            status: :pending,
            asset: asset,
-           amount: amount,
+           # A `Decimal` and a string memo, as the real call returns them whatever shape the
+           # caller held them in.
+           amount: Decimal.new(wire_amount),
            network: network,
            address: address,
-           memo: Keyword.get(opts, :memo),
+           memo: fake_withdrawal_memo(memo),
            fee: Decimal.new("0.0005"),
            tx_id: nil,
            requested_at: @at,
@@ -1611,7 +1714,8 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # The country first, then the credential — `Private.add_payment_method/3` picks the
       # endpoint, and refuses a country it has none for, before it signs anything.
-      with {:ok, _path} <- fake_country(Config.opt(opts, :country, "US")),
+      with :ok <- Private.validate_payment_details(details),
+           {:ok, _path} <- fake_country(Config.opt(opts, :country, "US")),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         # **Pending, never verified.** The venue verifies out of band; a fake that returned a
         # usable method would teach a consumer the first transfer will work.
@@ -1660,6 +1764,7 @@ defmodule DpExchange.Gemini.Fake do
       # The label before the credential, by the real function: nothing is signed for a call
       # that names no label.
       with :ok <- Private.validate_label(label),
+           :ok <- Private.validate_approved_address(network, address),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         # **Pending.** A successful response is not permission to withdraw, and a fake that
         # returned "active" would teach a consumer it is.
@@ -1677,7 +1782,8 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def remove_approved_address(network, address, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+      with :ok <- Private.validate_approved_address(network, address),
+           :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok, %{"network" => network, "address" => address, "status" => "removed"}}
       end
     end)
@@ -1686,18 +1792,40 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_transactions(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts) do
+      with :ok <- Private.validate_history_opts(:transactions, opts),
+           :ok <- authenticated(credentials, opts) do
         # Kinds that are not trades and not transfers, because that is the point of the
-        # endpoint and a fake returning only fills would hide it.
-        {:ok,
-         [
-           %{"type" => "Trade", "amount" => "1"},
-           %{"type" => "Deposit", "amount" => "100"},
-           %{"type" => "Fee", "amount" => "-0.5"}
-         ]}
+        # endpoint and a fake returning only fills would hide it. `:since` is NANOSECONDS (or
+        # a `DateTime`), as on the real call, and `:limit` takes the first rows.
+        {:ok, transactions(opts)}
       end
     end)
   end
+
+  defp transactions(opts) do
+    at = @ledger_ms
+
+    rows = [
+      %{"type" => "Trade", "amount" => "1", "timestampms" => at},
+      %{"type" => "Deposit", "amount" => "100", "timestampms" => at + 1},
+      %{"type" => "Fee", "amount" => "-0.5", "timestampms" => at + 2}
+    ]
+
+    rows
+    |> Enum.filter(&(transactions_since_ms(Keyword.get(opts, :since)) <= &1["timestampms"]))
+    |> Enum.take(Keyword.get(opts, :limit) || 300)
+  end
+
+  # The window bound in milliseconds: a `DateTime`, or the nanoseconds `:since` takes (an
+  # integer or a string of digits). Absent is before everything.
+  defp transactions_since_ms(nil), do: 0
+  defp transactions_since_ms(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
+
+  defp transactions_since_ms(nanos) when is_binary(nanos) do
+    transactions_since_ms(String.to_integer(nanos))
+  end
+
+  defp transactions_since_ms(nanos), do: div(nanos, 1_000_000)
 
   @impl true
   def get_notional_balances(credentials, currency, opts \\ []) do
@@ -1725,27 +1853,47 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def list_custody_fees(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts) do
+      with :ok <- Private.validate_history_opts(:custody_fees, opts),
+           :ok <- authenticated(credentials, opts) do
         # A charge with no trade behind it — the gap a consumer reconciling against fills
-        # alone cannot otherwise explain.
-        {:ok,
-         [
-           %{
-             "currency" => "BTC",
-             "amount" => "0.00012",
-             "timestampms" => 1_700_000_000_000,
-             "eid" => 123_456
-           }
-         ]}
+        # alone cannot otherwise explain. `:since` (on or after) and `:limit` narrow it.
+        {:ok, custody_fees(opts)}
       end
     end)
+  end
+
+  defp custody_fees(opts) do
+    fee = %{
+      "currency" => "BTC",
+      "amount" => "0.00012",
+      "timestampms" => @ledger_ms,
+      "eid" => 123_456
+    }
+
+    since = Keyword.get(opts, :since)
+    charged_at = DateTime.from_unix!(@ledger_ms, :millisecond)
+
+    [fee]
+    |> Enum.filter(fn _fee -> is_nil(since) or on_or_after?(charged_at, since) end)
+    |> Enum.take(Keyword.get(opts, :limit) || 50)
   end
 
   @impl true
   def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
 
-  defp fake_memo(nil, true), do: {:error, :memo_required}
-  defp fake_memo(_memo, _required), do: :ok
+  defp fake_transfer_id(supplied) when is_binary(supplied) do
+    if String.trim(supplied) == "", do: "fake-transfer-1", else: supplied
+  end
+
+  defp fake_transfer_id(_absent), do: "fake-transfer-1"
+
+  defp fake_withdrawal_memo(memo) when is_integer(memo), do: Integer.to_string(memo)
+
+  defp fake_withdrawal_memo(memo) when is_binary(memo) do
+    if String.trim(memo) == "", do: nil, else: memo
+  end
+
+  defp fake_withdrawal_memo(memo), do: memo
 
   @impl true
   def get_option_chain(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()

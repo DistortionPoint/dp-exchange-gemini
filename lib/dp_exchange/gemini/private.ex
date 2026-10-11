@@ -72,6 +72,23 @@ defmodule DpExchange.Gemini.Private do
   identical bytes cannot succeed. They are `{:refused, reason}`. A caller whose token
   expired refreshes it and calls again with new credentials, which is a different request —
   not a retry of this one.
+
+  ## History reads check their options before signing
+
+  `:limit` (`:limit_transfers` on `get_transfers/2`) is a whole number from 1 to the venue's
+  maximum for that endpoint, and a window bound (`:since`, `:timestamp`, `:to`,
+  `:since_nanos`) a `DateTime`, a non-negative integer or a string of digits. Anything else —
+  `limit: 0`, `limit: "ten"`, `since: ~D[2026-01-01]` — is
+  `{:error, {:invalid_option, key, value}}`, from `validate_history_opts/2`, which
+  `DpExchange.Gemini.Fake` runs too. Each used to go on the wire as given: a venue 400 read
+  as a credential problem, or a filter that silently narrowed nothing.
+
+  ## A write is sent once unless the venue can tell the repeat
+
+  See `post_once/4`'s comment. Besides orders, transfers and staking, that now covers a
+  conversion commit, a clearing confirm and cancel, an account rename and a token revoke: a
+  repeat of any of them, signed with a fresh nonce, is answered as a refusal for something
+  that worked.
   """
 
   alias DpExchange.Core.{Config, HttpClient}
@@ -189,6 +206,12 @@ defmodule DpExchange.Gemini.Private do
   """
   @spec get_transfers(map(), keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transfers(credentials, opts) do
+    with :ok <- validate_history_opts(:transfers, opts) do
+      fetch_transfers(credentials, opts)
+    end
+  end
+
+  defp fetch_transfers(credentials, opts) do
     # `timestamp` is the venue's own unit, milliseconds (`TimestampType`, rest.yaml). A
     # `DateTime` handed through unconverted was JSON-encoded as an ISO string, a shape the
     # filter does not parse, so the window silently failed to narrow anything. `network` is
@@ -512,6 +535,12 @@ defmodule DpExchange.Gemini.Private do
   @spec get_orders(map(), keyword()) ::
           {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
+    with :ok <- validate_history_opts(:orders, opts) do
+      fetch_orders(credentials, opts)
+    end
+  end
+
+  defp fetch_orders(credentials, opts) do
     {path, params} =
       if Keyword.get(opts, :history, false) do
         {"/v1/orders/history", history_params(opts)}
@@ -562,6 +591,117 @@ defmodule DpExchange.Gemini.Private do
 
   defp symbol_param(nil), do: nil
   defp symbol_param(symbol), do: SymbolFormat.to_exchange_symbol(symbol)
+
+  # The paging and window options of the history reads, by read. **Checked before anything is
+  # signed**, and by the one function `DpExchange.Gemini.Fake` calls too.
+  #
+  # These went onto the wire as given. `limit: "ten"` was a venue 400 read as a credential
+  # problem; `limit: 0` asked the venue for a page size it never describes; `since: ~D[...]`
+  # was JSON-encoded as an ISO string where `timestamp` takes an epoch number, so the filter
+  # silently failed to narrow anything; and `symbol: :btcusd` raised in the caller. The
+  # maxima are the vendor's own (`limit_orders` and `limit_trades` 500, `limit_transfers` 50,
+  # `limit_accounts` 500, staking `limit` 500, `limit_per_account` 300, `/v1/transactions`
+  # `limit` 300). What the venue does with a larger value is not documented, so it is refused,
+  # not clamped here.
+  @history_specs %{
+    orders: [symbol: :symbol, limit: {:limit, 500}, since: :epoch],
+    trades: [symbol: :symbol, limit: {:limit, 500}, since: :epoch],
+    transfers: [
+      currency: :symbol,
+      network: :symbol,
+      limit_transfers: {:limit, 50},
+      timestamp: :epoch
+    ],
+    custody_fees: [limit: {:limit, 50}, since: :epoch],
+    accounts: [limit: {:limit, 500}, since: :epoch],
+    staking_history: [limit: {:limit, 500}, since: :iso, until: :iso, provider_id: :symbol],
+    staking_rewards: [since: :iso, until: :iso, provider_id: :symbol],
+    clearing_trades: [symbol: :symbol, limit: {:limit, 300}, since_nanos: :epoch],
+    clearing_orders: [
+      symbol: :symbol,
+      counterparty: :symbol,
+      side: :side,
+      expiration_start: :epoch,
+      expiration_end: :epoch,
+      submission_start: :epoch,
+      submission_end: :epoch
+    ],
+    clearing_brokers: [symbol: :symbol, expiration_start: :epoch, expiration_end: :epoch],
+    transactions: [limit: {:limit, 300}, since: :epoch],
+    funding_payments: [since: :epoch, to: :epoch]
+  }
+
+  @typedoc "Which history read `validate_history_opts/2` checks the options of."
+  @type history_read ::
+          :orders
+          | :trades
+          | :transfers
+          | :custody_fees
+          | :accounts
+          | :staking_history
+          | :staking_rewards
+          | :clearing_trades
+          | :clearing_orders
+          | :clearing_brokers
+          | :transactions
+          | :funding_payments
+
+  @doc """
+  Whether the paging and window options of a history read are ones its endpoint takes.
+
+  `:limit` (`:limit_transfers` for transfers) is a whole number from 1 to the venue's maximum
+  for that endpoint; `:since`, `:timestamp`, `:to` and `:since_nanos` a `DateTime`, a
+  non-negative integer or a string of digits; the staking windows a `DateTime` or an ISO 8601
+  string; `:symbol`, `:currency`, `:network`, `:counterparty` and `:provider_id` a non-blank
+  string; a clearing `:side` `:buy` or `:sell`. Anything else is
+  `{:error, {:invalid_option, key, value}}`. `nil` is absent.
+
+  `:orders` checks only a `history: true` read: the resting-orders endpoint takes none of
+  them. Exposed so `DpExchange.Gemini.Fake` refuses with this function, before the credential.
+  """
+  @spec validate_history_opts(history_read(), keyword()) ::
+          :ok | {:error, {:invalid_option, atom(), term()}}
+  def validate_history_opts(:orders, opts) do
+    if Keyword.get(opts, :history, false),
+      do: check_history_opts(Map.fetch!(@history_specs, :orders), opts),
+      else: :ok
+  end
+
+  def validate_history_opts(read, opts) do
+    check_history_opts(Map.fetch!(@history_specs, read), opts)
+  end
+
+  defp check_history_opts(specs, opts) do
+    Enum.find_value(specs, :ok, fn {key, kind} ->
+      case Keyword.get(opts, key) do
+        nil -> nil
+        value -> if history_value?(kind, value), do: nil, else: invalid_option(key, value)
+      end
+    end)
+  end
+
+  defp invalid_option(key, value), do: {:error, {:invalid_option, key, value}}
+
+  defp history_value?({:limit, max}, value) do
+    is_integer(value) and value >= 1 and value <= max
+  end
+
+  defp history_value?(:epoch, %DateTime{}), do: true
+  defp history_value?(:epoch, value) when is_integer(value), do: value >= 0
+
+  defp history_value?(:epoch, value) when is_binary(value) do
+    String.match?(value, ~r/\A[0-9]+\z/)
+  end
+
+  defp history_value?(:iso, %DateTime{}), do: true
+
+  defp history_value?(:iso, value) when is_binary(value) do
+    match?({:ok, _at, _offset}, DateTime.from_iso8601(value))
+  end
+
+  defp history_value?(:symbol, value) when is_binary(value), do: String.trim(value) != ""
+  defp history_value?(:side, value), do: value in [:buy, :sell, "buy", "sell"]
+  defp history_value?(_kind, _value), do: false
 
   # The venue's own unit. Milliseconds, because that is what its examples show and what its
   # own responses carry in `timestampms`.
@@ -691,6 +831,12 @@ defmodule DpExchange.Gemini.Private do
   @spec get_trade_history(map(), keyword()) ::
           {:ok, [Fill.t()]} | {:error, term()} | {:refused, term()}
   def get_trade_history(credentials, opts) do
+    with :ok <- validate_history_opts(:trades, opts) do
+      fetch_trade_history(credentials, opts)
+    end
+  end
+
+  defp fetch_trade_history(credentials, opts) do
     requested_symbol = Keyword.get(opts, :symbol)
 
     params =
@@ -753,13 +899,14 @@ defmodule DpExchange.Gemini.Private do
   # transfer, so retrying is both safe and useful. That is the distinction this helper turns
   # on: not "is it a write" but "can the venue tell the second attempt from the first".
   #
-  # **The nonce is not that key.** `post/4` signs once and `Core.HttpClient` re-sends the
-  # same signed request, so under API-key auth a retry of a request that already took effect
-  # is refused for its nonce: no second transfer, but a success reported as a failure. Under
-  # OAuth there is no nonce, and the retry takes effect again. `transfer_internal/5` and
-  # both clearing-order creates relied on the first and were exposed to the second, and
-  # use this helper now. `commit_conversion/2` sends the quote's own id, which the venue
-  # executes once, and stays on `post/4`.
+  # **The nonce is not that key.** `Core.HttpClient` retries a transport error, and since
+  # `signer/5` hands it a function each attempt is signed afresh (a repeated nonce is
+  # refused, so a read could not be retried at all). A fresh nonce makes the retry of a
+  # request that already took effect a NEW request, under API-key auth as under OAuth, which
+  # has no nonce: the effect happens twice. `transfer_internal/5` and both clearing-order
+  # creates relied on the nonce refusing the repeat, and use this helper now.
+  # `commit_conversion/2` uses it too: its `quoteId` is spent by the first execution, so a
+  # retry is refused and a success is reported as a refusal, which is the wrong way round.
   defp post_once(path, params, credentials, opts) do
     post(path, params, credentials, Keyword.put(opts, :retry_attempts, 1))
   end
@@ -781,11 +928,21 @@ defmodule DpExchange.Gemini.Private do
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+        status_error(status, body)
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # A status this module has no answer for (a 405, 409, 413, 422 and so on; Core has already
+  # turned a 429 into a retry or a rate-limited error). **The body is quoted bounded**, as
+  # Core quotes every body it puts in a message: `raw_status: true` hands a 4xx back whole,
+  # and `inspect(body)` wrote an entire CDN error page into the error tuple, and from there
+  # into every caller's log. The limits leave a body inside them byte-identical.
+  defp status_error(status, body) do
+    message = "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"
+    {:error, {:exchange_error, :gemini, message}}
   end
 
   # The host chose its authentication; `:auth_scheme` says which. When it is absent the
@@ -890,7 +1047,7 @@ defmodule DpExchange.Gemini.Private do
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+        status_error(status, body)
 
       {:error, reason} ->
         {:error, reason}
@@ -919,7 +1076,7 @@ defmodule DpExchange.Gemini.Private do
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+        status_error(status, body)
 
       {:error, reason} ->
         {:error, reason}
@@ -1526,8 +1683,13 @@ defmodule DpExchange.Gemini.Private do
   def commit_conversion(id, opts) do
     credentials = Keyword.get(opts, :credentials, %{})
 
+    # Once. A commit that timed out after the venue executed it, sent again with a fresh
+    # nonce, comes back as a refusal (the quote is spent), and the caller reads "refused" as
+    # "no conversion happened" for one that did. The transport error this sends instead says
+    # what is true: the outcome is unknown. The spec never says a repeat of a spent
+    # `quoteId` returns the original result, so this does not assume it. See `post_once/4`.
     with {:ok, params} <- execute_params(id, opts),
-         {:ok, body, headers} <- post("/v1/instant/execute", params, credentials, opts) do
+         {:ok, body, headers} <- post_once("/v1/instant/execute", params, credentials, opts) do
       to_conversion(body, nil, nil, :settled, headers, params["side"])
     end
   end
@@ -2005,13 +2167,16 @@ defmodule DpExchange.Gemini.Private do
   """
   @spec validate_fx_pair(term()) ::
           {:ok, String.t()} | {:error, {:unsupported_fx_pair, String.t()}}
-  def validate_fx_pair(pair) do
+  def validate_fx_pair(pair) when is_binary(pair) or is_atom(pair) do
     native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
 
     if native in @fx_pairs,
       do: {:ok, native},
       else: {:error, {:unsupported_fx_pair, native}}
   end
+
+  # `to_string/1` raised `Protocol.UndefinedError` in the caller on a map, a tuple or a list.
+  def validate_fx_pair(other), do: {:error, {:unsupported_fx_pair, inspect(other)}}
 
   defp to_fx_rate(%{"rate" => rate} = body, native, _requested_at) do
     with {:ok, parsed_rate} <- required_decimal(rate, :rate),
@@ -2143,7 +2308,8 @@ defmodule DpExchange.Gemini.Private do
         {:error, {:missing_option, :network}}
 
       network ->
-        with {:ok, body, _headers} <-
+        with :ok <- validate_deposit_network(network),
+             {:ok, body, _headers} <-
                post("/v1/approvedAddresses/account/#{segment(network)}", %{}, credentials, opts),
              {:ok, rows} <- approved_rows(body) do
           to_approved_addresses(rows, network)
@@ -2375,7 +2541,7 @@ defmodule DpExchange.Gemini.Private do
   def withdraw(asset, network, amount, address, credentials, opts) do
     memo = Keyword.get(opts, :memo)
 
-    with :ok <- memo_present(memo, Keyword.get(opts, :memo_required, false)),
+    with :ok <- validate_memo(memo, Keyword.get(opts, :memo_required, false)),
          {:ok, ticker} <- withdrawal_ticker(asset),
          {:ok, network_segment} <- withdrawal_network(network),
          {:ok, destination} <- withdrawal_address(address),
@@ -2403,7 +2569,14 @@ defmodule DpExchange.Gemini.Private do
                credentials,
                opts
              ) do
-        to_withdrawal(body, transfer_id, {asset, network, address, amount, memo})
+        # The amount and memo as the contract types them (`Decimal`, string), not as the caller
+        # held them: an integer or a string amount and an integer destination tag came back
+        # on the `Withdrawal` unchanged, in fields typed otherwise.
+        to_withdrawal(
+          body,
+          transfer_id,
+          {asset, network, address, Decimal.new(wire_amount), wire_memo(memo)}
+        )
       end
     end
   end
@@ -2411,11 +2584,20 @@ defmodule DpExchange.Gemini.Private do
   # A caller that says the network needs a memo and then sends none is stopped here, where
   # nothing has moved, rather than at the venue after the transfer is accepted. A blank memo
   # is no memo: `""` passed this check and the venue credited the transfer to nobody.
-  defp memo_present(memo, true) do
+  #
+  # Public so `DpExchange.Gemini.Fake` refuses with the same function: it tested only for
+  # `nil`, so `memo: ""` with `memo_required: true` was refused by the real call and accepted
+  # by the fake.
+  @doc """
+  Whether a withdrawal's memo satisfies `memo_required`: with `true`, a memo that is not blank
+  (an integer tag counts), else `{:error, :memo_required}`. Anything but `true` is `:ok`.
+  """
+  @spec validate_memo(term(), term()) :: :ok | {:error, :memo_required}
+  def validate_memo(memo, true) do
     if present?(memo), do: :ok, else: {:error, :memo_required}
   end
 
-  defp memo_present(_memo, _required), do: :ok
+  def validate_memo(_memo, _required), do: :ok
 
   # A blank `client_transfer_id` is no key: `"" || generate_transfer_id()` kept the empty
   # string, because it is truthy, and the withdrawal went out with an idempotency key every
@@ -2613,7 +2795,8 @@ defmodule DpExchange.Gemini.Private do
   @spec add_payment_method(map(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def add_payment_method(details, credentials, opts) do
-    with {:ok, path} <- addbank_path(Config.opt(opts, :country, "US")) do
+    with :ok <- validate_payment_details(details),
+         {:ok, path} <- addbank_path(Config.opt(opts, :country, "US")) do
       # `post_once`: `details` is the caller's own map, opaque to this module, so there is
       # nothing here the venue could tell a retry by — and `HttpClient` retries a timeout or
       # a 5xx three times by default. Adding a bank account twice is not a retry, it is a
@@ -2623,6 +2806,16 @@ defmodule DpExchange.Gemini.Private do
       end
     end
   end
+
+  @doc """
+  Whether `details` is a map `add_payment_method/3` can sign: the bank fields the caller
+  holds. Anything else is `{:error, {:invalid_details, details}}`; a `nil` or a list raised in
+  the caller's process. Exposed so `DpExchange.Gemini.Fake` refuses with this function,
+  before the country and the credential.
+  """
+  @spec validate_payment_details(term()) :: :ok | {:error, {:invalid_details, term()}}
+  def validate_payment_details(details) when is_map(details) and not is_struct(details), do: :ok
+  def validate_payment_details(details), do: {:error, {:invalid_details, details}}
 
   defp addbank_path("US"), do: {:ok, "/v1/payments/addbank"}
   defp addbank_path("CA"), do: {:ok, "/v1/payments/addbank/cad"}
@@ -2783,13 +2976,16 @@ defmodule DpExchange.Gemini.Private do
   `ApprovedAddress.usable?/2`, which answers `nil` while the venue states no activation time.
 
   **`label` is required** (`rest.yaml:5702` lists it beside `address`). A `nil` or empty one
-  is `{:error, {:missing_required_field, :label}}` before a request goes out. `opts[:memo]`
-  is sent when given; the venue documents it for networks that use one (cosmos).
+  is `{:error, {:missing_required_field, :label}}` before a request goes out, then a blank or
+  non-string `network` or `address` is `{:error, {:invalid_network | :invalid_address, value}}`
+  (see `validate_approved_address/2`). `opts[:memo]` is sent when given; the venue documents
+  it for networks that use one (cosmos).
   """
   @spec request_approved_address(String.t(), String.t(), String.t() | nil, map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def request_approved_address(network, address, label, credentials, opts) do
-    with {:ok, label} <- required_label(label) do
+    with {:ok, label} <- required_label(label),
+         :ok <- validate_approved_address(network, address) do
       params =
         %{"address" => address, "label" => label}
         |> put_present("memo", Keyword.get(opts, :memo))
@@ -2823,7 +3019,8 @@ defmodule DpExchange.Gemini.Private do
   @spec remove_approved_address(String.t(), String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def remove_approved_address(network, address, credentials, opts) do
-    with {:ok, body, _headers} <-
+    with :ok <- validate_approved_address(network, address),
+         {:ok, body, _headers} <-
            post(
              "/v1/approvedAddresses/#{segment(network)}/remove",
              %{"address" => address},
@@ -2831,6 +3028,25 @@ defmodule DpExchange.Gemini.Private do
              opts
            ) do
       {:ok, body}
+    end
+  end
+
+  @doc """
+  Whether `network` and `address` are ones `request_approved_address/5` and
+  `remove_approved_address/4` would sign: non-blank strings, else
+  `{:error, {:invalid_network | :invalid_address, value}}`, the network first.
+
+  A `nil` or blank network built `/v1/approvedAddresses//request`, and a `nil` address went
+  into the allowlist payload as JSON `null`, on the two calls that widen and narrow where
+  funds may be sent. Exposed so `DpExchange.Gemini.Fake` refuses with this function, after the
+  label and before the credential.
+  """
+  @spec validate_approved_address(term(), term()) ::
+          :ok | {:error, {:invalid_network | :invalid_address, term()}}
+  def validate_approved_address(network, address) do
+    with {:ok, _segment} <- withdrawal_network(network),
+         {:ok, _address} <- withdrawal_address(address) do
+      :ok
     end
   end
 
@@ -2855,17 +3071,20 @@ defmodule DpExchange.Gemini.Private do
   @spec get_transactions(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transactions(credentials, opts) do
-    params = put_present(%{}, "timestamp_nanos", nanos_param(Keyword.get(opts, :since)))
-
-    case Keyword.get(opts, :limit) do
-      nil ->
-        walk_transactions(Map.put(params, "limit", @transactions_page), credentials, opts, [], 0)
-
-      limit ->
-        with {:ok, rows, _token} <-
-               transactions_page(Map.put(params, "limit", limit), credentials, opts),
-             do: {:ok, rows}
+    with :ok <- validate_history_opts(:transactions, opts) do
+      params = put_present(%{}, "timestamp_nanos", nanos_param(Keyword.get(opts, :since)))
+      fetch_transactions(params, Keyword.get(opts, :limit), credentials, opts)
     end
+  end
+
+  defp fetch_transactions(params, nil, credentials, opts) do
+    walk_transactions(Map.put(params, "limit", @transactions_page), credentials, opts, [], 0)
+  end
+
+  defp fetch_transactions(params, limit, credentials, opts) do
+    with {:ok, rows, _token} <-
+           transactions_page(Map.put(params, "limit", limit), credentials, opts),
+         do: {:ok, rows}
   end
 
   # **The request and the response were both read from the wrong shape.** Measured against
@@ -3009,7 +3228,8 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
       |> put_present("limit_transfers", Keyword.get(opts, :limit) || @transfers_page_max)
 
-    with {:ok, body, _headers} <- post("/v1/custodyaccountfees", params, credentials, opts),
+    with :ok <- validate_history_opts(:custody_fees, opts),
+         {:ok, body, _headers} <- post("/v1/custodyaccountfees", params, credentials, opts),
          {:ok, rows} <- flattened_rows(body),
          :ok <- transfers_complete(rows, Keyword.get(opts, :limit)) do
       {:ok, rows}
@@ -3144,7 +3364,8 @@ defmodule DpExchange.Gemini.Private do
   @spec get_staking_rewards(map(), keyword()) ::
           {:ok, [StakingReward.t()]} | {:error, term()} | {:refused, term()}
   def get_staking_rewards(credentials, opts) do
-    with {:ok, since} <- required_opt(opts, :since) do
+    with {:ok, since} <- required_opt(opts, :since),
+         :ok <- validate_history_opts(:staking_rewards, opts) do
       params =
         %{"since" => iso_timestamp_param(since)}
         |> put_present("until", iso_timestamp_param(Keyword.get(opts, :until)))
@@ -3289,7 +3510,8 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("limit", limit || @staking_history_page_max)
       |> put_present("providerId", Keyword.get(opts, :provider_id))
 
-    with {:ok, groups, _headers} <- post("/v1/staking/history", params, credentials, opts),
+    with :ok <- validate_history_opts(:staking_history, opts),
+         {:ok, groups, _headers} <- post("/v1/staking/history", params, credentials, opts),
          {:ok, groups} <- list_rows(groups),
          {:ok, transactions} <- to_staking_history(groups),
          :ok <- page_complete(transactions, limit, @staking_history_page_max) do
@@ -3797,20 +4019,22 @@ defmodule DpExchange.Gemini.Private do
   @spec list_funding_payments(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_funding_payments(credentials, opts) do
+    with :ok <- validate_history_opts(:funding_payments, opts),
+         {:ok, body, _headers} <- post(funding_payments_path(opts), %{}, credentials, opts) do
+      flattened_rows(body)
+    end
+  end
+
+  defp funding_payments_path(opts) do
     query =
       []
       |> maybe_param("since", timestamp_param(Keyword.get(opts, :since)))
       |> maybe_param("to", timestamp_param(Keyword.get(opts, :to)))
       |> Enum.reverse()
 
-    path =
-      case query do
-        [] -> "/v1/perpetuals/fundingPayment"
-        pairs -> "/v1/perpetuals/fundingPayment?" <> URI.encode_query(pairs)
-      end
-
-    with {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
-      flattened_rows(body)
+    case query do
+      [] -> "/v1/perpetuals/fundingPayment"
+      pairs -> "/v1/perpetuals/fundingPayment?" <> URI.encode_query(pairs)
     end
   end
 
@@ -4160,7 +4384,9 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("newAccount", Keyword.get(opts, :shortname))
 
     if Map.has_key?(params, "newName") or Map.has_key?(params, "newAccount") do
-      with {:ok, body, _headers} <- post("/v1/account/rename", params, credentials, opts),
+      # Once: `account` names the CURRENT shortname, so a rename that took effect and lost its
+      # reply, sent again, finds no such account and reads as a refusal. See `post_once/4`.
+      with {:ok, body, _headers} <- post_once("/v1/account/rename", params, credentials, opts),
            do: {:ok, body}
     else
       {:error, :nothing_to_rename}
@@ -4189,7 +4415,8 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("limit_accounts", Keyword.get(opts, :limit))
       |> put_present("timestamp", timestamp_param(Keyword.get(opts, :since)))
 
-    with {:ok, body, _headers} <- post("/v1/account/list", params, credentials, opts),
+    with :ok <- validate_history_opts(:accounts, opts),
+         {:ok, body, _headers} <- post("/v1/account/list", params, credentials, opts),
          {:ok, rows} <- flattened_rows(body),
          :ok <- page_complete(rows, Keyword.get(opts, :limit), @accounts_page_max) do
       {:ok, rows}
@@ -4284,7 +4511,7 @@ defmodule DpExchange.Gemini.Private do
         {:refused, refused_token_body(body)}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
+        status_error(status, body)
 
       {:error, reason} ->
         {:error, reason}
@@ -4321,8 +4548,10 @@ defmodule DpExchange.Gemini.Private do
     case credentials do
       # A blank token authenticates nothing, so signing it revokes nothing and is refused here.
       %{access_token: token} when is_binary(token) and token != "" ->
+        # Once: a revoke that took effect leaves the token dead, so a repeat is answered 401
+        # and reads as a refusal of a revoke that worked. See `post_once/4`.
         with {:ok, body, _headers} <-
-               post(
+               post_once(
                  "/v1/oauth/revokeByToken",
                  %{},
                  credentials,
@@ -4431,8 +4660,10 @@ defmodule DpExchange.Gemini.Private do
   @spec cancel_clearing_order(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def cancel_clearing_order(clearing_id, credentials, opts) when is_binary(clearing_id) do
-    with {:ok, body, _headers} <-
-           post("/v1/clearing/cancel", %{"clearing_id" => clearing_id}, credentials, opts) do
+    params = %{"clearing_id" => clearing_id}
+
+    # Once: a cancel sent again after it took effect is answered as a cancel that did not.
+    with {:ok, body, _headers} <- post_once("/v1/clearing/cancel", params, credentials, opts) do
       clearing_result(body, "ok")
     end
   end
@@ -4469,7 +4700,10 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, params} <- clearing_order_params(request) do
       params = Map.put(params, "clearing_id", clearing_id)
 
-      with {:ok, body, _headers} <- post("/v1/clearing/confirm", params, credentials, opts),
+      # Once, like the create: a confirm that executed and lost its reply, sent again, is
+      # answered "already confirmed", which reads as `{:refused, _}` for a trade that
+      # happened. See `post_once/4`.
+      with {:ok, body, _headers} <- post_once("/v1/clearing/confirm", params, credentials, opts),
            do: clearing_result(body, "confirmed")
     end
   end
@@ -4494,7 +4728,8 @@ defmodule DpExchange.Gemini.Private do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_orders(credentials, opts) do
     with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration),
-         :ok <- window_pair(opts, :submission_start, :submission_end, :submission) do
+         :ok <- window_pair(opts, :submission_start, :submission_end, :submission),
+         :ok <- validate_history_opts(:clearing_orders, opts) do
       params =
         %{}
         |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
@@ -4531,7 +4766,8 @@ defmodule DpExchange.Gemini.Private do
   @spec list_clearing_brokers(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_brokers(credentials, opts) do
-    with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration) do
+    with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration),
+         :ok <- validate_history_opts(:clearing_brokers, opts) do
       params =
         %{}
         |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
@@ -4566,17 +4802,20 @@ defmodule DpExchange.Gemini.Private do
   def list_clearing_trades(credentials, opts) do
     limit = Keyword.get(opts, :limit)
 
-    params =
-      %{}
-      |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
-      |> put_present("timestamp_nanos", nanos_param(Keyword.get(opts, :since_nanos)))
-      |> put_present("limit_per_account", limit || @clearing_trades_page_max)
-
-    with {:ok, body, _headers} <- post("/v1/clearing/trades", params, credentials, opts),
+    with :ok <- validate_history_opts(:clearing_trades, opts),
+         {:ok, body, _headers} <-
+           post("/v1/clearing/trades", clearing_trades_params(opts), credentials, opts),
          {:ok, rows} <- clearing_rows(body, "results"),
          :ok <- page_complete(rows, limit, @clearing_trades_page_max) do
       {:ok, rows}
     end
+  end
+
+  defp clearing_trades_params(opts) do
+    %{}
+    |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
+    |> put_present("timestamp_nanos", nanos_param(Keyword.get(opts, :since_nanos)))
+    |> put_present("limit_per_account", Keyword.get(opts, :limit) || @clearing_trades_page_max)
   end
 
   # The four terms the venue requires on every clearing write, and none of them defaulted.

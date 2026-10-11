@@ -179,9 +179,23 @@ defmodule DpExchange.Gemini.FakeParityTest do
     end
 
     test "a stop-limit order takes no execution option, in both adapters" do
-      assert Private.order_wire(:stop_limit, :ioc) ==
-               {:error,
-                {:unsupported_time_in_force, "immediate-or-cancel", :not_allowed_on_stop_limit}}
+      expected =
+        {:error, {:unsupported_time_in_force, "immediate-or-cancel", :not_allowed_on_stop_limit}}
+
+      assert Private.order_wire(:stop_limit, :ioc) == expected
+
+      # The test's name says "in both adapters", and it asserted only the first.
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100",
+        stop_price: "99",
+        order_type: :stop_limit,
+        time_in_force: :ioc
+      }
+
+      assert Fake.place_order(%{api_key: "k", api_secret: "s"}, request, []) == expected
     end
   end
 end
