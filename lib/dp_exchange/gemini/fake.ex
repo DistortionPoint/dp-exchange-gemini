@@ -542,9 +542,9 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       # The id is checked BEFORE the credential, as `Private.cancel_order/3` does, through
       # the same `Private.order_id_param/1`, so the fake cannot be the more permissive one.
-      with {:ok, _wire_id} <- Private.order_id_param(order_id),
+      with {:ok, wire_id} <- Private.order_id_param(order_id),
            :ok <- authenticated(credentials, opts) do
-        {:ok, %{order(%{}) | id: order_id, status: :cancelled}}
+        {:ok, %{order(%{}) | id: Integer.to_string(wire_id), status: :cancelled}}
       end
     end)
   end
@@ -552,9 +552,9 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
     with_injection(fn ->
-      with {:ok, _wire_id} <- Private.order_id_param(order_id),
+      with {:ok, wire_id} <- Private.order_id_param(order_id),
            :ok <- authenticated(credentials, opts) do
-        {:ok, %{order(%{}) | id: order_id}}
+        {:ok, %{order(%{}) | id: Integer.to_string(wire_id)}}
       end
     end)
   end
@@ -719,7 +719,10 @@ defmodule DpExchange.Gemini.Fake do
       )
 
     %Types.Order{
-      id: "fake-order-1",
+      # Numeric, as the venue's are, so `Private.order_id_param/1` (which `get_order/3` and
+      # `cancel_order/3` check through) accepts the id this fake issued itself. It was
+      # `"fake-order-1"`, which those two refused: issue #5.
+      id: "1",
       symbol: canonical(Map.get(request, :symbol, "BTC-USD")),
       side: Map.get(request, :side, :buy),
       order_type: order_type_of(wire_type, options),
@@ -1256,7 +1259,11 @@ defmodule DpExchange.Gemini.Fake do
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.Conversion{
-           id: "fake-gemini-quote-1",
+           # Numeric, as the venue's `quoteId` is, so `commit_conversion/2` (which checks the id
+           # through `Private.validate_commit_terms/2`) accepts the quote this fake issued.
+           # `"fake-gemini-quote-1"` was refused as `:invalid_quote_id`, the same defect as
+           # issue #5 for orders.
+           id: "1",
            status: :quoted,
            from_asset: from,
            to_asset: to,

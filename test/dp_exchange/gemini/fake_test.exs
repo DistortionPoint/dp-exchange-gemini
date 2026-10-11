@@ -342,6 +342,22 @@ defmodule DpExchange.Gemini.FakeTest do
       assert order.side == :sell
       assert Decimal.equal?(order.price, Decimal.new("3000"))
     end
+
+    test "the id a placed order carries is one get_order/3 and cancel_order/3 accept" do
+      # Issue #5: `place_order/3` issued `"fake-order-1"`, which the id check both of these
+      # share with the real adapter refuses, so a place -> get -> cancel round trip failed.
+      request = %{symbol: "BTC-USD", side: :buy, quantity: "0.001", price: "100"}
+
+      assert {:ok, placed} = Fake.place_order(@credentials, Map.put(request, :order_type, :limit))
+      assert {:ok, %{id: id}} = Fake.get_order(@credentials, placed.id, [])
+      assert id == placed.id
+      assert {:ok, %{id: ^id, status: :cancelled}} = Fake.cancel_order(@credentials, id, [])
+    end
+
+    test "an integer id comes back as the string the real decoder makes of it" do
+      assert {:ok, %{id: "123456"}} = Fake.get_order(@credentials, 123_456, [])
+      assert {:ok, %{id: "123456"}} = Fake.cancel_order(@credentials, 123_456, [])
+    end
   end
 
   describe "it refuses exactly what the real venue refuses" do
@@ -455,6 +471,19 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:ok, conversion} = Fake.commit_conversion("1234", @terms)
 
       assert conversion.status == :settled
+    end
+
+    test "the quote's own id is one commit_conversion/2 accepts" do
+      # The quote id was `"fake-gemini-quote-1"`, which the shared quote-id check refuses.
+      assert {:ok, quoted} =
+               Fake.quote_conversion("USD", "BTC", Decimal.new("100"),
+                 symbol: "BTC-USD",
+                 side: :buy,
+                 credentials: @credentials
+               )
+
+      assert {:ok, %{id: id, status: :settled}} = Fake.commit_conversion(quoted.id, @terms)
+      assert id == quoted.id
     end
 
     test "a term that is nil or blank is missing, as the real package counts it" do

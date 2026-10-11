@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Fake.place_order/3` issued an id its own `get_order/3` and `cancel_order/3` refused**
+  (issue #5). Since 0.2.108 those two check the id through `Private.order_id_param/1`, as
+  the real adapter does, which accepts only the venue's numeric ids, but the fake still
+  issued `"fake-order-1"`, so a place -> get -> cancel round trip failed with
+  `{:invalid_order_id, "fake-order-1"}`. It now issues `"1"`. An integer id given to
+  `get_order/3` or `cancel_order/3` comes back as the string the real decoder makes of it,
+  not as the integer.
+- **`Fake.quote_conversion/4` issued a quote id its own `commit_conversion/2` refused.** The
+  same defect as issue #5: the commit checks the id through
+  `Private.validate_commit_terms/2`, which accepts only the venue's numeric `quoteId`, and
+  the fake issued `"fake-gemini-quote-1"`, refused as `:invalid_quote_id`. It now issues `"1"`.
+
 ## [0.2.109] - 2026-10-11
 
 ### Fixed (public REST precision, depth sequence bookkeeping)
