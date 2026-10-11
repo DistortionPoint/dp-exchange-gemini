@@ -836,7 +836,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       Private.get_balances(@credentials, plug: plug, retry_attempts: 2, retry_delay: 1)
 
       assert_receive :attempt
-      assert_receive :attempt, 1_000
+      assert_receive :attempt, 5_000
     end
   end
 

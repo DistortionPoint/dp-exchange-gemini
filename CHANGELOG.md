@@ -20,6 +20,55 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`WsDecode` decoded every book row twice per frame.** The snapshot, anchor and delta paths
+  ran a `readable_side/1` pass (each price and quantity through `Decimal.parse/1`) and then
+  parsed the same rows again to build the levels. Each side is now read once and the result
+  checked against what the venue sent (`fully_read?/2`). The refusals are unchanged: a row that
+  is not a pair of two readable decimals still refuses the whole side. Pinned by
+  `ws_decode_single_pass_test.exs`, which drives eight kinds of damaged row through all four
+  paths.
+- **A JSON float skipped the exponent bound.** `decimal/1` in `WsDecode` and `Rest` bounded
+  strings and `Decimal`s but not floats, so a frame carrying `1.0e300` (the socket decodes with
+  plain `Jason.decode/1`) reached a consumer as `1E+300`. It is now unreadable like any other
+  out-of-range number. The venue's AsyncAPI types these fields as strings, so this is a guard,
+  not a repair of observed traffic.
+- **`Environment.websocket_url/2` interpolated `:snapshot` as given.** `"1&x=y"`, `0` or `-2`
+  became a query parameter the vendor does not define. It is `-1` or a positive integer, and
+  anything else raises `ArgumentError`. `Socket` only ever passes `-1`.
+- **`WsChannels.address/2` filled a blank symbol into the template** and answered
+  `{:ok, "@bookTicker"}`, an address with no channel behind it. It is
+  `{:error, {:invalid_symbol, symbol}}`.
+
+- **`Fake.get_historical_prices/4` ignored `range`.** It returned its one candle at the fixed
+  clock whatever the range, where the real call keeps only rows `Rest.within?/2` accepts. It
+  now filters with that same function: a range ending before the bar is `{:ok, []}`. A
+  `:start` after the fixed clock moves the bar to the first bar boundary at or after `:start`
+  (the venue window for narrow widths only reaches the present), and `1w`/`1M` open at
+  `:start` itself.
+- **`Fake.get_trades/2` ignored `:since`, `:since_tid` and `:limit`.** It now honours them:
+  `:since_tid` (exclusive) wins over `:since` (exclusive; a `DateTime`, or a raw epoch read as
+  milliseconds from 1e11 up and seconds below, the vendor's "either" with no live
+  measurement), and `:limit` keeps the most recent N after broken prints are dropped.
+- **`Rest.get_trades/2` sent whatever `:since`, `:since_tid` and `:limit` it was given.**
+  `limit: "ten"` was a venue 400 and `since: ~D[...]` raised in `URI.encode_query/1`. It is
+  now `{:error, {:invalid_option, key, value}}` before any request, from the new
+  `Rest.validate_trade_opts/1`, which the fake calls too. `:limit` of `0` is refused because
+  the venue says nothing about what 0 returns.
+
+### Tests
+
+- Every bare `assert_receive` now waits up to 5 s (`assert_receive_timeout` in
+  `test_helper.exs`), and the explicit 0.5 s, 1 s and 2 s waits in `feed_test.exs`,
+  `fake_test.exs`, `socket_test.exs` and `money_movement_test.exs` were raised to 5 s.
+
+### Unmeasured, left alone
+
+- `Rest.get_historical_prices/4` checks a perpetual's range against the spot `1m` window
+  (1440 bars). `/v2/derivatives/candles` documents no window, so the real size is unknown.
+  The check errs toward refusing.
+
 ## [0.2.114] - 2026-10-11
 
 ### Fixed

@@ -96,6 +96,11 @@ defmodule DpExchange.Gemini.WsChannels do
       String.contains?(template, "{symbol}") and is_nil(symbol) ->
         {:error, {:channel_requires_symbol, channel}}
 
+      # A blank symbol filled the template as `"@bookTicker"`: an address the venue has no
+      # channel for, which subscribes to nothing and answers with silence, not a refusal.
+      is_binary(symbol) and String.trim(symbol) == "" ->
+        {:error, {:invalid_symbol, symbol}}
+
       true ->
         {:ok, String.replace(template, "{symbol}", to_string(symbol))}
     end

@@ -29,6 +29,14 @@ defmodule DpExchange.Gemini.EnvironmentTest do
                "wss://ws.sandbox.gemini.com/?snapshot=20"
     end
 
+    test "a `snapshot` that is not -1 or a positive integer raises instead of reaching the URL" do
+      for bad <- [0, -2, "1&x=y", 1.5, :full, "20"] do
+        assert_raise ArgumentError, ~r/snapshot must be -1 or a positive integer/, fn ->
+          Environment.websocket_url(:production, snapshot: bad)
+        end
+      end
+    end
+
     test "the REST host is api.sandbox, NOT exchange.sandbox" do
       # Gemini's market-data page names `exchange.sandbox.gemini.com` as the sandbox base
       # URL. That is the website. Measured 2026-08-28: `/v1/symbols` there returns 404 and

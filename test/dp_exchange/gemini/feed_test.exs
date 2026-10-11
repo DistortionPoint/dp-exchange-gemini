@@ -208,7 +208,10 @@ defmodule DpExchange.Gemini.FeedTest do
       _settled = Feed.coverage(feed)
 
       assert queue_len(slow) == 2
-      for _each <- 1..6, do: assert_receive({:forwarded, {:dp_exchange, :gemini, %Quote{}}}, 500)
+
+      for _each <- 1..6 do
+        assert_receive {:forwarded, {:dp_exchange, :gemini, %Quote{}}}, 5_000
+      end
     end
 
     # Consumes immediately and hands everything to `to`, so its own mailbox stays empty and
@@ -508,7 +511,7 @@ defmodule DpExchange.Gemini.FeedTest do
       # A generous explicit timeout, not ExUnit's 100ms default — same reasoning as the
       # resubscribe-latch test below: test -> Feed -> `fan_out/2` -> back to test is a
       # real hop under this suite's own concurrency.
-      assert_receive {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}, 1_000
+      assert_receive {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}, 5_000
     end
 
     test "notices go to notice subscribers, not quote subscribers" do
@@ -522,7 +525,7 @@ defmodule DpExchange.Gemini.FeedTest do
       # real hop under this suite's own concurrency, and a tight default here is an
       # intermittent, load-dependent failure rather than a real one. Found the same way:
       # by running the full suite, not this test alone.
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 1_000
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 5_000
     end
 
     test "a dead subscriber does not stop delivery to a live one" do
@@ -538,10 +541,10 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
 
       # See the timeout note on "a quote reaches the subscriber", above.
-      assert_receive {:dp_exchange, :gemini, %Quote{}}, 1_000
+      assert_receive {:dp_exchange, :gemini, %Quote{}}, 5_000
     end
 
-    test "a subscriber registered by name (not a raw pid) is delivered to rather than crashing the feed" do
+    test "a subscriber registered by name (not a pid) is delivered to, not a feed crash" do
       # Filed as a live bug on the sibling Coinbase package: Process.alive?/1 only
       # accepts a pid and raises on anything else, so a consumer that registers itself
       # under a name and hands that name to `to:` — ordinary OTP practice — crashed the
@@ -554,7 +557,7 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
 
       # See the timeout note on "a quote reaches the subscriber", above.
-      assert_receive {:dp_exchange, :gemini, %Quote{}}, 1_000
+      assert_receive {:dp_exchange, :gemini, %Quote{}}, 5_000
       assert Process.alive?(feed)
 
       Process.unregister(name)
@@ -747,7 +750,7 @@ defmodule DpExchange.Gemini.FeedTest do
     # `Core.PollingFeed`'s `notice_state` shape, so a consumer hears about the outage once
     # rather than once a minute for as long as it lasts.
 
-    test "a failing resubscribe emits a warning coverage_change notice, once, not on every tick" do
+    test "a failing resubscribe emits one warning coverage_change notice, not one per tick" do
       socket = always_fails_socket(self())
       feed = start_feed(socket: socket)
       :ok = Feed.subscribe_notices(feed, to: self())
@@ -765,7 +768,7 @@ defmodule DpExchange.Gemini.FeedTest do
       # that chain can occasionally take longer than 100ms without anything being wrong.
       # A tight default here was an intermittent, load-dependent CI failure waiting to
       # happen — found by running the full suite repeatedly, not any one test alone.
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change} = notice}, 1_000
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change} = notice}, 5_000
       assert notice.severity == :warning
       assert notice.details.reason =~ "send_timeout"
 
@@ -905,7 +908,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       Process.exit(socket, :kill)
 
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 500
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 5_000
       assert Process.alive?(feed)
 
       # Cleared immediately — not "eventually, once something else overwrites it" — the
@@ -941,7 +944,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       Process.exit(socket, :kill)
 
-      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 500
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 5_000
       refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 700
 
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},

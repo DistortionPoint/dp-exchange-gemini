@@ -61,7 +61,7 @@ defmodule DpExchange.Gemini.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Types, Venue}
+  alias DpExchange.Core.{Capabilities, Config, FakeInjection, Timeframe, Types, Venue}
   alias DpExchange.Gemini.{Feed, Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
@@ -184,7 +184,10 @@ defmodule DpExchange.Gemini.Fake do
       with :ok <- perpetual_width(symbol, timeframe),
            :ok <- Rest.validate_history(timeframe, range) do
         if symbol in @symbols do
-          {:ok, [candle(symbol, timeframe)]}
+          # Filtered by `range` with the real call's own `Rest.within?/2`: a range the bar
+          # falls outside of is `{:ok, []}` there and here.
+          bar = candle_for(timeframe, symbol, range)
+          {:ok, Enum.filter([bar], &Rest.within?(&1, range))}
         else
           # Measured live 2026-09-06: `/v2/candles/{symbol}/{width}` refuses an unknown
           # symbol with a plain-text 400, `Supplied value '#{symbol}' is not a valid
@@ -194,6 +197,37 @@ defmodule DpExchange.Gemini.Fake do
         end
       end
     end)
+  end
+
+  # The one bar this fake has, opened at its fixed clock. A `:start` after that clock moves
+  # the bar to the first bar boundary at or after `:start`, so a range the venue window admits
+  # (for the narrow widths that only reaches the present) still holds a bar to return.
+  # `Rest.within?/2` then decides whether the range keeps it, as it does for real rows.
+  defp candle_for(timeframe, symbol, range) do
+    bar = candle(symbol, timeframe)
+
+    case Keyword.get(range, :start) do
+      %DateTime{} = start ->
+        if DateTime.compare(@at, start) == :lt,
+          do: %{bar | opened_at: bar_at_or_after(start, timeframe)},
+          else: bar
+
+      _no_start ->
+        bar
+    end
+  end
+
+  # `1w` and `1M` have no fixed width in Core, so the bar opens at `start` itself.
+  defp bar_at_or_after(start, timeframe) do
+    case Timeframe.seconds(timeframe) do
+      {:ok, width} ->
+        width_us = width * 1_000_000
+        start_us = DateTime.to_unix(start, :microsecond)
+        DateTime.from_unix!(div(start_us + width_us - 1, width_us) * width_us, :microsecond)
+
+      :error ->
+        start
+    end
   end
 
   # A perpetual's candles come from `/v2/derivatives/candles`, which serves `1m` and nothing
@@ -270,48 +304,89 @@ defmodule DpExchange.Gemini.Fake do
     symbol = canonical(symbol)
 
     with_injection(symbol, fn ->
-      if symbol in @symbols do
-        trades = [
-          %Types.Trade{
-            id: "5335307668",
-            symbol: symbol,
-            # The taker's side: a buyer lifted the offer.
-            side: :buy,
-            price: Decimal.new("3610.85"),
-            quantity: Decimal.new("0.27413495"),
-            timestamp: @at,
-            broken: false,
-            provider: :gemini
-          },
-          %Types.Trade{
-            id: "5335307669",
-            symbol: symbol,
-            side: :sell,
-            price: Decimal.new("9999.99"),
-            quantity: Decimal.new("1"),
-            timestamp: @at,
-            # A busted print. The fake carries one so a consumer's suite exercises the
-            # exclusion rather than assuming it.
-            broken: true,
-            provider: :gemini
-          }
-        ]
-
-        if Keyword.get(opts, :include_broken, false) do
-          {:ok, trades}
-        else
-          {:ok, Enum.reject(trades, & &1.broken)}
-        end
-      else
-        # This used to answer unconditionally for ANY symbol — never refusing at all,
-        # which is more capable than `Rest.get_trades/2` rather than less. Measured live
-        # 2026-09-06: `GET /v1/trades/{symbol}` refuses an unlisted symbol with
-        # `{"reason":"BadRequest",...}`, a reason outside `Rest`'s recognised vocabulary
-        # and so `{:unknown_reason, ...}` there too. Found in the parity sweep.
-        {:refused, {:unknown_reason, "BadRequest"}}
-      end
+      # The real call's own option check, before the symbol: it refuses a `:since`,
+      # `:since_tid` or `:limit` it cannot send without asking the venue anything.
+      with :ok <- Rest.validate_trade_opts(opts), do: fake_tape(symbol, opts)
     end)
   end
+
+  # `:since_tid` wins over `:since`, as the venue states; both are "after", so exclusive. A
+  # raw integer `:since` is read as milliseconds from 1e11 up and seconds below it, the vendor's
+  # "either seconds or milliseconds" (unmeasured beyond the spec's own examples). `:limit`
+  # keeps the most recent N of what survives, oldest first, as `Rest.get_trades/2` returns.
+  defp fake_tape(symbol, opts) do
+    if symbol in @symbols do
+      trades =
+        if Keyword.get(opts, :include_broken, false),
+          do: tape(symbol),
+          else: Enum.reject(tape(symbol), & &1.broken)
+
+      {:ok, trades |> after_cursor(opts) |> most_recent(Keyword.get(opts, :limit))}
+    else
+      # This used to answer unconditionally for ANY symbol — never refusing at all,
+      # which is more capable than `Rest.get_trades/2` rather than less. Measured live
+      # 2026-09-06: `GET /v1/trades/{symbol}` refuses an unlisted symbol with
+      # `{"reason":"BadRequest",...}`, a reason outside `Rest`'s recognised vocabulary
+      # and so `{:unknown_reason, ...}` there too. Found in the parity sweep.
+      {:refused, {:unknown_reason, "BadRequest"}}
+    end
+  end
+
+  defp tape(symbol) do
+    [
+      %Types.Trade{
+        id: "5335307668",
+        symbol: symbol,
+        # The taker's side: a buyer lifted the offer.
+        side: :buy,
+        price: Decimal.new("3610.85"),
+        quantity: Decimal.new("0.27413495"),
+        timestamp: @at,
+        broken: false,
+        provider: :gemini
+      },
+      %Types.Trade{
+        id: "5335307669",
+        symbol: symbol,
+        side: :sell,
+        price: Decimal.new("9999.99"),
+        quantity: Decimal.new("1"),
+        timestamp: @at,
+        # A busted print. The fake carries one so a consumer's suite exercises the
+        # exclusion rather than assuming it.
+        broken: true,
+        provider: :gemini
+      }
+    ]
+  end
+
+  defp after_cursor(trades, opts) do
+    case {Keyword.get(opts, :since_tid), Keyword.get(opts, :since)} do
+      {tid, _since} when is_integer(tid) ->
+        Enum.filter(trades, &(String.to_integer(&1.id) > tid))
+
+      {nil, nil} ->
+        trades
+
+      {nil, since} ->
+        Enum.filter(trades, &(DateTime.compare(&1.timestamp, since_instant(since)) == :gt))
+    end
+  end
+
+  defp since_instant(%DateTime{} = at), do: at
+  defp since_instant(ms) when ms >= 100_000_000_000, do: unix_or_end_of_time(ms, :millisecond)
+  defp since_instant(seconds), do: unix_or_end_of_time(seconds, :second)
+
+  # A cursor beyond `DateTime`'s range is after every trade, not a raise.
+  defp unix_or_end_of_time(value, unit) do
+    case DateTime.from_unix(value, unit) do
+      {:ok, at} -> at
+      {:error, _out_of_range} -> ~U[9999-12-31 23:59:59Z]
+    end
+  end
+
+  defp most_recent(trades, nil), do: trades
+  defp most_recent(trades, limit), do: Enum.take(trades, -limit)
 
   @impl true
   def get_fx_rate(pair, at, opts \\ []) do

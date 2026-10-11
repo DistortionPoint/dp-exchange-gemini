@@ -185,9 +185,10 @@ defmodule DpExchange.Gemini.WsDecode do
     # All-or-error. Found 2026-10-10 by reading `parsed_levels/1`: a snapshot row with an
     # unreadable price was dropped and one with an unreadable quantity kept as `{price, nil}`,
     # so a damaged frame was delivered as a complete book with every other value real. Diffs
-    # already refuse through `readable_side/1`; a snapshot holds itself to the same rule, and
+    # already refuse through `fully_read?/2`; a snapshot holds itself to the same rule, and
     # `Socket` reports the refusal as its existing `:degraded` notice.
-    with :ok <- readable_side(bids), :ok <- readable_side(asks) do
+    with {:ok, bids} <- read_sorted(bids, :desc),
+         {:ok, asks} <- read_sorted(asks, :asc) do
       build_snapshot(frame, bids, asks, symbol, observed_at)
     end
   end
@@ -202,8 +203,8 @@ defmodule DpExchange.Gemini.WsDecode do
     {:ok,
      %OrderBook{
        symbol: symbol,
-       bids: levels(bids, :desc),
-       asks: levels(asks, :asc),
+       bids: bids,
+       asks: asks,
        # **`nil`, and that is the fix.** The venue publishes no time for this frame — its own
        # AsyncAPI requires `[lastUpdateId, bids, asks]` for `OrderBookSnapshot`, where
        # `BookTicker` requires an `E` event time — so there is nothing venue-stamped to put
@@ -268,7 +269,8 @@ defmodule DpExchange.Gemini.WsDecode do
   def to_order_book_from_depth_update(%{"b" => bids, "a" => asks} = frame, symbol, observed_at)
       when is_list(bids) and is_list(asks) do
     # All-or-error, as `to_order_book/3`: an unreadable row refuses the frame (2026-10-10).
-    with :ok <- readable_side(bids), :ok <- readable_side(asks) do
+    with {:ok, bids} <- read_sorted(bids, :desc),
+         {:ok, asks} <- read_sorted(asks, :asc) do
       build_depth_anchor(frame, bids, asks, symbol, observed_at)
     end
   end
@@ -282,8 +284,8 @@ defmodule DpExchange.Gemini.WsDecode do
     {:ok,
      %OrderBook{
        symbol: symbol,
-       bids: levels(bids, :desc),
-       asks: levels(asks, :asc),
+       bids: bids,
+       asks: asks,
        venue_time: venue_time_or_nil(frame["E"]),
        observed_at: observed_at,
        sequence: frame["u"],
@@ -321,11 +323,14 @@ defmodule DpExchange.Gemini.WsDecode do
   @spec to_order_book_delta(map(), String.t()) ::
           {:ok, OrderBookDelta.t()} | {:error, term()}
   def to_order_book_delta(frame, symbol) do
+    # Each side is decoded ONCE: `depth_changes/1` reads the rows, and `fully_read?/2` then
+    # compares them with what the venue sent without parsing a second time. This used to run a
+    # `readable_side/1` pass (every price and quantity through `Decimal.parse/1`) and then
+    # `depth_changes/1` (the same parse again), twice per frame on the socket's hot path.
     with {:ok, timestamp} <- nanosecond_time(frame["E"]),
-         :ok <- readable_side(frame["b"]),
-         :ok <- readable_side(frame["a"]) do
-      %{bids: bids, asks: asks} = depth_changes(frame)
-
+         %{bids: bids, asks: asks} <- depth_changes(frame),
+         :ok <- fully_read?(frame["b"], bids),
+         :ok <- fully_read?(frame["a"], asks) do
       levels =
         Enum.map(bids, fn {price, quantity} -> {:bid, price, quantity} end) ++
           Enum.map(asks, fn {price, quantity} -> {:ask, price, quantity} end)
@@ -370,9 +375,16 @@ defmodule DpExchange.Gemini.WsDecode do
   # `{direction, Decimal}` rather than term order, matching `dp_exchange_coinbase`'s
   # `sorted/2` — the only package in the family that was already doing this — because
   # `Decimal` structs do not compare correctly as plain terms.
-  defp levels(rows, direction) when is_list(rows),
-    do:
-      rows |> parsed_levels() |> Enum.sort_by(fn {price, _qty} -> price end, {direction, Decimal})
+  #
+  # Read ONCE and refused whole: a row the venue sent and this package cannot read refuses the
+  # side (`fully_read?/2`), and only a fully read side is sorted.
+  defp read_sorted(rows, direction) when is_list(rows) do
+    parsed = parsed_levels(rows)
+
+    with :ok <- fully_read?(rows, parsed) do
+      {:ok, Enum.sort_by(parsed, fn {price, _qty} -> price end, {direction, Decimal})}
+    end
+  end
 
   # A DELTA side: read, and left in the venue's order. `Core.Types.OrderBookDelta` requires
   # exactly that — its entries "arrive in the venue's own order", and sorting them "would
@@ -391,19 +403,24 @@ defmodule DpExchange.Gemini.WsDecode do
   # that is the same silent gap: a dropped row is a change the consumer never applies, and a
   # `nil` quantity is neither the venue's `"0"` (remove) nor a size. So the frame is
   # unreadable, and `Socket` reports it as one: discard and resubscribe.
-  defp readable_side(nil), do: :ok
+  #
+  # `parsed` is what `parsed_levels/1` made of `raw`. A row it dropped (not a pair, or an
+  # unreadable price) makes the counts differ, and one it kept with an unreadable quantity
+  # carries `nil`; either way the side is refused. That is exactly the old per-row rule
+  # ("a pair of two readable decimals") decided from the one parse instead of a second.
+  defp fully_read?(nil, []), do: :ok
 
-  defp readable_side(side) when is_list(side) do
-    if Enum.all?(side, &readable_row?/1), do: :ok, else: {:error, :unexpected_response_shape}
+  defp fully_read?(raw, parsed) when is_list(raw) do
+    if length(raw) == length(parsed) and Enum.all?(parsed, fn {_price, qty} -> qty != nil end),
+      do: :ok,
+      else: {:error, :unexpected_response_shape}
   end
 
-  defp readable_side(_unreadable), do: {:error, :unexpected_response_shape}
+  defp fully_read?(_unreadable, _parsed), do: {:error, :unexpected_response_shape}
 
-  defp readable_row?([price, quantity]), do: decimal(price) != nil and decimal(quantity) != nil
-  defp readable_row?(_row), do: false
-
-  # Found 2026-10-10: every caller now runs `readable_side/1` first, so the drop and the nil
-  # below cannot occur on a frame that reaches here; they stay as the last line of defence.
+  # Found 2026-10-10: every caller checks the result with `fully_read?/2`, so a frame that
+  # reaches a consumer never carries the drop or the nil below; `depth_changes/1`, which is
+  # public, is the one caller that sees them.
   #
   # A level whose PRICE cannot be read is dropped rather than carried as `{nil, _}`:
   # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, `hd(bids)` landing on one
@@ -472,7 +489,9 @@ defmodule DpExchange.Gemini.WsDecode do
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+  # Bounded like every other branch: `1.0e300` is a float the socket's `Jason.decode/1` can
+  # hand over, and `Decimal.from_float/1` keeps its exponent (`1E+300`).
+  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> bounded()
 
   # `Decimal.parse/1` requiring the whole string be consumed is NOT a sufficient guard on
   # its own, which is the half this copy was missing. "NaN", "Inf" and "-Inf" all parse

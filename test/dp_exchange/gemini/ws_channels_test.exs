@@ -106,6 +106,17 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert {:error, {:channel_requires_symbol, :trade}} = WsChannels.address(:trade)
     end
 
+    test "a blank symbol is an error, not an address the venue has no channel for" do
+      for blank <- ["", "   "] do
+        assert {:error, {:invalid_symbol, ^blank}} = WsChannels.address(:book_ticker, blank)
+        assert {:error, {:invalid_symbol, ^blank}} = WsChannels.address(:depth_fast, blank)
+      end
+
+      # A per-account channel given a blank is still a symbol it does not take.
+      assert {:error, {:channel_takes_no_symbol, :orders_account}} =
+               WsChannels.address(:orders_account, "")
+    end
+
     test "an unknown channel is an error, not a guessed address" do
       assert {:error, {:unknown_channel, :candles}} = WsChannels.address(:candles, "btcusd")
     end
@@ -533,7 +544,7 @@ defmodule DpExchange.Gemini.WsChannelsTest do
     end
   end
 
-  describe "the anchor frame that follows a snapshot-parameter (re)subscribe is a full OrderBook" do
+  describe "the anchor frame after a snapshot-parameter (re)subscribe is a full OrderBook" do
     @observed ~U[2026-08-28 12:00:00Z]
 
     # Same envelope as an ordinary depthUpdate (websocket.yaml:1263-1270) — `b`/`a` just

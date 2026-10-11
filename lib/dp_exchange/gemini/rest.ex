@@ -664,6 +664,38 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_trades(String.t(), keyword()) ::
           {:ok, [Trade.t()]} | {:error, term()} | {:refused, term()}
   def get_trades(symbol, opts) do
+    with :ok <- validate_trade_opts(opts), do: fetch_trades(symbol, opts)
+  end
+
+  @doc """
+  Whether `opts[:since]`, `opts[:since_tid]` and `opts[:limit]` are values `get_trades/2` can
+  send, checked without sending anything.
+
+  `:since` is a `DateTime` or a non-negative integer (the venue takes seconds or
+  milliseconds), `:since_tid` a non-negative integer and `:limit` a positive integer; absent
+  or `nil` is fine for all three. Anything else is `{:error, {:invalid_option, key, value}}`.
+  These used to reach the venue as whatever the caller wrote (`limit: "ten"` became a 400,
+  `since: ~D[...]` raised in `URI.encode_query/1`). A `limit` of `0` is refused because the
+  venue documents a minimum of 0 and says nothing about what 0 returns. Exposed so
+  `DpExchange.Gemini.Fake` refuses exactly as this does.
+  """
+  @spec validate_trade_opts(keyword()) :: :ok | {:error, {:invalid_option, atom(), term()}}
+  def validate_trade_opts(opts) do
+    checks = [
+      since: &(is_nil(&1) or is_struct(&1, DateTime) or non_negative?(&1)),
+      since_tid: &(is_nil(&1) or non_negative?(&1)),
+      limit: &(is_nil(&1) or (is_integer(&1) and &1 > 0))
+    ]
+
+    case Enum.find(checks, fn {key, ok?} -> not ok?.(Keyword.get(opts, key)) end) do
+      nil -> :ok
+      {key, _ok?} -> {:error, {:invalid_option, key, Keyword.get(opts, key)}}
+    end
+  end
+
+  defp non_negative?(value), do: is_integer(value) and value >= 0
+
+  defp fetch_trades(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
     # Canonical, not the caller's spelling — see `get_historical_prices/4` (2026-10-10).
     canonical = reported_symbol(symbol, native)
@@ -1614,7 +1646,11 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
-  defp within?(candle, range) do
+  # The one filter `get_historical_prices/4` applies, exposed so `DpExchange.Gemini.Fake`
+  # keeps exactly the rows it would: both bounds inclusive, on `opened_at`.
+  @doc false
+  @spec within?(Candle.t(), keyword()) :: boolean()
+  def within?(candle, range) do
     after_start?(candle, Keyword.get(range, :start)) and
       before_end?(candle, Keyword.get(range, :end))
   end
@@ -1642,7 +1678,8 @@ defmodule DpExchange.Gemini.Rest do
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+  # Bounded like every other branch: `1.0e300` keeps its exponent through `from_float/1`.
+  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> bounded()
 
   # `Decimal.new/1` raises on a string the venue did not actually send a number in —
   # measured live at production scale against `wss://ws.gemini.com` for the socket's own

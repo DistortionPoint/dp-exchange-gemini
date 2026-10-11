@@ -672,7 +672,7 @@ defmodule DpExchange.Gemini.SocketTest do
       # above records, and observed the same way: one failure in a full, loaded run. Widening
       # the window costs nothing when the message is already there; a `sleep` would not,
       # since the whole point is not knowing in advance how long a loaded scheduler needs.
-      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 2_000
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 5_000
 
       log =
         ExUnit.CaptureLog.capture_log(fn ->

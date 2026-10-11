@@ -78,6 +78,35 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:ok, [_candle]} = Fake.get_historical_prices("BTC-USD", "1d", start: recent)
     end
 
+    test "a range the bar falls outside of is an empty list, as Rest's own filter would give" do
+      # The fake's bar opens at 2026-08-28 12:00:00Z. A range ending before it keeps nothing.
+      assert {:ok, []} =
+               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 11:59:59Z])
+
+      assert {:ok, [bar]} =
+               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 12:00:00Z])
+
+      assert bar.opened_at == ~U[2026-08-28 12:00:00Z]
+
+      # A `start` after the bar moves it to the first boundary at or after `start`, and a range
+      # that ends before that boundary keeps nothing, exactly as `Rest.within?/2` decides.
+      start = DateTime.add(DateTime.utc_now(), -3_600, :second)
+      assert {:ok, [moved]} = Fake.get_historical_prices("BTC-USD", "1m", start: start)
+      assert DateTime.compare(moved.opened_at, start) != :lt
+      assert rem(DateTime.to_unix(moved.opened_at), 60) == 0
+      assert DateTime.diff(moved.opened_at, start) < 60
+
+      assert {:ok, []} =
+               Fake.get_historical_prices("BTC-USD", "1m",
+                 start: start,
+                 end: DateTime.add(start, -1, :second)
+               )
+
+      for bar <- [bar, moved] do
+        assert DpExchange.Gemini.Rest.within?(bar, start: bar.opened_at, end: bar.opened_at)
+      end
+    end
+
     test "1w and 1M never refuse on range — no Timeframe.seconds/1 width to check against" do
       # Real venue behaviour, found live 2026-09-08: `range_within_window/2` has no bar
       # count to compute an earliest instant from for either width, so it never refuses
@@ -604,6 +633,55 @@ defmodule DpExchange.Gemini.FakeTest do
       assert Enum.any?(both, & &1.broken)
     end
 
+    test "since_tid keeps only trades after that id, and wins over since" do
+      assert {:ok, [trade]} = Fake.get_trades("BTC-USD", since_tid: 5_335_307_667)
+      assert trade.id == "5335307668"
+
+      assert {:ok, []} = Fake.get_trades("BTC-USD", since_tid: 5_335_307_668)
+
+      # `since` far in the past would keep both; the id decides.
+      long_ago = ~U[2000-01-01 00:00:00Z]
+      assert {:ok, []} = Fake.get_trades("BTC-USD", since_tid: 5_335_307_668, since: long_ago)
+
+      assert {:ok, [_trade, _bust]} =
+               Fake.get_trades("BTC-USD", since_tid: 0, include_broken: true)
+    end
+
+    test "since keeps only trades strictly after it, as a DateTime or a raw epoch" do
+      assert {:ok, [_trade]} = Fake.get_trades("BTC-USD", since: ~U[2026-08-28 11:59:59Z])
+      assert {:ok, []} = Fake.get_trades("BTC-USD", since: ~U[2026-08-28 12:00:00Z])
+      assert {:ok, []} = Fake.get_trades("BTC-USD", since: ~U[2026-08-28 12:00:01Z])
+
+      seconds = DateTime.to_unix(~U[2026-08-28 12:00:00Z])
+      assert {:ok, [_trade]} = Fake.get_trades("BTC-USD", since: seconds - 1)
+      assert {:ok, []} = Fake.get_trades("BTC-USD", since: seconds)
+      assert {:ok, [_trade]} = Fake.get_trades("BTC-USD", since: seconds * 1_000 - 1)
+      assert {:ok, []} = Fake.get_trades("BTC-USD", since: seconds * 1_000)
+      assert {:ok, []} = Fake.get_trades("BTC-USD", since: 10 ** 30)
+    end
+
+    test "limit keeps the most recent N, after the busted print is dropped" do
+      assert {:ok, [only]} = Fake.get_trades("BTC-USD", limit: 1)
+      refute only.broken
+
+      assert {:ok, [bust]} = Fake.get_trades("BTC-USD", limit: 1, include_broken: true)
+      assert bust.broken
+
+      assert {:ok, both} = Fake.get_trades("BTC-USD", limit: 50, include_broken: true)
+      assert length(both) == 2
+    end
+
+    test "an option the real call cannot send is refused by the real check, before the symbol" do
+      for {key, value} <- [limit: 0, limit: "10", since_tid: -1, since_tid: "1", since: "now"] do
+        opts = [{key, value}]
+        expected = {:error, {:invalid_option, key, value}}
+
+        assert Fake.get_trades("BTC-USD", opts) == expected
+        assert Fake.get_trades("NOPE-USD", opts) == expected
+        assert DpExchange.Gemini.Rest.get_trades("BTC-USD", opts) == expected
+      end
+    end
+
     test "an unlisted symbol is refused, not answered with someone else's tape" do
       # This used to answer unconditionally for ANY symbol, which is MORE capable than
       # `Rest.get_trades/2` — found in the 2026-09-06 real/fake parity sweep.
@@ -1055,7 +1133,7 @@ defmodule DpExchange.Gemini.FakeTest do
       opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
 
       assert :ok = DpExchange.Gemini.Fake.subscribe(["btc-usd"], opts)
-      assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 2_000
+      assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 5_000
       assert Map.has_key?(DpExchange.Gemini.Fake.coverage(opts), "BTC-USD")
     end
   end

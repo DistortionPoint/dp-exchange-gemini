@@ -111,14 +111,26 @@ defmodule DpExchange.Gemini.Environment do
 
   Omitting `opts` (or `:snapshot`) leaves the URL exactly as `websocket_url/1` always
   returned it — no query string.
+
+  **`:snapshot` must be `-1` or a positive integer, and anything else raises
+  `ArgumentError`.** The value was interpolated into the URL as it came, so `"1&x=y"` or
+  `0` reached the upgrade request as a parameter the vendor does not define. The spec names
+  exactly two shapes; a third is a mistake, and the venue's answer to it is unmeasured.
   """
   @spec websocket_url(t(), keyword()) :: String.t()
   def websocket_url(environment, opts \\ []) do
     base = Map.fetch!(@websocket, environment)
 
     case Keyword.get(opts, :snapshot) do
-      nil -> base
-      value -> "#{base}/?snapshot=#{value}"
+      nil ->
+        base
+
+      value when is_integer(value) and (value == -1 or value > 0) ->
+        "#{base}/?snapshot=#{value}"
+
+      other ->
+        raise ArgumentError,
+              "snapshot must be -1 or a positive integer, got: #{inspect(other)}"
     end
   end
 
