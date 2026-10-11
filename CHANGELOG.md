@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.108] - 2026-10-11
+
 ### Fixed (float money, order-id fidelity, withdrawal refusals)
 
 - **Money sent as a JSON number kept only a float's 17 digits.** Private requests now pass
