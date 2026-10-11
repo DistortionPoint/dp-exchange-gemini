@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.121] - 2026-10-11
+
 ### Fixed
 
 - **A plain `ws://` connection no longer needs the operating system's trust store.**
