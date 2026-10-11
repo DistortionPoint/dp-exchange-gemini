@@ -20,6 +20,84 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An order row with a numeric field the venue SENT and this package could not read became a
+  `nil` field.** `get_order/3`, `get_orders/2` and `cancel_order/3` turned an unreadable
+  `original_amount`, `price`, `stop_price`, `executed_amount`, `avg_execution_price` or
+  `timestampms` into `nil`, which reads as "the venue did not say". The row is now
+  `{:error, :unexpected_response_shape}` (and refuses a `get_orders/2` page). Absent or `null`
+  stays `nil`. `place_order/3` alone keeps the lenient reading: its order is already live, an
+  error would read as "nothing was placed", and a retry places a second one.
+- **The staking reads did the same for optional fields.** `get_staking_balances/2`
+  (`available`, `availableForWithdrawal`, `balanceByProvider`, where an unreadable entry used to
+  be silently dropped from the breakdown), `get_staking_history/2` (`amountPaidSoFar`,
+  `amountRemaining`, `dateTime`) and `get_staking_rewards/2` (`apyPct`, `numberOfAccruals`,
+  `firstAccrualAt`, `lastAccrualAt`) fail the reply on a present, unreadable field.
+  `stake/4` and `unstake/4` keep `nil` for theirs: the venue has already accepted the funds.
+- **`staking_time/1` read `0` and negative numbers as 1970, and a `Decimal` epoch with a huge
+  exponent built a billion-digit integer.** Non-positive epochs are unreadable and the exponent
+  is bounded before any arithmetic.
+- **`get_notional_balances/3` raised on a non-string currency and requested
+  `/v1/notionalbalances/` for a blank one.** Both are `{:error, {:invalid_currency, value}}`
+  before anything is signed, and `Fake` refuses them the same way.
+- **`revoke_access_token/2` signed a blank token.** It is `{:error, :oauth_token_required}`.
+- **A venue number with a huge exponent could stall the process that decoded it.** Every copy
+  of `decimal/1` (`Rest`, `Private`, `WsDecode`, `Socket`) refused NaN and Infinity but let
+  `"1e999999999"` through, and `Decimal.compare/2`, `Decimal.add/2` and the sort every book goes
+  through align exponents by building an integer of that many digits. A finite `Decimal` whose
+  exponent is outside -100..100 is now unreadable, as NaN is: a trade or candle carrying one is
+  refused, a book level refuses the book, a bookTicker or depth row refuses the frame. A
+  `Decimal` handed in directly (bodies are decoded with `floats: :decimals`) is checked too.
+- **`get_top_of_book/2` answered `{:ok, %TopOfBook{bid: nil, ask: nil}}` for any JSON object.**
+  `TopOfBook` reads a `nil` side as "no resting order", so `{}` or `{"unexpected": true}` was a
+  claim about the book the venue never made, while `get_price/2` refused the same body. An
+  object naming neither `bid` nor `ask` is now `{:error, :unexpected_response_shape}`. One side
+  absent, or stated as `""`, is still `nil`.
+- **`get_funding/2` and `next_funding_timestamp/2` dated a zero or negative epoch to 1970.**
+  `Rest`'s `epoch_ms/1` accepted any integer; `Private`'s was fixed in 0.2.112 and this copy was
+  missed. Non-positive values are now unstated (`nil` in `Funding`, `:unexpected_response_shape`
+  for the bare-integer endpoint).
+- **`quantization/2` and `get_market_overview/1` turned a field the venue sent but this package
+  could not read into `nil`.** Absent (or `null`) stays `nil`, meaning unstated. A field that is
+  PRESENT and unreadable (a bad string, `""`, NaN, an absurd exponent, a boolean, an object; for
+  `quantization/2` a non-string `status`) is a malformed reply and now answers
+  `{:error, :unexpected_response_shape}`; in an overview one such row refuses the whole reply.
+- **Amounts handed in as a `Decimal` with a huge exponent were written out in full.**
+  `wire_positive/2` (every amount, price and quantity this package signs) checked a `Decimal`
+  for NaN and Infinity only, so `Decimal.new("1E+999999999")` reached `Decimal.to_string/2` and
+  built a billion-digit string into the signed request. It is now refused as
+  `{:error, {:invalid_decimal, field, value}}` like any other unreadable amount.
+- **A fill row with no `symbol` took the caller's spelling of the pair.** `get_trade_history/2`
+  with `symbol: "btcusd"` returned `Fill.symbol == "btcusd"` for such a row, where every other
+  fill (and every other decoder) reports `BTC-USD`. It is canonical now.
+- **A conversion between assets that were not strings raised.** `quote_conversion/4` and
+  `convert/4` called `String.upcase/1` on `from`/`to` in the caller's process when no `:symbol`
+  and `:side` were given. `instant_pair/3` now answers `{:error, {:invalid_asset, value}}`.
+- **`refresh_access_token/3` returned a refusal's body as raw bytes.** Since bodies stopped
+  being decoded for the money fields (0.2.108) the 400/401/403 body of the OAuth endpoint
+  arrived as the JSON string where callers had always received the map
+  (`%{"error" => "invalid_grant"}`). It is decoded again; text that is not JSON stays as sent.
+
+### Changed
+
+- **`Fake` now refuses what the real calls refuse, and nothing it could not answer.**
+  - `quote_conversion/4` and `convert/4` check the amount (a finite number above zero, through
+    `Private.validate_amount/2`) after the direction and before the credential; a string or
+    float amount no longer raises inside the fake's arithmetic.
+  - `withdraw/5` checks asset, network, destination and amount (`Private.validate_withdrawal/4`)
+    after the memo rule and before the credential; `estimate_withdrawal_fee/4` checks the
+    destination, asset, network and amount (`Private.validate_fee_estimate/4`);
+    `get_deposit_address/3` checks the network (`Private.validate_deposit_network/1`).
+  - `request_approved_address/4` refuses a missing label BEFORE the credential, as the real
+    call does (it asked for the credential first).
+  - `get_funding/2` and `get_contract_stats/2` answer only for a perpetual. Anything else is
+    `{:refused, :refused}`, the empty-body 404 measured for an unknown symbol on
+    `/v1/fundingamount` (2026-09-06). What the venue says for a real SPOT symbol, and what
+    `/v1/riskstats` says for either, was never probed.
+  - `get_historical_prices/4` for a perpetual refuses any width but `1m` with
+    `{:unsupported_timeframe, width}`, before the range, as `Rest` does.
+
 ## [0.2.112] - 2026-10-11
 
 ### Fixed

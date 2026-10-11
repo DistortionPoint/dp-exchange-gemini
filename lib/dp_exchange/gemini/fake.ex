@@ -181,7 +181,8 @@ defmodule DpExchange.Gemini.Fake do
       # wrong in both ways answered with the venue's refusal where the real package answers
       # with its own, and it carried its own copy of the window arithmetic, anchored a bar
       # away from the real boundary and without the `:invalid_range` refusal.
-      with :ok <- Rest.validate_history(timeframe, range) do
+      with :ok <- perpetual_width(symbol, timeframe),
+           :ok <- Rest.validate_history(timeframe, range) do
         if symbol in @symbols do
           {:ok, [candle(symbol, timeframe)]}
         else
@@ -193,6 +194,16 @@ defmodule DpExchange.Gemini.Fake do
         end
       end
     end)
+  end
+
+  # A perpetual's candles come from `/v2/derivatives/candles`, which serves `1m` and nothing
+  # else, and `Rest` refuses any other width for one before it makes a request (and before it
+  # looks at the range). The fake lists no perpetual, so it cannot answer one, but it must not
+  # answer a width the real call refuses with a symbol refusal instead.
+  defp perpetual_width(symbol, timeframe) do
+    if perpetual_symbol?(symbol) and timeframe != "1m",
+      do: {:error, {:unsupported_timeframe, timeframe}},
+      else: :ok
   end
 
   @impl true
@@ -1047,35 +1058,52 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_funding(symbol, _opts \\ []) do
     with_injection(symbol, fn ->
-      # Settled and estimated differ, and by a lot — a fake that made them equal would let a
-      # consumer read either as the other and still pass.
-      {:ok,
-       %Types.Funding{
-         symbol: symbol,
-         amount: Decimal.new("-1.50991"),
-         estimated_amount: Decimal.new("-2.10595"),
-         funded_at: ~U[2026-09-01 18:00:00Z],
-         next_funding_at: ~U[2026-09-01 19:00:00Z],
-         provider: :gemini
-       }}
+      # Funding is a property of a perpetual, and `Rest.get_funding/2` sends the symbol as
+      # given. A name that is not a perpetual is the venue's "no data" 404 — measured 2026-09-06
+      # for `nonexistentsymbolxyz` (empty body, so a bare `:refused`); what it says for a real
+      # SPOT symbol was never probed, and this does not claim to know.
+      if perpetual_symbol?(symbol) do
+        # Settled and estimated differ, and by a lot — a fake that made them equal would let a
+        # consumer read either as the other and still pass.
+        {:ok,
+         %Types.Funding{
+           symbol: symbol,
+           amount: Decimal.new("-1.50991"),
+           estimated_amount: Decimal.new("-2.10595"),
+           funded_at: ~U[2026-09-01 18:00:00Z],
+           next_funding_at: ~U[2026-09-01 19:00:00Z],
+           provider: :gemini
+         }}
+      else
+        {:refused, :refused}
+      end
     end)
   end
+
+  defp perpetual_symbol?(symbol), do: is_binary(symbol) and SymbolFormat.perpetual?(symbol)
 
   @impl true
   def get_contract_stats(symbol, _opts \\ []) do
     with_injection(symbol, fn ->
-      # Mark away from index, because that divergence is the reason both are carried.
-      {:ok,
-       %Types.ContractStats{
-         symbol: symbol,
-         product_type: "PerpetualSwapContract",
-         mark_price: Decimal.new("59500"),
-         index_price: Decimal.new("59480"),
-         open_interest: Decimal.new("1240"),
-         open_interest_notional: Decimal.new("73780000"),
-         venue_time: nil,
-         provider: :gemini
-       }}
+      # Risk statistics exist for perpetuals only. The venue's refusal body for anything else
+      # was never measured (only `/v1/fundingamount`'s empty 404 was), so this answers the bare
+      # `:refused` that an empty body reads as and does not claim a reason.
+      if perpetual_symbol?(symbol) do
+        # Mark away from index, because that divergence is the reason both are carried.
+        {:ok,
+         %Types.ContractStats{
+           symbol: symbol,
+           product_type: "PerpetualSwapContract",
+           mark_price: Decimal.new("59500"),
+           index_price: Decimal.new("59480"),
+           open_interest: Decimal.new("1240"),
+           open_interest_notional: Decimal.new("73780000"),
+           venue_time: nil,
+           provider: :gemini
+         }}
+      else
+        {:refused, :refused}
+      end
     end)
   end
 
@@ -1257,7 +1285,11 @@ defmodule DpExchange.Gemini.Fake do
       # function (`Private.instant_pair/3`) and before the credential, as the real path does:
       # nothing is signed for a direction it cannot determine. A fake that picked one would
       # let a consumer's suite pass on a conversion that spends the wrong asset.
+      #
+      # The amount is checked by the function the real call uses (a finite number above zero),
+      # after the direction and before the credential, as there.
       with {:ok, _symbol, _side} <- Private.instant_pair(from, to, opts),
+           {:ok, wire_amount} <- Private.validate_amount(amount, :amount),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.Conversion{
@@ -1270,7 +1302,7 @@ defmodule DpExchange.Gemini.Fake do
            from_asset: from,
            to_asset: to,
            from_amount: amount,
-           to_amount: Decimal.div(amount, Decimal.new("40000")),
+           to_amount: Decimal.div(Decimal.new(wire_amount), Decimal.new("40000")),
            rate: Decimal.new("40000"),
            fee: Decimal.new("0.30"),
            # A real window, so a consumer testing expiry has something to test against.
@@ -1314,6 +1346,7 @@ defmodule DpExchange.Gemini.Fake do
       # One step and already settled — no rate was held, which is the whole difference from
       # quote_conversion/4.
       with {:ok, _symbol, _side} <- Private.instant_pair(from, to, opts),
+           {:ok, _wire_amount} <- Private.validate_amount(amount, :amount),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.Conversion{
@@ -1350,7 +1383,10 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_deposit_address(asset, network, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+      # The network first, as `Private.get_deposit_address/4` builds its path from it before it
+      # signs anything.
+      with :ok <- Private.validate_deposit_network(network),
+           :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.DepositAddress{
            asset: asset,
@@ -1410,24 +1446,20 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def estimate_withdrawal_fee(_asset, network, _amount, opts \\ []) do
+  def estimate_withdrawal_fee(asset, network, amount, opts \\ []) do
     with_injection(fn ->
-      # The destination first, then the credential — `Private.estimate_withdrawal_fee/5`
-      # refuses a missing `:address` before it signs anything.
-      case Keyword.get(opts, :address) do
-        nil ->
-          {:error, {:missing_option, :address}}
-
-        address ->
-          with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
-            {:ok,
-             %{
-               fee: Decimal.new("0.0005"),
-               fee_currency: "ETH",
-               network: network,
-               address: address
-             }}
-          end
+      # The destination, asset, network and amount first, by the function the real call uses,
+      # then the credential — `Private.estimate_withdrawal_fee/5` refuses all of them before it
+      # signs anything.
+      with :ok <- Private.validate_fee_estimate(asset, network, amount, opts),
+           :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+        {:ok,
+         %{
+           fee: Decimal.new("0.0005"),
+           fee_currency: "ETH",
+           network: network,
+           address: Keyword.fetch!(opts, :address)
+         }}
       end
     end)
   end
@@ -1438,6 +1470,7 @@ defmodule DpExchange.Gemini.Fake do
       # The memo rule first, then the credential: `Private.withdraw/6` refuses a required
       # memo that is missing "here, where nothing has moved", before it signs anything.
       with :ok <- fake_memo(Keyword.get(opts, :memo), Keyword.get(opts, :memo_required, false)),
+           :ok <- Private.validate_withdrawal(asset, network, amount, address),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         {:ok,
          %Types.Withdrawal{
@@ -1544,8 +1577,10 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def request_approved_address(network, address, label, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts),
-           :ok <- label_present(label) do
+      # The label before the credential, by the real function: nothing is signed for a call
+      # that names no label.
+      with :ok <- Private.validate_label(label),
+           :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
         # **Pending.** A successful response is not permission to withdraw, and a fake that
         # returned "active" would teach a consumer it is.
         {:ok,
@@ -1558,11 +1593,6 @@ defmodule DpExchange.Gemini.Fake do
       end
     end)
   end
-
-  # The real adapter refuses a missing label (the venue requires one, `rest.yaml:5702`); a
-  # fake that accepted it would be differently capable.
-  defp label_present(label) when is_binary(label) and label != "", do: :ok
-  defp label_present(_label), do: {:error, {:missing_required_field, :label}}
 
   @impl true
   def remove_approved_address(network, address, opts \\ []) do
@@ -1592,7 +1622,9 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_notional_balances(credentials, currency, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(credentials, opts) do
+      # The currency first, by the real function: nothing is signed for a blank one.
+      with :ok <- Private.validate_notional_currency(currency),
+           :ok <- authenticated(credentials, opts) do
         # The quantity and its valuation are different keys and different numbers. A fake that
         # made them equal would let a consumer read either as the other and still pass.
         {:ok,

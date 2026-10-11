@@ -241,6 +241,7 @@ defmodule DpExchange.Gemini.Rest do
 
     with {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
          {:ok, body} <- object(body),
+         :ok <- ticker_states_a_side(body),
          # A side the venue stated and this package cannot read is refused, not `nil`:
          # `TopOfBook` reads `nil` as "no resting order". An absent side stays `nil`.
          {:ok, bid} <- stated_price(body["bid"]),
@@ -257,6 +258,16 @@ defmodule DpExchange.Gemini.Rest do
          provider: :gemini
        }}
     end
+  end
+
+  # A 200 object naming neither `bid` nor `ask` is not a ticker. Reading it gave a `TopOfBook`
+  # with both sides `nil`, which the type reads as "no resting orders" — a claim about the
+  # book the venue never made (`get_price/2` already refuses the same body via `quoted_price/1`).
+  # One side absent stays `nil`; a side stated as `""` or `null` is the venue's own empty side.
+  defp ticker_states_a_side(body) do
+    if Map.has_key?(body, "bid") or Map.has_key?(body, "ask"),
+      do: :ok,
+      else: {:error, :unexpected_response_shape}
   end
 
   defp stated_price(empty) when empty in [nil, ""], do: {:ok, nil}
@@ -399,13 +410,34 @@ defmodule DpExchange.Gemini.Rest do
   def get_market_overview(opts) do
     with {:ok, body} <- get_body("/v1/pricefeed", opts),
          {:ok, rows} <- list(body) do
-      {:ok,
-       rows
-       |> Enum.filter(&priced_pair?/1)
-       |> Map.new(fn row ->
-         {SymbolFormat.to_canonical_symbol(row["pair"]),
-          %{price: decimal(row["price"]), change_24h: decimal(row["percentChange24h"])}}
-       end)}
+      rows
+      |> Enum.filter(&priced_pair?/1)
+      |> Enum.reduce_while({:ok, %{}}, fn row, {:ok, acc} ->
+        with {:ok, price} <- stated_or_absent(row, "price"),
+             {:ok, change} <- stated_or_absent(row, "percentChange24h") do
+          entry = %{price: price, change_24h: change}
+          {:cont, {:ok, Map.put(acc, SymbolFormat.to_canonical_symbol(row["pair"]), entry)}}
+        else
+          error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  # A field the venue left out (or sent as `null`) is unstated and stays `nil`. One it SENT
+  # and this package cannot read — a bad string, NaN, an absurd exponent, a boolean, an
+  # object — is not "unstated": it is a malformed reply, and a map entry with a `nil` price
+  # standing in for it would read as a symbol the venue has no price for.
+  defp stated_or_absent(body, key) do
+    case Map.get(body, key) do
+      nil ->
+        {:ok, nil}
+
+      value ->
+        case decimal(value) do
+          nil -> {:error, :unexpected_response_shape}
+          parsed -> {:ok, parsed}
+        end
     end
   end
 
@@ -432,16 +464,26 @@ defmodule DpExchange.Gemini.Rest do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
     with {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
-         {:ok, body} <- object(raw) do
+         {:ok, body} <- object(raw),
+         {:ok, price_increment} <- stated_or_absent(body, "quote_increment"),
+         {:ok, quantity_increment} <- stated_or_absent(body, "tick_size"),
+         {:ok, min_quantity} <- stated_or_absent(body, "min_order_size"),
+         {:ok, status} <- stated_status(body) do
       {:ok,
        %{
-         price_increment: decimal(body["quote_increment"]),
-         quantity_increment: decimal(body["tick_size"]),
-         min_quantity: decimal(body["min_order_size"]),
-         status: body["status"]
+         price_increment: price_increment,
+         quantity_increment: quantity_increment,
+         min_quantity: min_quantity,
+         status: status
        }}
     end
   end
+
+  # `status` is a string where the venue states one; any other present value is unreadable.
+  defp stated_status(%{"status" => status}) when is_binary(status), do: {:ok, status}
+  defp stated_status(%{"status" => nil}), do: {:ok, nil}
+  defp stated_status(%{"status" => _unreadable}), do: {:error, :unexpected_response_shape}
+  defp stated_status(_absent), do: {:ok, nil}
 
   @doc """
   Each symbol's base, quote, instrument type and **trading status**, from
@@ -1026,7 +1068,9 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
-  defp epoch_ms(value) when is_integer(value) do
+  # Positive and in range, or `nil`. Zero and negatives are valid Unix times and would date a
+  # funding event to 1970 — the same substitution `Private`'s `epoch_ms/1` refuses.
+  defp epoch_ms(value) when is_integer(value) and value > 0 do
     case DateTime.from_unix(value, :millisecond) do
       {:ok, at} -> at
       {:error, _reason} -> nil
@@ -1596,7 +1640,7 @@ defmodule DpExchange.Gemini.Rest do
   defp base_volume(_body, _native), do: nil
 
   defp decimal(nil), do: nil
-  defp decimal(%Decimal{} = value), do: value
+  defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
 
@@ -1623,7 +1667,7 @@ defmodule DpExchange.Gemini.Rest do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+        bounded(parsed)
 
       _unparsable ->
         nil
@@ -1631,6 +1675,18 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp decimal(_other), do: nil
+
+  # A finite `Decimal` whose exponent is one a price or size can have, or `nil`. `"1e999999999"`
+  # parses, and `Decimal.compare/2` or `Decimal.add/2` against it aligns exponents by building
+  # an integer of that many digits: one venue string stalls the caller's process. NaN and
+  # Infinity carry no integer coefficient and are refused here too. Bodies are decoded with
+  # `floats: :decimals`, so a JSON number reaches here as a `Decimal` with whatever exponent
+  # the venue wrote.
+  defp bounded(%Decimal{coef: coef, exp: exp} = value)
+       when is_integer(coef) and exp >= -100 and exp <= 100,
+       do: value
+
+  defp bounded(_nan_infinite_or_unbounded), do: nil
 
   # A garbage or missing value in a field this contract requires must not become a `nil`
   # carried into `@enforce_keys` — a struct's own field list does not check that a value

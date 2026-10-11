@@ -781,7 +781,7 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:error, {:missing_credentials, :gemini}} = Fake.add_payment_method(%{})
 
       assert {:error, {:missing_credentials, :gemini}} =
-               Fake.request_approved_address("ethereum", "0xabc", nil)
+               Fake.request_approved_address("ethereum", "0xabc", "desk")
     end
   end
 

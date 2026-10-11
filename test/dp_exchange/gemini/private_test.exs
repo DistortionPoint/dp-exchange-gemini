@@ -764,8 +764,15 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert order.created_at == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
-    test "an unreadable timestamp leaves the field nil rather than inventing one" do
+    test "a present but unreadable timestamp fails the order rather than becoming nil" do
       body = Map.put(@order, "timestampms", "not a time")
+
+      assert {:error, :unexpected_response_shape} =
+               Private.get_order(@credentials, "1", plug: responding(body), retry_attempts: 0)
+    end
+
+    test "an absent timestamp stays nil" do
+      body = Map.delete(@order, "timestampms")
 
       assert {:ok, %Order{created_at: nil}} =
                Private.get_order(@credentials, "1", plug: responding(body), retry_attempts: 0)

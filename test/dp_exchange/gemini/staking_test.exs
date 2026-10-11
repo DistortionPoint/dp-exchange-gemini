@@ -518,14 +518,22 @@ defmodule DpExchange.Gemini.StakingTest do
         }
       ]
 
-      assert {:ok, [numeric, junk]} =
+      [numeric_row, junk_row] = transactions
+
+      assert {:ok, [numeric]} =
                Private.get_staking_history(@credentials,
-                 plug: responding(history_body("provider-a", transactions)),
+                 plug: responding(history_body("provider-a", [numeric_row])),
                  retry_attempts: 0
                )
 
       assert numeric.venue_time == ~U[2026-08-28 17:00:01.000Z]
-      assert junk.venue_time == nil
+
+      # A time the venue SENT and this package cannot read fails the page; it is not `nil`.
+      assert {:error, :unexpected_response_shape} =
+               Private.get_staking_history(@credentials,
+                 plug: responding(history_body("provider-a", [numeric_row, junk_row])),
+                 retry_attempts: 0
+               )
     end
 
     test "the provider id comes from the parent group, not the transaction" do

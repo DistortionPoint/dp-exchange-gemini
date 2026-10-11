@@ -470,7 +470,7 @@ defmodule DpExchange.Gemini.WsDecode do
   end
 
   defp decimal(nil), do: nil
-  defp decimal(%Decimal{} = value), do: value
+  defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
 
@@ -492,7 +492,7 @@ defmodule DpExchange.Gemini.WsDecode do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+        bounded(parsed)
 
       _unparsable ->
         nil
@@ -500,4 +500,14 @@ defmodule DpExchange.Gemini.WsDecode do
   end
 
   defp decimal(_other), do: nil
+
+  # A finite `Decimal` whose exponent is one a price or size can have, or `nil`. `"1e999999999"`
+  # parses, and sorting or comparing it aligns exponents by building an integer of that many
+  # digits: one frame stalls the socket process. NaN and Infinity carry no integer coefficient
+  # and are refused here too.
+  defp bounded(%Decimal{coef: coef, exp: exp} = value)
+       when is_integer(coef) and exp >= -100 and exp <= 100,
+       do: value
+
+  defp bounded(_nan_infinite_or_unbounded), do: nil
 end

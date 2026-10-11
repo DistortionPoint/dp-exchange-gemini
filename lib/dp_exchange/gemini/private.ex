@@ -274,7 +274,7 @@ defmodule DpExchange.Gemini.Private do
         # 2026-10-10 and reverted the same day: the venue accepted the order, an error reads
         # as "nothing was placed", and since this venue's `client_order_id` is no idempotency
         # key, a caller retrying on it places a second order. Coinbase keeps the same rule.
-        to_order(body)
+        to_order(body, :lenient)
       end
     end
   end
@@ -378,10 +378,14 @@ defmodule DpExchange.Gemini.Private do
   defp wire_number(value) when is_float(value), do: {:ok, Decimal.from_float(value)}
   defp wire_number(value) when is_integer(value), do: {:ok, Decimal.new(value)}
 
-  # `decimal/1` returns a `Decimal` argument untouched, NaN and Infinity included, so the
-  # struct is checked here rather than trusted.
+  # NaN, Infinity and an exponent no amount has are refused. The last matters here as it does
+  # for a venue string: `Decimal.to_string(1E999999999, :normal)` writes a billion digits into
+  # the request this package is about to sign.
   defp wire_number(%Decimal{} = value) do
-    if Decimal.nan?(value) or Decimal.inf?(value), do: :error, else: {:ok, value}
+    case bounded(value) do
+      nil -> :error
+      bounded -> {:ok, bounded}
+    end
   end
 
   defp wire_number(value) when is_binary(value) do
@@ -965,31 +969,79 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp to_order(%{"order_id" => _id} = body) do
-    {:ok,
-     %Order{
-       id: order_id(body["order_id"]),
-       symbol: order_symbol(body["symbol"]),
-       side: side(body["side"]),
-       order_type: order_type_of(body),
-       quantity: decimal(body["original_amount"]),
-       price: decimal(body["price"]),
-       stop_price: decimal(body["stop_price"]),
-       status: status_of(body),
-       filled_quantity: decimal(body["executed_amount"]),
-       # The venue states `"0.00"` for an order with nothing executed (rest.yaml:847,1369).
-       # That is no average, not a fill at zero, which a notional computed from it reads.
-       average_price:
-         if(positive?(body["executed_amount"]), do: decimal(body["avg_execution_price"])),
-       created_at: epoch_ms(body["timestampms"]),
-       # The order status body has one time, its placement. Repeated here it claimed the
-       # order had not changed since, through every fill; `nil` says the venue did not say.
-       updated_at: nil,
-       provider: :gemini
-     }}
+  # **A numeric field that is PRESENT and unreadable fails the row** (`:strict`, the default).
+  # `nil` is "the venue did not say"; a quantity, price or time the venue sent and this package
+  # cannot read is a malformed reply, and an order whose size or price became `nil` looks like
+  # one the venue never sized or priced. An ABSENT field stays `nil`.
+  #
+  # `place_order/3` alone reads `:lenient`: the order it describes is already live at the venue,
+  # an error would read as "nothing was placed", and a retry places a second one (see the note
+  # there). Its unreadable fields are `nil` and the order is still returned.
+  defp to_order(body, mode \\ :strict)
+
+  defp to_order(%{"order_id" => _id} = body, mode) do
+    with {:ok, quantity} <- order_decimal(body, "original_amount", mode),
+         {:ok, price} <- order_decimal(body, "price", mode),
+         {:ok, stop_price} <- order_decimal(body, "stop_price", mode),
+         {:ok, filled} <- order_decimal(body, "executed_amount", mode),
+         {:ok, average} <- order_average(body, mode),
+         {:ok, created_at} <- order_time(body, mode) do
+      {:ok,
+       %Order{
+         id: order_id(body["order_id"]),
+         symbol: order_symbol(body["symbol"]),
+         side: side(body["side"]),
+         order_type: order_type_of(body),
+         quantity: quantity,
+         price: price,
+         stop_price: stop_price,
+         status: status_of(body),
+         filled_quantity: filled,
+         average_price: average,
+         created_at: created_at,
+         # The order status body has one time, its placement. Repeated here it claimed the
+         # order had not changed since, through every fill; `nil` says the venue did not say.
+         updated_at: nil,
+         provider: :gemini
+       }}
+    end
   end
 
-  defp to_order(_body), do: {:error, :unexpected_response_shape}
+  defp to_order(_body, _mode), do: {:error, :unexpected_response_shape}
+
+  defp order_decimal(body, key, mode) do
+    case Map.get(body, key) do
+      nil ->
+        {:ok, nil}
+
+      value ->
+        case {decimal(value), mode} do
+          {nil, :strict} -> {:error, :unexpected_response_shape}
+          {parsed, _mode} -> {:ok, parsed}
+        end
+    end
+  end
+
+  # The venue states `"0.00"` for an order with nothing executed (rest.yaml:847,1369). That is
+  # no average, not a fill at zero, which a notional computed from it reads.
+  defp order_average(body, mode) do
+    if positive?(body["executed_amount"]),
+      do: order_decimal(body, "avg_execution_price", mode),
+      else: {:ok, nil}
+  end
+
+  defp order_time(body, mode) do
+    case {Map.get(body, "timestampms"), mode} do
+      {nil, _mode} ->
+        {:ok, nil}
+
+      {value, mode} ->
+        case {epoch_ms(value), mode} do
+          {nil, :strict} -> {:error, :unexpected_response_shape}
+          {at, _mode} -> {:ok, at}
+        end
+    end
+  end
 
   # The venue's id as a string, or `nil`. `to_string/1` used to stand here, so an absent
   # `order_id` became `""` (the substitution `to_fill/2`'s note describes) and a map or a list
@@ -1285,8 +1337,10 @@ defmodule DpExchange.Gemini.Private do
     {:ok, SymbolFormat.to_canonical_symbol(row_symbol)}
   end
 
+  # Canonical, like the row's own symbol above. The caller's spelling (`"btcusd"`, `"BTCUSD"`)
+  # was echoed as given, so one call could return fills under two spellings of one pair.
   defp fill_symbol(_row_symbol, requested) when is_binary(requested) and requested != "" do
-    {:ok, requested}
+    {:ok, requested |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()}
   end
 
   defp fill_symbol(_row_symbol, _requested), do: {:error, {:missing_required_field, :symbol}}
@@ -1558,6 +1612,13 @@ defmodule DpExchange.Gemini.Private do
         {:error, {:missing_option, [:symbol, :side]}}
     end
   end
+
+  # A non-string asset raised in `String.upcase/1`, in the caller, before anything was signed.
+  defp derive_instant_pair(from, _to) when not is_binary(from),
+    do: {:error, {:invalid_asset, from}}
+
+  defp derive_instant_pair(_from, to) when not is_binary(to),
+    do: {:error, {:invalid_asset, to}}
 
   defp derive_instant_pair(from, to) do
     quotes = SymbolFormat.quotes()
@@ -2585,6 +2646,74 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  @doc """
+  The plain-notation string `quote_conversion/4`, `convert/4` and the other money-moving calls
+  send for `value`, or the refusal: a finite number above zero, else
+  `{:error, {:invalid_decimal | :non_positive_amount, field, value}}`.
+
+  Exposed so `DpExchange.Gemini.Fake` refuses with this function rather than a second copy.
+  """
+  @spec validate_amount(term(), atom()) :: {:ok, String.t()} | {:error, term()}
+  def validate_amount(value, field), do: wire_positive(value, field)
+
+  @doc """
+  Whether `withdraw/6` would get past its own checks, without sending anything: the asset,
+  network and destination must be non-blank strings and the amount a finite number above zero
+  (`{:error, {:invalid_asset | :invalid_network | :invalid_address, value}}`,
+  `{:error, {:invalid_decimal | :non_positive_amount, :amount, value}}`), in that order.
+
+  Exposed so `DpExchange.Gemini.Fake` refuses with this function, after the memo rule and
+  before the credential, as the real call does.
+  """
+  @spec validate_withdrawal(term(), term(), term(), term()) :: :ok | {:error, term()}
+  def validate_withdrawal(asset, network, amount, address) do
+    with {:ok, _ticker} <- withdrawal_ticker(asset),
+         {:ok, _segment} <- withdrawal_network(network),
+         {:ok, _destination} <- withdrawal_address(address),
+         {:ok, _wire_amount} <- wire_positive(amount, :amount) do
+      :ok
+    end
+  end
+
+  @doc """
+  Whether `estimate_withdrawal_fee/5` would get past its own checks, without sending anything:
+  `opts[:address]` first (`{:error, {:missing_option, :address}}` or
+  `{:error, {:invalid_address, value}}`), then the asset, network and amount as in
+  `validate_withdrawal/4`.
+
+  Exposed so `DpExchange.Gemini.Fake` refuses with this function.
+  """
+  @spec validate_fee_estimate(term(), term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate_fee_estimate(asset, network, amount, opts) do
+    with {:ok, _address} <- required_address(opts),
+         {:ok, _ticker} <- withdrawal_ticker(asset),
+         {:ok, _segment} <- withdrawal_network(network),
+         {:ok, _wire_amount} <- wire_positive(amount, :amount) do
+      :ok
+    end
+  end
+
+  @doc """
+  Whether `network` is one `get_deposit_address/4` would build a path from: a non-blank
+  string, else `{:error, {:invalid_network, value}}`.
+
+  Exposed so `DpExchange.Gemini.Fake` refuses with this function.
+  """
+  @spec validate_deposit_network(term()) :: :ok | {:error, {:invalid_network, term()}}
+  def validate_deposit_network(network) do
+    with {:ok, _segment} <- withdrawal_network(network), do: :ok
+  end
+
+  @doc """
+  The label `request_approved_address/5` requires, or
+  `{:error, {:missing_required_field, :label}}`. Exposed so `DpExchange.Gemini.Fake` refuses
+  with this function, before the credential.
+  """
+  @spec validate_label(term()) :: :ok | {:error, {:missing_required_field, :label}}
+  def validate_label(label) do
+    with {:ok, _label} <- required_label(label), do: :ok
+  end
+
   defp required_opt(opts, key) do
     case Keyword.get(opts, key) do
       nil -> {:error, {:missing_option, key}}
@@ -2769,15 +2898,37 @@ defmodule DpExchange.Gemini.Private do
   sent as given and the venue answers for itself, because a package that allowed only the
   documented one would be wrong the day a second is added.
   """
-  @spec get_notional_balances(map(), String.t(), keyword()) ::
+  @spec get_notional_balances(map(), term(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def get_notional_balances(credentials, currency, opts) when is_binary(currency) do
-    # `segment/1`: a currency carrying `/` or `?` must not change the signed path.
-    path = "/v1/notionalbalances/" <> segment(String.downcase(currency))
+  def get_notional_balances(credentials, currency, opts) do
+    with {:ok, ticker} <- notional_currency(currency) do
+      # `segment/1`: a currency carrying `/` or `?` must not change the signed path.
+      path = "/v1/notionalbalances/" <> segment(ticker)
 
-    with {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
-      flattened_rows(body)
+      with {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
+        flattened_rows(body)
+      end
     end
+  end
+
+  # A non-string currency was a `FunctionClauseError` in the caller, and a blank one asked for
+  # `/v1/notionalbalances/` — a resource the caller never named.
+  defp notional_currency(currency) when is_binary(currency) do
+    if String.trim(currency) == "",
+      do: {:error, {:invalid_currency, currency}},
+      else: {:ok, String.downcase(currency)}
+  end
+
+  defp notional_currency(currency), do: {:error, {:invalid_currency, currency}}
+
+  @doc """
+  Whether `get_notional_balances/3` would accept `currency`, without sending anything:
+  `:ok` for a non-blank string, else `{:error, {:invalid_currency, value}}`. Exposed so
+  `DpExchange.Gemini.Fake` refuses with this function, before the credential.
+  """
+  @spec validate_notional_currency(term()) :: :ok | {:error, {:invalid_currency, term()}}
+  def validate_notional_currency(currency) do
+    with {:ok, _ticker} <- notional_currency(currency), do: :ok
   end
 
   @doc """
@@ -2869,9 +3020,23 @@ defmodule DpExchange.Gemini.Private do
   # kind of wrong, because it passes every `nil` check a consumer might write while naming
   # no asset at all. The fix went into one of the three functions that shared the line.
   defp to_staking_balance(row, at) when is_map(row) do
+    # Optional fields: absent is `nil`, but one the venue SENT and this package cannot read
+    # fails the row — `nil` would claim the venue did not say.
     with {:ok, asset} <- required_id(row["currency"], :asset),
-         {:ok, staked} <- required_decimal(row["balance"], :staked) do
-      {:ok, build_staking_balance(row, at, asset, staked)}
+         {:ok, staked} <- required_decimal(row["balance"], :staked),
+         {:ok, tradable} <- order_decimal(row, "available", :strict),
+         {:ok, withdrawable} <- order_decimal(row, "availableForWithdrawal", :strict),
+         {:ok, by_provider} <- by_provider(row["balanceByProvider"]) do
+      {:ok,
+       %StakingBalance{
+         asset: String.upcase(asset),
+         staked: staked,
+         available_to_trade: tradable,
+         available_for_withdrawal: withdrawable,
+         by_provider: by_provider,
+         venue_time: at,
+         provider: :gemini
+       }}
     end
   end
 
@@ -2883,34 +3048,26 @@ defmodule DpExchange.Gemini.Private do
   # the endpoint's own example. Empty now means what the comment always said it should —
   # the venue reported no breakdown for THIS row — rather than a value this decoder never
   # read.
-  defp build_staking_balance(row, at, asset, staked) do
-    %StakingBalance{
-      asset: String.upcase(asset),
-      staked: staked,
-      available_to_trade: decimal(row["available"]),
-      available_for_withdrawal: decimal(row["availableForWithdrawal"]),
-      by_provider: by_provider(row["balanceByProvider"]),
-      venue_time: at,
-      provider: :gemini
-    }
-  end
+  #
+  # Absent (or `null`) is no breakdown. A breakdown that is present and not readable — not an
+  # object, an entry without a readable `balance` — fails the row: dropping the entry would
+  # present a partial split as the whole one.
+  defp by_provider(nil), do: {:ok, %{}}
 
   defp by_provider(%{} = breakdown) do
-    breakdown
-    |> Enum.flat_map(fn
-      {provider_id, %{"balance" => balance}} ->
+    Enum.reduce_while(breakdown, {:ok, %{}}, fn
+      {provider_id, %{"balance" => balance}}, {:ok, acc} when not is_nil(balance) ->
         case decimal(balance) do
-          nil -> []
-          amount -> [{provider_id, amount}]
+          nil -> {:halt, {:error, :unexpected_response_shape}}
+          amount -> {:cont, {:ok, Map.put(acc, provider_id, amount)}}
         end
 
-      _unreadable ->
-        []
+      _unreadable, _acc ->
+        {:halt, {:error, :unexpected_response_shape}}
     end)
-    |> Map.new()
   end
 
-  defp by_provider(_absent_or_unreadable), do: %{}
+  defp by_provider(_unreadable), do: {:error, :unexpected_response_shape}
 
   @doc """
   Rewards accrued over a window — `POST /v1/staking/rewards`.
@@ -2998,22 +3155,42 @@ defmodule DpExchange.Gemini.Private do
   # substitution as `to_staking_balance/2` and `to_staking_transaction/1`; same answer.
   defp to_staking_reward({provider_id, currency, period}) when is_map(period) do
     with {:ok, asset} <- required_id(currency, :asset),
-         {:ok, amount} <- required_decimal(period["accrualTotal"], :amount) do
+         {:ok, amount} <- required_decimal(period["accrualTotal"], :amount),
+         {:ok, apy} <- order_decimal(period, "apyPct", :strict),
+         {:ok, count} <- accrual_count(period["numberOfAccruals"]),
+         {:ok, first} <- stated_time(period["firstAccrualAt"]),
+         {:ok, last} <- stated_time(period["lastAccrualAt"]) do
       {:ok,
        %StakingReward{
          asset: String.upcase(asset),
          amount: amount,
          provider_id: provider_id,
-         apy_pct: decimal(period["apyPct"]),
-         accrual_count: period["numberOfAccruals"],
-         period_start: staking_time(period["firstAccrualAt"]),
-         period_end: staking_time(period["lastAccrualAt"]),
+         apy_pct: apy,
+         accrual_count: count,
+         period_start: first,
+         period_end: last,
          provider: :gemini
        }}
     end
   end
 
   defp to_staking_reward(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # A count is a whole number or absent; whatever else the venue sent was passed through
+  # untouched into a field typed as an integer.
+  defp accrual_count(nil), do: {:ok, nil}
+  defp accrual_count(count) when is_integer(count) and count >= 0, do: {:ok, count}
+  defp accrual_count(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # Absent is `nil`; a time the venue sent and this package cannot read fails the row.
+  defp stated_time(nil), do: {:ok, nil}
+
+  defp stated_time(value) do
+    case staking_time(value) do
+      nil -> {:error, :unexpected_response_shape}
+      at -> {:ok, at}
+    end
+  end
 
   @doc """
   Movements in and out of staked positions — `POST /v1/staking/history`.
@@ -3162,8 +3339,14 @@ defmodule DpExchange.Gemini.Private do
   defp to_staking_transaction(row, type) when is_map(row) do
     with {:ok, id} <- required_id(row["transactionId"] || row["id"], :id),
          {:ok, asset} <- required_id(row["currency"], :asset),
-         {:ok, amount} <- required_decimal(row["amount"], :amount) do
-      {:ok, build_staking_transaction(row, id, asset, amount, type)}
+         {:ok, amount} <- required_decimal(row["amount"], :amount),
+         # `:lenient`, like `place_order/3`: this is the reply to a stake or redemption the venue
+         # has ALREADY accepted, so an error would read as "nothing moved" and invite a retry.
+         # An optional field it sent and this package cannot read is `nil` here.
+         {:ok, paid} <- order_decimal(row, "amountPaidSoFar", :lenient),
+         {:ok, remaining} <- order_decimal(row, "amountRemaining", :lenient) do
+      at = staking_time(row["requestInitiated"])
+      {:ok, build_staking_transaction(row, id, asset, amount, type, {paid, remaining, at})}
     end
   end
 
@@ -3185,17 +3368,17 @@ defmodule DpExchange.Gemini.Private do
   # timezone, e.g. `"2022-11-02T19:49:20.153Z"`) — present only on `StakingWithdrawal`. A
   # stake response has no time field at all, so `staking_time(nil)` answers `nil`, not a
   # read time standing in for one the venue never gave.
-  defp build_staking_transaction(row, id, asset, amount, type) do
+  defp build_staking_transaction(row, id, asset, amount, type, {paid, remaining, at}) do
     %StakingTransaction{
       id: id,
       type: type,
       venue_type: nil,
       asset: String.upcase(asset),
       amount: amount,
-      amount_paid_so_far: decimal(row["amountPaidSoFar"]),
-      amount_remaining: decimal(row["amountRemaining"]),
+      amount_paid_so_far: paid,
+      amount_remaining: remaining,
       provider_id: row["providerId"],
-      venue_time: staking_time(row["requestInitiated"]),
+      venue_time: at,
       provider: :gemini
     }
   end
@@ -3231,7 +3414,10 @@ defmodule DpExchange.Gemini.Private do
   defp to_staking_history_transaction(txn, provider_id) when is_map(txn) do
     with {:ok, id} <- required_id(txn["transactionId"], :id),
          {:ok, asset} <- required_id(txn["amountCurrency"], :asset),
-         {:ok, amount} <- required_decimal(txn["amount"], :amount) do
+         {:ok, amount} <- required_decimal(txn["amount"], :amount),
+         {:ok, paid} <- order_decimal(txn, "amountPaidSoFar", :strict),
+         {:ok, remaining} <- order_decimal(txn, "amountRemaining", :strict),
+         {:ok, at} <- stated_time(txn["dateTime"]) do
       {:ok,
        %StakingTransaction{
          id: id,
@@ -3239,10 +3425,10 @@ defmodule DpExchange.Gemini.Private do
          venue_type: txn["transactionType"],
          asset: String.upcase(asset),
          amount: amount,
-         amount_paid_so_far: decimal(txn["amountPaidSoFar"]),
-         amount_remaining: decimal(txn["amountRemaining"]),
+         amount_paid_so_far: paid,
+         amount_remaining: remaining,
          provider_id: provider_id,
-         venue_time: staking_time(txn["dateTime"]),
+         venue_time: at,
          provider: :gemini
        }}
     end
@@ -3263,7 +3449,9 @@ defmodule DpExchange.Gemini.Private do
   # as seconds lands past the epoch ceiling and raises.
   defp staking_time(nil), do: nil
 
-  defp staking_time(value) when is_integer(value) do
+  # Zero and negatives are valid Unix times and would date a movement to 1970 — refused, as
+  # `epoch_ms/1` refuses them (falls through to the `nil` catch-all below).
+  defp staking_time(value) when is_integer(value) and value > 0 do
     unit = if value >= 1_000_000_000_000, do: :millisecond, else: :second
 
     case DateTime.from_unix(value, unit) do
@@ -3276,11 +3464,14 @@ defmodule DpExchange.Gemini.Private do
 
   # A fractional epoch (`1667418560.153` seconds) arrives as a `Decimal` under
   # `floats: :decimals`; truncated to a whole number, then read like any integer epoch.
-  defp staking_time(%Decimal{} = value) do
-    if Decimal.nan?(value) or Decimal.inf?(value),
-      do: nil,
-      else: value |> Decimal.round(0, :down) |> Decimal.to_integer() |> staking_time()
-  end
+  #
+  # The exponent is bounded BEFORE any arithmetic: `Decimal.round/3` and `to_integer/1` on
+  # `1E+999999999` build an integer of a billion digits. A real epoch has a small exponent.
+  defp staking_time(%Decimal{coef: coef, exp: exp} = value)
+       when is_integer(coef) and exp >= -30 and exp <= 18,
+       do: value |> Decimal.round(0, :down) |> Decimal.to_integer() |> staking_time()
+
+  defp staking_time(%Decimal{}), do: nil
 
   # `/v1/staking/rewards` names its window in this shape — `firstAccrualAt`/`lastAccrualAt`
   # are ISO 8601 strings (`rest.yaml`'s own example: `"2022-08-23T20:00:00.000Z"`), not the
@@ -4026,7 +4217,7 @@ defmodule DpExchange.Gemini.Private do
         decoded_body(body)
 
       {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-        {:refused, body}
+        {:refused, refused_token_body(body)}
 
       {:ok, %{status: status, body: body}} ->
         {:error, {:exchange_error, :gemini, "HTTP #{status}: #{inspect(body)}"}}
@@ -4035,6 +4226,19 @@ defmodule DpExchange.Gemini.Private do
         {:error, reason}
     end
   end
+
+  # The OAuth error (`{"error": "invalid_grant"}`), as the map it is. Bodies arrive as bytes
+  # (`decode_body: false`, see `request_opts/1`), which handed the caller the raw JSON string
+  # where it had always received the decoded map; text that is not JSON stays as the venue
+  # wrote it.
+  defp refused_token_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> decoded
+      {:error, _not_json} -> body
+    end
+  end
+
+  defp refused_token_body(body), do: body
 
   @doc """
   Revokes an access token — `POST /v1/oauth/revokeByToken`.
@@ -4051,7 +4255,8 @@ defmodule DpExchange.Gemini.Private do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def revoke_access_token(credentials, opts) do
     case credentials do
-      %{access_token: token} when is_binary(token) ->
+      # A blank token authenticates nothing, so signing it revokes nothing and is refused here.
+      %{access_token: token} when is_binary(token) and token != "" ->
         with {:ok, body, _headers} <-
                post(
                  "/v1/oauth/revokeByToken",
@@ -4535,7 +4740,7 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp decimal(nil), do: nil
-  defp decimal(%Decimal{} = value), do: value
+  defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
 
@@ -4560,7 +4765,7 @@ defmodule DpExchange.Gemini.Private do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+        bounded(parsed)
 
       _unparsable ->
         nil
@@ -4568,6 +4773,16 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp decimal(_other), do: nil
+
+  # A finite `Decimal` whose exponent is one a price or size can have, or `nil`. `"1e999999999"`
+  # parses, and `Decimal.compare/2` or `Decimal.add/2` against it aligns exponents by building
+  # an integer of that many digits: one venue string stalls the caller's process. NaN and
+  # Infinity carry no integer coefficient and are refused here too.
+  defp bounded(%Decimal{coef: coef, exp: exp} = value)
+       when is_integer(coef) and exp >= -100 and exp <= 100,
+       do: value
+
+  defp bounded(_nan_infinite_or_unbounded), do: nil
 
   # One path segment, percent-encoded. Symbols, networks and tickers were interpolated raw,
   # so a value carrying `/` or `?` changed the path or started a query, and on a signed
