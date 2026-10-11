@@ -346,29 +346,34 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def list_networks(asset, opts \\ []) do
     with_injection(fn ->
-      case {asset, Keyword.get(opts, :network)} do
-        {nil, nil} ->
-          {:error, :asset_or_network_required}
-
-        {nil, network} ->
-          # Scoped to the credential on the real venue, so the fake requires one: an empty
-          # answer means this account cannot move anything on that network, not that the
-          # network carries nothing.
-          with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
-            {:ok, [%{"network" => network, "assets" => ["USDC", "USDT"]}]}
-          end
-
-        {asset, _network} ->
-          # **Signed too.** This answered the asset→networks direction with no credential,
-          # calling it "the public direction". `Private.list_networks/2` has never had one:
-          # `GET /v2/network/{token}` measured `401 MissingSecurityHeaders` unauthenticated
-          # (see its own doc), so a consumer's tier-1 test passed here with no key where the
-          # real call is refused before a request is made.
-          with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
-            {:ok, [%{"asset" => asset, "networks" => ["ethereum", "solana"]}]}
-          end
+      # Refused first by the function the real call builds its path with: a blank or
+      # non-string asset or network is an error there before anything is signed.
+      with {:ok, _path} <- Private.network_lookup_path(asset, Keyword.get(opts, :network)) do
+        list_networks_answer(asset, Keyword.get(opts, :network), opts)
       end
     end)
+  end
+
+  defp list_networks_answer(asset, network_opt, opts) do
+    case {asset, network_opt} do
+      {nil, network} ->
+        # Scoped to the credential on the real venue, so the fake requires one: an empty
+        # answer means this account cannot move anything on that network, not that the
+        # network carries nothing.
+        with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+          {:ok, [%{"network" => network, "assets" => ["USDC", "USDT"]}]}
+        end
+
+      {asset, _network} ->
+        # **Signed too.** This answered the asset→networks direction with no credential,
+        # calling it "the public direction". `Private.list_networks/2` has never had one:
+        # `GET /v2/network/{token}` measured `401 MissingSecurityHeaders` unauthenticated
+        # (see its own doc), so a consumer's tier-1 test passed here with no key where the
+        # real call is refused before a request is made.
+        with :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+          {:ok, [%{"asset" => asset, "networks" => ["ethereum", "solana"]}]}
+        end
+    end
   end
 
   @impl true

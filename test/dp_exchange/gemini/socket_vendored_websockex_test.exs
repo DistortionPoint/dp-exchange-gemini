@@ -136,7 +136,9 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     # The vendor's answer to a gap is to resubscribe, and the venue then sends a fresh
     # absolute snapshot. Left anchored, that snapshot was decoded as a diff.
     {listen_socket, port} = listen()
-    serve(listen_socket, [&upgrade/1])
+    # The server holds the connection open after the upgrade, so the send succeeds: the reset
+    # only follows a frame that went out.
+    serve(listen_socket, [&upgrade_and_hold/1])
 
     {:ok, socket_pid} = Socket.start_link(socket_opts(port) ++ [channels: [:depth]])
     on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
@@ -148,7 +150,7 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
       })
     end)
 
-    _sent = Socket.unsubscribe(socket_pid, ["BTC-USD"], :depth)
+    assert :ok = Socket.unsubscribe(socket_pid, ["BTC-USD"], :depth)
     state = :sys.get_state(socket_pid)
 
     assert state.depth_anchored == MapSet.new(["ETH-USD"])
@@ -228,6 +230,20 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     # Waits for the client to tear down, so the close cannot race the frame.
     _client_closed = :gen_tcp.recv(socket, 0, 5_000)
     :gen_tcp.close(socket)
+  end
+
+  # Upgrades, then keeps the connection open (reading whatever the client sends) until the
+  # client goes away or the test's `serve/2` process is killed on exit.
+  defp upgrade_and_hold(socket) do
+    upgrade(socket)
+    hold(socket)
+  end
+
+  defp hold(socket) do
+    case :gen_tcp.recv(socket, 0, 60_000) do
+      {:ok, _data} -> hold(socket)
+      {:error, _closed} -> :ok
+    end
   end
 
   defp upgrade(socket) do

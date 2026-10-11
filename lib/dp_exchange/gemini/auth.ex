@@ -321,22 +321,28 @@ defmodule DpExchange.Gemini.Auth do
   end
 
   defp signed_headers(path, params, key, secret, mode) do
-    payload =
-      params
-      |> Map.merge(%{"request" => path, "nonce" => nonce(mode)})
-      |> Jason.encode!()
-      |> Base.encode64()
+    with {:ok, nonce} <- signing_nonce(mode) do
+      payload =
+        params
+        |> Map.merge(%{"request" => path, "nonce" => nonce})
+        |> Jason.encode!()
+        |> Base.encode64()
 
-    {:ok,
-     [
-       {"Content-Length", "0"},
-       {"Content-Type", "text/plain"},
-       {"Cache-Control", "no-cache"},
-       {"X-GEMINI-APIKEY", key},
-       {"X-GEMINI-PAYLOAD", payload},
-       {"X-GEMINI-SIGNATURE", sign(payload, secret)}
-     ]}
+      {:ok,
+       [
+         {"Content-Length", "0"},
+         {"Content-Type", "text/plain"},
+         {"Cache-Control", "no-cache"},
+         {"X-GEMINI-APIKEY", key},
+         {"X-GEMINI-PAYLOAD", payload},
+         {"X-GEMINI-SIGNATURE", sign(payload, secret)}
+       ]}
+    end
   end
+
+  @nonce_exhausted_message "the nonce counter has reached its 64-bit ceiling " <>
+                             "(#{@max_counter_value}) and has no next value; the key must be " <>
+                             "rotated"
 
   @doc """
   A nonce for the given validation mode.
@@ -345,23 +351,53 @@ defmodule DpExchange.Gemini.Auth do
   `:incremental` returns a strictly increasing millisecond value, monotonic **node-wide** —
   two processes calling in the same millisecond get different, ordered values, because a
   repeated nonce is rejected outright by an incremental key.
+
+  Raises `ArgumentError` naming the 64-bit nonce ceiling when a counter has no next value
+  (a seed within one step of `2^64 - 1`, or the clock past it). `headers/5` does not raise:
+  it returns `{:error, :nonce_exhausted}`.
   """
   @spec nonce(nonce_mode() | nil) :: pos_integer() | String.t()
-  def nonce(mode \\ :time_based)
+  def nonce(mode \\ :time_based) do
+    case nonce_result(mode) do
+      {:ok, nonce} ->
+        nonce
 
-  def nonce(:incremental), do: next_nonce(@nonce_counter, :millisecond)
+      {:error, :nonce_exhausted} ->
+        raise ArgumentError, @nonce_exhausted_message
+    end
+  end
+
+  # The signing path goes through `nonce/1`, the one public way to draw a nonce, and turns
+  # only ITS ceiling raise (matched by its exact message) into the `{:error, _}` `headers/5`
+  # returns. Any other `ArgumentError` is not ours to translate and is raised again.
+  defp signing_nonce(mode) do
+    {:ok, nonce(mode)}
+  rescue
+    error in ArgumentError ->
+      if error.message == @nonce_exhausted_message,
+        do: {:error, :nonce_exhausted},
+        else: reraise(error, __STACKTRACE__)
+  end
+
+  defp nonce_result(mode) do
+    {:ok, raw_nonce(mode)}
+  catch
+    :throw, :nonce_exhausted -> {:error, :nonce_exhausted}
+  end
+
+  defp raw_nonce(:incremental), do: next_nonce(@nonce_counter, :millisecond)
 
   # See the moduledoc's "An incremental key the millisecond counter cannot reach". Its own
   # counter, so a node signing for both kinds of key never lifts a millisecond key's mark to
   # microsecond magnitude by sharing a sequence with one.
-  def nonce(:incremental_us), do: next_nonce(@nonce_counter_us, :microsecond)
+  defp raw_nonce(:incremental_us), do: next_nonce(@nonce_counter_us, :microsecond)
 
   # dp-exchange-core issue #36: the same key rejected microseconds too. Nanoseconds are the
   # last clock-anchored step inside the 64-bit counter (~1.79e18 now, below 2^64 until about
   # 2554), so a refusal under this mode is conclusive. Its own counter, for the same reason.
-  def nonce(:incremental_ns), do: next_nonce(@nonce_counter_ns, :nanosecond)
+  defp raw_nonce(:incremental_ns), do: next_nonce(@nonce_counter_ns, :nanosecond)
 
-  def nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
+  defp raw_nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
 
   # dp-exchange-core issue #37. A key whose mark was set by a client before this package, with
   # 22-28 digit nonces, is above every 64-bit value. The counter stays the nanosecond one; only
@@ -369,7 +405,7 @@ defmodule DpExchange.Gemini.Auth do
   # Sent as a decimal STRING: that is the form the host's own client sent for weeks and the
   # venue accepted, while a JSON number past 64 bits invites a parser that reads it as a
   # float and silently drops its low digits, which would make it "not increased".
-  def nonce({:incremental_ns, [scale: scale]}) when scale in @nonce_scales do
+  defp raw_nonce({:incremental_ns, [scale: scale]}) when scale in @nonce_scales do
     Integer.to_string(next_nonce(@nonce_counter_ns, :nanosecond) * Integer.pow(10, scale))
   end
 
@@ -381,6 +417,10 @@ defmodule DpExchange.Gemini.Auth do
 
     previous = :atomics.get(counter, 1)
     next = max(now, previous + 1)
+
+    # The cell is 64-bit unsigned and `:atomics.compare_exchange/4` raises on a larger value.
+    # Surfaced as a named condition instead (`nonce_result/1`).
+    if next > @max_counter_value, do: throw(:nonce_exhausted)
 
     case :atomics.compare_exchange(counter, 1, previous, next) do
       :ok -> next

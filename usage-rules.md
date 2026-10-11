@@ -1041,6 +1041,12 @@ present the already-rotated token and lose the new pair. If it returns `{:error,
 outcome is unknown — try the refresh token you hold, and if the venue refuses it, the
 session needs a new consent.
 
+A blank client id or refresh token is refused before anything is sent
+(`{:error, :client_id_required}`, `{:error, :refresh_token_required}`). The shape of a
+successful reply is **unmeasured**: the vendor's OpenAPI document does not describe
+`/auth/token`, so the decoded body is returned as the venue sent it and is not checked for an
+`access_token`. Check it yourself before replacing the token you hold.
+
 `revoke_access_token/1` needs an OAuth token and refuses an API key: an API-key-signed call
 there would revoke nothing and come back shaped like success.
 

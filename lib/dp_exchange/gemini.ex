@@ -799,8 +799,13 @@ defmodule DpExchange.Gemini do
   # path, with nothing to say so. An explicit `:feed` still wins, for `Config` overrides too.
   defp feed(opts), do: Config.opt(opts, :feed, DpExchange.Gemini.Supervisor.feed_name(opts))
 
-  defp alive?(name) when is_atom(name), do: is_pid(GenServer.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+
+  # A registered name, `{:global, name}` or `{:via, module, name}`: `GenServer.whereis/1`
+  # resolves all three. An `is_atom/1` guard here raised `FunctionClauseError` in
+  # `coverage/1`, which has no error shape to return, for a feed addressed with `:feed`
+  # by any name that is not a bare atom.
+  defp alive?(server), do: is_pid(GenServer.whereis(server))
 
   # **A streaming call answers; it does not exit in the caller's process.** Every
   # streaming callback's spec is a value (`:ok | {:error, term()}`, or a map). A bare

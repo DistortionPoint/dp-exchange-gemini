@@ -20,6 +20,48 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An order id or quote id with a sign was accepted.** `order_id_param/1` (behind
+  `cancel_order/3`, `get_order/3` and the fake's copies) and the `commit_conversion/2` quote id
+  read `"+5"`, `"-0"` and, for the quote id, `"-5"` through `Integer.parse/1`, and a negative
+  integer quote id was sent as is. Both are now digits only: `{:error, {:invalid_order_id, id}}`
+  and `{:error, {:invalid_quote_id, id}}` before anything is signed.
+- **`place_order/3` raised on, or wrote nothing for, a bad symbol or client order id.** A
+  `:symbol` that is an atom or a number raised in `SymbolFormat` in the caller's process and
+  `""` put an empty symbol in the order; a `:client_order_id` that is a map, list or atom
+  raised in `to_string/1` and `""` was sent as an empty id. They are
+  `{:error, {:invalid_symbol, symbol}}` and `{:error, {:invalid_client_order_id, id}}` (an
+  integer id is still sent as its digits), from the same `validate_order/1` the fake uses.
+  Whether the venue reads an empty `client_order_id` as absent is unmeasured, so it is refused.
+- **`list_networks/2` asked for `/v2/network/` or `/v2/networks//assets` on a blank asset or
+  network, and sent a non-string one through `to_string/1`.** It is now
+  `{:error, {:invalid_asset, asset}}` or `{:error, {:invalid_network, network}}` before
+  anything is signed, decided by the new `Private.network_lookup_path/2`, which
+  `Fake.list_networks/2` calls too.
+- **`refresh_access_token/3` posted a blank `client_id` or `refresh_token`.** It is
+  `{:error, :client_id_required}` or `{:error, :refresh_token_required}`. The success body of
+  `/auth/token` is documented nowhere in the vendor spec and is still returned unchecked.
+- **`coverage/1` and `coverage_by_kind/1` raised `FunctionClauseError` for a `:feed` that is
+  `{:global, name}` or `{:via, module, name}`.** The liveness check only had clauses for an
+  atom and a pid; it now resolves any `GenServer.server()` through `GenServer.whereis/1`.
+
+- **`Socket.unsubscribe/3` reset a depth stream's anchor, sequence and partial-depth claim
+  before the frame was sent.** A send that failed left the stream flowing while the socket
+  read its next diff as the absolute anchor. The reset now follows a send that returned `:ok`.
+  The test for it holds the connection open instead of racing a closed one.
+- **`Socket.subscribe/3` kept the partial-depth claim it took when the send failed**, so a
+  different symbol was refused on a channel nothing was subscribed to. A claim this call took
+  is released on a failed send; one already held stays.
+- **A nonce counter at `2^64 - 1` raised a raw `:atomics` error out of the signing caller.**
+  `headers/5` now returns `{:error, :nonce_exhausted}` and `nonce/1` raises an `ArgumentError`
+  naming the 64-bit ceiling.
+
+### Unmeasured, left alone
+
+- The `account` field in the signed payload of private GETs, the
+  timestamp format for orders and history, and the depth anchor on a resubscribe.
+
 ## [0.2.113] - 2026-10-11
 
 ### Fixed

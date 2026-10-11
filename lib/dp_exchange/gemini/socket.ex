@@ -372,7 +372,7 @@ defmodule DpExchange.Gemini.Socket do
   @spec subscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
   def subscribe(socket, symbols, channel \\ :book_ticker) do
     with :ok <- validate_channel(symbols, channel),
-         :ok <- claim_partial_depth(socket, symbols, channel) do
+         {:ok, claimed?} <- claim_partial_depth(socket, symbols, channel) do
       streams = streams(symbols, channel)
       await_ack(socket, streams)
 
@@ -382,8 +382,11 @@ defmodule DpExchange.Gemini.Socket do
 
         # The frame did not go out, so no answer is coming. Left counted, the ack deadline
         # fired 15 s later and closed a healthy connection, and every retry counted again.
+        # A claim THIS call took is given back too: left, it refused a different symbol on
+        # a channel nothing was subscribed to. A claim that was already held stays.
         error ->
           withdraw_ack(socket, streams)
+          if claimed?, do: release_partial_depth(socket, symbols, channel)
           error
       end
     end
@@ -421,10 +424,14 @@ defmodule DpExchange.Gemini.Socket do
   """
   @spec unsubscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
   def unsubscribe(socket, symbols, channel \\ :book_ticker) do
-    with :ok <- validate_channel(symbols, channel) do
+    with :ok <- validate_channel(symbols, channel),
+         :ok <- send_rpc(socket, "unsubscribe", streams(symbols, channel)) do
+      # Only after the frame went out. Reset first, a send that failed left the stream still
+      # flowing while the socket treated its next diff as the absolute anchor, and dropped
+      # the partial-depth claim that attributes its frames.
       release_partial_depth(socket, symbols, channel)
       forget_depth(socket, symbols, channel)
-      send_rpc(socket, "unsubscribe", streams(symbols, channel))
+      :ok
     end
   end
 
@@ -480,13 +487,14 @@ defmodule DpExchange.Gemini.Socket do
 
   # See the moduledoc's "A partial-depth snapshot cannot name its own symbol". A channel
   # outside `WsChannels.partial_depth/0`, or an empty symbol list, needs no claim.
-  defp claim_partial_depth(_socket, [], _channel), do: :ok
+  # `{:ok, claimed?}`: whether THIS call took a claim that was not held before.
+  defp claim_partial_depth(_socket, [], _channel), do: {:ok, false}
 
   defp claim_partial_depth(socket, symbols, channel) do
     if channel in WsChannels.partial_depth() do
       claim_partial_depth_symbol(socket, symbols, channel)
     else
-      :ok
+      {:ok, false}
     end
   end
 
@@ -509,7 +517,13 @@ defmodule DpExchange.Gemini.Socket do
   # exactly that race. The outcome is read back from the state the function returned: the
   # claim is there if it was allowed, and absent if another symbol already held it.
   defp do_claim_partial_depth_symbol(socket, symbol, channel) do
+    caller = self()
+    token = make_ref()
+
     claim = fn state ->
+      held = Map.get(state, :partial_depth_claims, MapSet.new())
+      send(caller, {token, MapSet.member?(held, {channel, symbol})})
+
       case partial_depth_symbols(state) do
         # No claim yet, or the same symbol already claimed on a sibling partial-depth
         # channel (e.g. `@depth5` and `@depth10` for the same symbol both attribute
@@ -525,9 +539,11 @@ defmodule DpExchange.Gemini.Socket do
     case sys_replace_state_returning(socket, claim) do
       {:ok, state} ->
         claims = Map.get(state, :partial_depth_claims, MapSet.new())
+        # Always consumed, so a refused claim leaves nothing in the caller's mailbox.
+        held? = claim_was_held?(token)
 
         if MapSet.member?(claims, {channel, symbol}),
-          do: :ok,
+          do: {:ok, not held?},
           else: {:error, {:partial_depth_symbol_conflict, hd(partial_depth_symbols(state))}}
 
       # A socket this package cannot introspect — not a real process, or one that has
@@ -535,7 +551,17 @@ defmodule DpExchange.Gemini.Socket do
       # best-effort refusal of an AMBIGUOUS frame later, not the boundary that decides
       # whether the frame goes out at all.
       :error ->
-        :ok
+        {:ok, false}
+    end
+  end
+
+  # The socket reported, before it changed anything, whether the claim was already held. No
+  # report means it is not known, and a claim that may be someone else's is never released.
+  defp claim_was_held?(token) do
+    receive do
+      {^token, held?} -> held?
+    after
+      0 -> true
     end
   end
 

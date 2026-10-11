@@ -232,6 +232,9 @@ defmodule DpExchange.Gemini.Private do
       limit price only the caller can choose
     * an unknown `:time_in_force` — the venue rejects an unsupported option outright
     * a missing price on a type that requires one
+    * a `:symbol` that is not a non-blank string — `{:error, {:invalid_symbol, symbol}}` — and
+      a `:client_order_id` that is neither a non-blank string nor an integer —
+      `{:error, {:invalid_client_order_id, id}}`
     * a `:side` other than `:buy` / `:sell` — `{:error, {:invalid_side, side}}`
     * a `:quantity`, `:price` or `:stop_price` that is not a finite number above zero —
       `{:error, {:invalid_decimal, field, value}}` or
@@ -252,7 +255,8 @@ defmodule DpExchange.Gemini.Private do
         symbol: symbol,
         quantity: quantity,
         side: side,
-        stop_price: stop_price
+        stop_price: stop_price,
+        client_order_id: client_order_id
       } = terms
 
       params =
@@ -265,7 +269,7 @@ defmodule DpExchange.Gemini.Private do
           "options" => options
         }
         |> put_present("stop_price", stop_price)
-        |> maybe_put("client_order_id", Map.get(request, :client_order_id))
+        |> maybe_put("client_order_id", client_order_id)
         |> maybe_put("account", Keyword.get(opts, :account))
 
       with {:ok, body, _headers} <- post_once("/v1/order/new", params, credentials, opts) do
@@ -305,12 +309,14 @@ defmodule DpExchange.Gemini.Private do
            ),
          {:ok, price} <- required_price(request),
          {:ok, symbol} <- required_field(request, :symbol),
+         {:ok, symbol} <- order_symbol_arg(symbol),
          {:ok, quantity} <- required_field(request, :quantity),
          {:ok, side} <- required_field(request, :side),
          {:ok, side} <- wire_side(side),
          {:ok, stop_price} <- stop_price_for(type, Map.get(request, :stop_price)),
          {:ok, quantity} <- wire_positive(quantity, :quantity),
-         {:ok, price} <- wire_positive(price, :price) do
+         {:ok, price} <- wire_positive(price, :price),
+         {:ok, client_order_id} <- client_order_id_for(Map.get(request, :client_order_id)) do
       {:ok,
        %{
          type: type,
@@ -319,10 +325,36 @@ defmodule DpExchange.Gemini.Private do
          symbol: symbol,
          quantity: quantity,
          side: side,
-         stop_price: stop_price
+         stop_price: stop_price,
+         client_order_id: client_order_id
        }}
     end
   end
+
+  # A symbol is a non-blank string. `SymbolFormat.to_exchange_symbol/1` raised in the caller's
+  # process on an atom or a number, and wrote the empty string into the order for `""`.
+  defp order_symbol_arg(symbol) when is_binary(symbol) do
+    if String.trim(symbol) == "",
+      do: {:error, {:invalid_symbol, symbol}},
+      else: {:ok, symbol}
+  end
+
+  defp order_symbol_arg(other), do: {:error, {:invalid_symbol, other}}
+
+  # **A client order id is a string or a whole number, or it is refused.** It went to
+  # `to_string/1`, which raised `Protocol.UndefinedError` in the caller's process on a map
+  # or a tuple of a live order and wrote an empty string for `""`. Absent stays absent. Whether
+  # the venue treats `""` as absent is unmeasured, so a blank id is refused, not guessed at.
+  defp client_order_id_for(nil), do: {:ok, nil}
+  defp client_order_id_for(id) when is_integer(id), do: {:ok, id}
+
+  defp client_order_id_for(id) when is_binary(id) do
+    if String.trim(id) == "",
+      do: {:error, {:invalid_client_order_id, id}},
+      else: {:ok, id}
+  end
+
+  defp client_order_id_for(other), do: {:error, {:invalid_client_order_id, other}}
 
   # **A side the venue does not know is refused, not sent.** `to_string/1` put whatever the
   # caller held on the wire of a live order (`:hold`, `"BUY "`, a number). Only `buy` and
@@ -452,9 +484,13 @@ defmodule DpExchange.Gemini.Private do
   def order_id_param(id) when is_integer(id) and id >= 0 and id <= @max_order_id,
     do: {:ok, id}
 
+  # Digits only. `Integer.parse/1` also reads `"+5"` and `"-0"` as whole numbers, and an id
+  # with a sign is not one this package ever returned: it is refused, not normalised.
   def order_id_param(id) when is_binary(id) do
-    case Integer.parse(id) do
-      {value, ""} when value >= 0 and value <= @max_order_id -> {:ok, value}
+    with true <- String.match?(id, ~r/\A[0-9]+\z/),
+         {value, ""} when value <= @max_order_id <- Integer.parse(id) do
+      {:ok, value}
+    else
       _not_an_order_id -> {:error, {:invalid_order_id, id}}
     end
   end
@@ -1580,13 +1616,17 @@ defmodule DpExchange.Gemini.Private do
   # to an integer here, and refused — never guessed — when it does not parse: an id this
   # package cannot read back as the number it came from is not one it can vouch for.
   defp quote_id_integer(id) when is_binary(id) do
-    case Integer.parse(id) do
-      {value, ""} -> {:ok, value}
+    # Digits only: `Integer.parse/1` also reads `"-5"` and `"+5"`, and a signed id is no
+    # quote this package returned.
+    with true <- String.match?(id, ~r/\A[0-9]+\z/),
+         {value, ""} <- Integer.parse(id) do
+      {:ok, value}
+    else
       _unparseable -> {:error, {:invalid_quote_id, id}}
     end
   end
 
-  defp quote_id_integer(id) when is_integer(id), do: {:ok, id}
+  defp quote_id_integer(id) when is_integer(id) and id >= 0, do: {:ok, id}
   defp quote_id_integer(id), do: {:error, {:invalid_quote_id, id}}
 
   @doc """
@@ -1862,28 +1902,40 @@ defmodule DpExchange.Gemini.Private do
   """
   @spec list_networks(String.t() | nil, keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def list_networks(nil, opts) do
-    case Keyword.get(opts, :network) do
-      nil ->
-        {:error, :asset_or_network_required}
-
-      network ->
-        credentials = Keyword.get(opts, :credentials, %{})
-
-        with {:ok, body, _headers} <-
-               signed_get("/v2/networks/#{segment(network)}/assets", credentials, opts) do
-          object_rows(body)
-        end
-    end
-  end
-
   def list_networks(asset, opts) do
     credentials = Keyword.get(opts, :credentials, %{})
 
-    with {:ok, body, _headers} <- signed_get("/v2/network/#{segment(asset)}", credentials, opts) do
+    with {:ok, path} <- network_lookup_path(asset, Keyword.get(opts, :network)),
+         {:ok, body, _headers} <- signed_get(path, credentials, opts) do
       object_rows(body)
     end
   end
+
+  @doc """
+  The path `list_networks/2` asks for, or its refusal, checked before anything is signed.
+
+  `asset` wins when both are given. Neither is `{:error, :asset_or_network_required}`; a
+  value that is not a non-blank string is `{:error, {:invalid_asset, value}}` or
+  `{:error, {:invalid_network, value}}`: a blank one built `/v2/network/` or
+  `/v2/networks//assets`, a different route from the one asked for. Exposed so
+  `DpExchange.Gemini.Fake` refuses with this function.
+  """
+  @spec network_lookup_path(term(), term()) :: {:ok, String.t()} | {:error, term()}
+  def network_lookup_path(nil, nil), do: {:error, :asset_or_network_required}
+
+  def network_lookup_path(nil, network) do
+    with {:ok, network_segment} <- withdrawal_network(network),
+         do: {:ok, "/v2/networks/#{network_segment}/assets"}
+  end
+
+  # The asset keeps the caller's case: the vendor's `{token}` example is `BTC`.
+  def network_lookup_path(asset, _network) when is_binary(asset) do
+    if String.trim(asset) == "",
+      do: {:error, {:invalid_asset, asset}},
+      else: {:ok, "/v2/network/#{segment(asset)}"}
+  end
+
+  def network_lookup_path(asset, _network), do: {:error, {:invalid_asset, asset}}
 
   # The pairs the venue serves, from its own documentation. **Enumerated rather than passed
   # through** because an unsupported pair returns a 404 the caller cannot distinguish from
@@ -4187,12 +4239,24 @@ defmodule DpExchange.Gemini.Private do
   the next refresh.
 
   `client_secret` is sent only when given: the venue documents it for confidential clients
-  and says public clients must not send it.
+  and says public clients must not send it. A blank `client_id` is
+  `{:error, :client_id_required}` and a blank `refresh_token` is
+  `{:error, :refresh_token_required}`, before anything is sent: neither can succeed, and a
+  refused refresh is not a reason to discard the stored token. The shape of the success body
+  is unmeasured (the vendor spec does not document `/auth/token`), so it is returned as sent.
   """
   @spec refresh_access_token(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def refresh_access_token(client_id, refresh_token, opts)
       when is_binary(client_id) and is_binary(refresh_token) do
+    cond do
+      String.trim(client_id) == "" -> {:error, :client_id_required}
+      String.trim(refresh_token) == "" -> {:error, :refresh_token_required}
+      true -> post_refresh(client_id, refresh_token, opts)
+    end
+  end
+
+  defp post_refresh(client_id, refresh_token, opts) do
     form =
       %{
         "client_id" => client_id,
