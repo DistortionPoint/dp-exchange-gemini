@@ -50,9 +50,13 @@ defmodule DpExchange.Gemini.Rest do
   `@window_bars`, and `range_within_window/2`'s existing fallback for an unmapped width
   applies: no pre-flight refusal, and the real rows returned are still filtered against
   `range` client-side by `within?/4` on their own real `opened_at`, same as every width. A
-  `:start` older than the venue's actual window on one of these two returns an empty list
-  rather than `{:error, {:range_unavailable, …}}` — a real gap from the other seven widths,
-  disclosed here rather than hidden behind a fabricated window size.
+  `:start` older than anything the venue returns on one of these two is not refused: the
+  filter keeps every returned bar opened at or after `:start`, so the answer is the bars the
+  venue sent, beginning wherever its reply begins, rather than
+  `{:error, {:range_unavailable, …}}`. Whether the venue's `1w` and `1M` replies reach back
+  to the instrument's listing or stop at a fixed count has not been measured. That is a real
+  gap from the other seven widths, disclosed here rather than hidden behind a fabricated
+  window size.
 
   ## Neither ticker carries a quote time, so `:venue_time` is always `nil`
 
@@ -1635,8 +1639,8 @@ defmodule DpExchange.Gemini.Rest do
   # `@window_bars`, because neither has a `Timeframe.seconds/1` width to multiply a bar
   # count by. That is a real, disclosed gap — see the moduledoc's "`1w` and `1mo`" section
   # — not an oversight; `get_historical_prices/4` still filters their real rows against
-  # `range` afterward, so a caller reaching before the actual window gets an empty list
-  # rather than wrong data, just without this pre-flight refusal naming the boundary.
+  # `range` afterward, so a caller reaching before the venue's reply gets the bars the reply
+  # holds, from wherever it begins, without this pre-flight refusal naming the boundary.
   # A `:start` or `:end` that is not a `DateTime` is refused here. It reached
   # `DateTime.compare/2` in the row filter and raised in the caller's process.
   defp range_within_window(timeframe, range) do

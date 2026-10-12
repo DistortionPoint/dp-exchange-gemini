@@ -48,10 +48,20 @@ exactly as described above.
 **The same `Quote` is also no longer emitted on every `bookTicker` tick that repeats the
 same `c`.** This channel is not itself trade-triggered — the venue re-sends the same last
 trade price on every quote change until the next execution — so a subscriber now sees one
-`Quote` the first time a symbol's `c` is seen (or is unreadable-then-readable again) and one
-more each time it genuinely **changes**, never once per tick. A consumer counting on "one
-`Quote` per `bookTicker` frame that carries `c`" will now see fewer of them; a consumer
-wanting the raw tick cadence should read `TopOfBook`, which still arrives on every frame.
+`Quote` the first time a symbol's `c` is seen on a connection and one more each time it
+genuinely **changes**, never once per tick. The "last seen" price is forgotten on a reconnect
+and when you unsubscribe the symbol, so a reconnect or a resubscribe reports the current last
+trade once more. A `c` that is zero, negative or unreadable produces no `Quote` and does not
+reset that memory. A consumer counting on "one `Quote` per `bookTicker` frame that carries
+`c`" will now see fewer of them; a consumer wanting the raw tick cadence should read
+`TopOfBook`, which still arrives on every frame.
+
+A `bookTicker` frame this package cannot read is not dropped in silence: a bid or ask the
+venue stated but that is unreadable (or negative) raises a `:data_quality` `Core.Notice`
+(`details.reason` `"unreadable bookTicker level"`, with the symbol) and no `TopOfBook` is
+delivered; a frame whose symbol is absent, blank or not text raises `:data_quality` with
+`details.reason` `"undecodable book ticker"`. A side priced `0` is no resting order (`nil`),
+with its size.
 
 ## An order book is sorted, so `hd(bids)` is the best bid
 
@@ -71,6 +81,12 @@ Two consequences:
   passed through in the venue's own order, because its entries are changes to apply in
   sequence and re-ordering them would invent an order the venue never sent. The struct name
   tells you which one you are holding.
+
+**`get_order_book/2`'s `:depth`** is levels per side. Absent, it is the venue's own default,
+50 (never a guess); `0` is passed through (the vendor's prose: the full side). Anything that
+is not a whole number of at least `0` is `{:error, {:invalid_option, :depth, value}}`, checked
+before a request is made.
+
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
@@ -175,8 +191,27 @@ socket dying abnormally no longer takes `Feed` down with it: `coverage/1` and
 `coverage_by_kind/1` clear (this venue has one socket carrying every kind you configured
 via `:channels` — see below — so a crash costs all of them at once, not a partial set),
 you get a `:link_down` `Core.Notice`, and this
-package reconnects and resends your `wanted` symbols on its own, immediately, without
-you calling `subscribe/3` again.
+package reconnects and resends your `wanted` symbols on its own, without you calling
+`subscribe/3` again. The first crash in a run is redialled at once; a crash within 30 s of the
+previous one waits first, 1 s doubling to 30 s, so a socket that dies on connect is not
+redialled in a loop. Only one such wait is ever pending: a newer crash replaces it rather
+than stacking beside it.
+
+**An ordinary dropped connection (not a crash) backs off too.** The socket reconnects inside
+itself: the first attempt waits nothing, each later consecutive failure waits 1 s doubling
+to a 30 s ceiling, **shortened by a random amount of up to a quarter** (`Socket.jittered_delay_ms/1`)
+so that every `Feed` and node the venue dropped together does not retry on one schedule. A
+session that lasts under 5 s counts as a failed connect, not a healthy session that dropped.
+The `delay_ms` metadata on the `[:dp_exchange, :link, :reconnect_attempt]` telemetry event is
+the delay actually waited, after the shortening. The wait ends if `Feed` stops the socket. A connection that goes 90 s
+without a frame or a pong, or that answers pings but not a subscribe for 15 s, raises a
+`:degraded` notice (`details.reason` `:silent_connection` or `:subscribe_unanswered`) and is
+closed and reconnected.
+
+**Notice floods are throttled.** For `:data_quality`, `:refusal` and `:degraded`, the first
+notice per `{kind, reason, symbol}` reaches you at once, repeats within 30 s are counted, and
+the next one after the window carries the count in `details.suppressed`. `:link_up`,
+`:link_down` and `:coverage_change` are not throttled.
 
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the socket-crash path, or anything that kills the `Feed` pid directly.
@@ -228,13 +263,34 @@ kind". No per-connection stream limit is documented for `wss://ws.gemini.com`; a
 `:trades` doubles the streams this one socket carries per symbol, not the number of
 sockets — this package still shards nothing.
 
+**`max_queue_len:`** (a start option, default 10_000) bounds each subscriber's mailbox. Past
+it events to that subscriber are dropped and a `:degraded` notice is sent; a value that is
+not a positive integer raises `ArgumentError` at start.
+
+**What the streaming calls answer.** None of `subscribe/2`, `unsubscribe/2`,
+`update_symbols/2` and `subscribe_notices/1` exits in your process. With no feed running,
+`subscribe/2`, `update_symbols/2` and `subscribe_notices/1` answer `{:error,
+:feed_not_started}`, `unsubscribe/2` answers `:ok` (nothing to stop) and `coverage/1` and
+`coverage_by_kind/1` answer `%{}` ("not observed"). A busy feed is `{:error, :feed_timeout}`
+and one that died mid-call `{:error, {:feed_exited, reason}}`. `{:error, {:invalid_symbols,
+argument}}` is a `symbols` that is not a list of non-blank strings, and `{:error,
+{:invalid_subscriber, term}}` a `:to` that is neither a pid nor a registered name; both are
+refused before the shared feed sees them. Symbols are upper-cased on the way in and held in
+canonical form (`"btcusd"` and `"BTC-USD"` are the same subscription). An `{:error, _}` from
+`subscribe/2` or `update_symbols/2` means nothing was recorded, so retry. Callbacks with no
+credentials argument (`get_positions/1` and its kin) read the credential from `opts[:credentials]`.
+
 ## Nine candle widths, and the venue's own documentation names three of them wrong
 
 Canonical widths this package serves: **`1m 5m 15m 30m 1h 6h 1d 1w 1M`** (`1w` and `1M`, the
 venue's own `1mo`, joined 2026-09-08 and are not window-checked: a `:start` older than their
-window returns an empty list, not `{:error, {:range_unavailable, …}}`). The shared vocabulary
-also models `2h`, `4h` and `12h`; Gemini serves none of them, and asking is an error
-rather than the nearest width.
+window is NOT refused with `{:error, {:range_unavailable, …}}`; you get only the bars the window
+holds, so compare the first bar's `opened_at` with your `:start`). The shared vocabulary
+also models `2h`, `4h` and `12h`; Gemini serves none of them, and asking is
+`{:error, {:unsupported_timeframe, width}}` rather than the nearest width. A **perpetual**
+symbol routes to the venue's derivatives candles endpoint, which serves `1m` only: any other
+width for a perpetual is the same `{:unsupported_timeframe, width}` error, never a spot
+series for a different instrument.
 
 You will find Gemini's documentation listing `1h`, `6h` and `1d` as the literals to send.
 **All three are rejected by the API.** The real literals are `1hr`, `6hr` and `1day`, and
@@ -284,7 +340,12 @@ behind its). The bar that is still forming
 (`opened_at + width > now`) is **not returned** unless you pass `include_partial: true` in
 `opts`; with it the last bar comes back as the venue sent it and **may change on the next
 call** (`Core.Types.Candle` has no flag for it). Before, the forming bar was always returned,
-indistinguishable from a closed one.
+indistinguishable from a closed one. `include_partial` must be a boolean
+(`{:error, {:invalid_option, :include_partial, value}}`). `range` must be a keyword list whose
+`:start`/`:end` are `DateTime`s: a non-keyword `range` is `{:error, {:invalid_range, range}}`
+and a bad bound `{:error, {:invalid_range, :start | :end, value}}`. A blank or non-string
+symbol is `{:error, {:invalid_symbol, symbol}}`, decided before anything is sent. Bars come
+back oldest first.
 
 **`opened_at` must sit on the bar's width boundary, or the whole reply is refused**
 `{:error, {:unaligned_candle, time}}`, and two bars with one timestamp in a reply refuse it
@@ -310,6 +371,11 @@ A `last` of zero or less is not a price and refuses the reply
 (`{:error, {:non_positive_price, :price, value}}`). In `get_top_of_book/2` a side priced `0`
 is no resting order (`nil`); a negative or unreadable side refuses the reply
 (`{:error, :unexpected_response_shape}`).
+
+`Quote.volume` from `get_price/2` is the rolling 24-hour base volume (`volume_window:
+:rolling_24h`), not any interval's volume, and no interval volume can be derived from it; the
+streamed `Quote` has `volume: nil`. REST `TopOfBook` has `bid_size` and `ask_size` of `nil`
+(the ticker publishes no sizes); the streamed one carries them.
 
 If you need sub-second freshness, use `subscribe/2` — the `TopOfBook` it delivers carries a
 real nanosecond event time per update. The `Quote` `subscribe/2` also delivers, on a frame
@@ -351,8 +417,12 @@ plain text rather than the usual `{"reason": …}` shape — the text itself is 
 409, 413, 415 or 422 was a bare `{:error, {:exchange_error, :gemini, "HTTP 4xx: …"}}`, which
 a placement read as "nothing happened"). `rest.yaml` documents `404 NotFound` on the order
 and account endpoints, so an unknown order or account is `{:refused, reason}`, permanent for
-the request as sent, never the retryable `{:error, {:exchange_error, …}}` shape. A 429 and a
-5xx stay plain errors (an order write answers `:order_unconfirmed` for the 5xx).
+the request as sent, never the retryable `{:error, {:exchange_error, …}}` shape. An order
+call's 404 whose JSON body names a reason other than `EndpointNotFound` is
+`{:refused, :not_found}` (what the venue's body is for a truly unknown order is UNMEASURED; a
+retired path or wrong host stays an ordinary refusal carrying the venue's words). A refusal
+with an empty body, such as `/v1/fundingamount`'s 404, is a bare `{:refused, :refused}`. A 429
+and a 5xx stay plain errors (an order write answers `:order_unconfirmed` for the 5xx).
 
 `get_historical_prices/4` and `get_trades/2` return the **canonical** symbol (`"BTC-USD"`)
 whatever spelling you passed, as `get_order_book/2` and `get_price/2` always did.
@@ -365,7 +435,11 @@ of exactly `limit` rows (50 when you gave none) may have dropped older ones and 
 vendor's text). A print priced at zero or less refuses the reply
 (`{:error, {:non_positive_price, :price, value}}`); on the stream it is not delivered and a
 `:data_quality` notice says so, and a book ticker's last trade `c` of zero or less is no
-`Quote`.
+`Quote`. Other options: `:since` (a `DateTime` or non-negative integer), `:since_tid` (a
+non-negative integer; it wins where both are given) and `:include_broken` (busted trades are
+excluded unless you ask). Anything malformed is `{:error, {:invalid_option, key, value}}`
+before a request is made. `Trade.side` is the taker's: `:buy` means a buyer lifted the offer.
+The tape reaches seven days back, 90 with a timestamp.
 
 ### A refusal carries the venue's sentence, not only its category
 
@@ -465,7 +539,7 @@ is credited $100,000 USD, 1,000 BTC and 20,000 each of ETH, BCH, ZEC and LTC.
 ```elixir
 children = [{DpExchange.Gemini, environment: :sandbox}]
 
-{:ok, quote} = DpExchange.Gemini.get_price("BTC-USD", environment: :sandbox)
+{:ok, last_trade} = DpExchange.Gemini.get_price("BTC-USD", environment: :sandbox)
 ```
 
 REST and the WebSocket both follow it. To set it once for a process tree instead of per
@@ -554,8 +628,12 @@ global switch, and it will not redirect your live path.
 
 ## This package does not handle authentication — you do
 
-It **signs** a request when you hand it credentials and tell it which scheme you chose. It
-never obtains, stores, refreshes, or infers one, and it has no default scheme.
+It **signs** a request when you hand it credentials. It never obtains, stores or refreshes
+one. The scheme is read from which values you supplied (an `api_key`/`api_secret` pair is
+`:api_key`; an `access_token` is `:oauth`), or named outright with `auth_scheme:` in `opts`.
+Credentials carrying both families are refused as `{:error, {:unsupported_auth_scheme,
+:ambiguous}}`, and none at all as `{:error, {:missing_credentials, :gemini}}`. An
+`:auth_scheme` this package has no handler for is `{:unsupported_auth_scheme, scheme}`.
 
 **Some writes are sent once and are not retried, on purpose.** `Core.HttpClient` retries a
 timeout or a 5xx three times by default, which is safe only where the venue can tell the
@@ -568,9 +646,15 @@ id: the venue's `withdrawalId` where it sends a readable one, otherwise the `cli
 that went out. So an unreadable success body never reads as a failure you might retry under a
 new key. `request_approved_address/4`, `remove_approved_address/3` and `cancel_all_orders/2` are
 sent once too (they used to be retried; a repeat of one that took effect is answered as a
-refusal or as empty lists, which read as "nothing happened"). If one of the once-only calls
-fails after the send it is `{:error, {:write_unconfirmed, key, reason}}` -- see "A write that
-may have been acted on" below -- so check before you re-issue it.
+refusal or as empty lists, which read as "nothing happened"), as are `cancel_order/3`,
+`get_deposit_address/3` (every call generates a NEW address), `confirm_clearing_order/3`,
+`cancel_clearing_order/2`, `rename_account/3` and a token revoke. If one
+of the once-only calls fails after the send it is `{:error, {:write_unconfirmed, key, reason}}`
+-- see "A write that may have been acted on" below -- so check before you re-issue it. A
+`place_order/3` that may have reached the venue is instead `{:error, {:order_unconfirmed,
+client_order_id_or_nil, reason}}`: reconcile by listing orders, never by placing again. A
+refusal decided before anything is sent (validation, credentials, our own limiter) stays a
+plain `{:error, reason}`.
 
 **A master-scoped API key names its subaccount with `account:` on every private call.** The
 venue requires the account name on account-level endpoints for a master key and answers
@@ -666,7 +750,7 @@ one anyway — it has no browser, no redirect URI and nowhere safe to keep a ref
 
 **Account and trading are implemented.** Balances, orders, fees, transfers, trade
 history, staking, positions, clearing and account administration all work once you hand
-this package credentials and — where it cannot be inferred — the scheme: it **signs**,
+this package credentials and — where `auth_scheme:` is needed to say it — the scheme: it **signs**,
 it does not **authenticate**. What genuinely returns `{:error, :not_supported}` is the
 venue's own absence (options, watchlists, financials — see `venue_does_not_serve/0`) and
 the small remainder of this package's own backlog (
@@ -674,14 +758,17 @@ the small remainder of this package's own backlog (
 demo environment is what makes exercising any of this safely, before you point it at a
 real account.
 
-If you do use the signing helper, name the scheme; it refuses to guess:
+`DpExchange.Gemini.Auth` is internal (not the public API; the facade signs for you). Called
+directly, its signing helper takes the scheme as an argument and refuses to guess:
 
 ```elixir
+alias DpExchange.Gemini.Auth
+
 {:ok, headers} = Auth.headers(:api_key, "/v1/balances", %{}, credentials)
 {:ok, headers} = Auth.headers(:oauth, "/v1/balances", %{}, %{access_token: token})
 ```
 
-Guessing would be actively harmful: Gemini returns `AmbiguousAuthentication` (400) when V1
+Picking a scheme when both are present would be actively harmful: Gemini returns `AmbiguousAuthentication` (400) when V1
 key headers and OAuth headers arrive on the same request.
 
 ## Your API key's nonce mode is something only you know
@@ -706,7 +793,7 @@ A mismatch fails loudly on the first request with `InvalidNonce` — a 400, not 
 answer.
 
 Note that a seconds-granularity nonce on an *incremental* key caps that key at **one
-request per second**, which is 1/600th of the private ceiling. That is why the mode is
+request per second**, a tenth of the private ceiling (600 per minute, ten a second). That is why the mode is
 not something this package can paper over.
 
 ## Symbols are lowercase and separatorless, and the split is not obvious
@@ -714,8 +801,8 @@ not something this package can paper over.
 Native form is `btcusd`, `aavegusd`, `jitosolsol`. Canonical is `BASE-QUOTE`. Pass
 canonical; this package converts both ways.
 
-Worth knowing if you do any symbol handling of your own: **157 of the 346 live symbols end
-in a quote currency that is a suffix of another quote currency** — `GUSD` and `RLUSD` both
+Worth knowing if you do any symbol handling of your own: **157 of the 346 symbols live on
+2026-08-28 end in a quote currency that is a suffix of another quote currency** — `GUSD` and `RLUSD` both
 end in `USD`. A naive split on `USD` turns `aavegusd` into `AAVEG`/`USD`, and `AAVEG` is
 not an asset. It matches no catalogue entry and collects nothing, silently.
 
@@ -764,7 +851,8 @@ from the parent entry; the transaction itself carries none.
 see `Private.get_transfers/2`'s moduledoc. The venue pages it at 10 by default and 50 at
 most, with no cursor, so with no `limit_transfers:` this asks for 50 and a full page is
 `{:error, :history_truncated}` (exactly that, no payload; BREAKING, it carried the page size)
-— narrow with `timestamp:`, or pass `limit_transfers:` to take one page on purpose. `list_custody_fees/2` follows the same rule with `limit:`.
+— narrow with `timestamp:`, or pass `limit_transfers:` to take one page on purpose.
+`list_custody_fees/2` follows the same rule with `limit:`.
 
 `get_transactions/2` is the other. `POST /v1/transactions` names its window parameter
 `timestamp_nanos` and takes **nanoseconds**, not the millisecond unit every other
@@ -891,7 +979,11 @@ Four things to know before you build on them:
   ever looking wrong.
 - **`:bytes` may be absent from `[:dp_exchange, :link, :event]`**, and absent is not zero. A
   polling route has no frame, so there is no byte count that means what a socket's does.
-  Treat a missing `:bytes` as "this route cannot measure that", not as no data.
+  Treat a missing `:bytes` as "this route cannot measure that", not as no data. This
+  package's socket does report it, per frame.
+- **Reconnect delay is the delay actually waited.** The `delay_ms` of the reconnect-attempt
+  event is the jittered wait (up to a quarter shorter than the 1s-doubling-to-30s ladder),
+  not the ladder's rung, so two sockets retrying together report different values.
 
 `:endpoint` metadata is the request URL with the query string removed. Deliberate: telemetry
 metadata reaches logs, aggregators and third-party exporters, and the query string is the one
@@ -918,8 +1010,10 @@ behaviour you are about to depend on. If your decision turns on the difference, 
 field rather than assuming.
 
 `measured_at` going stale is a real thing that happens — venues change, and a declaration is
-a claim about a real venue. `script/check_doc_sources.sh` reports the age on its weekly run
-so it does not quietly get old, but nothing forces it: if you are relying on a capability in
+a claim about a real venue. `script/check_doc_sources.sh` runs weekly in this package's CI and
+reports how long since each vendor page it cites was last read (STALE past 180 days) so the
+sources do not quietly get old, but it does not re-measure a capability, and nothing forces
+that: if you are relying on a capability in
 a way you cannot afford to have wrong, check the date and, where it matters, verify against
 the venue yourself.
 
@@ -1005,8 +1099,7 @@ the shared feed process sees it. `DpExchange.Gemini.Fake` answers the same.
 bookTicker level, a refused subscribe, a depth gap) are forwarded once per
 `{kind, reason, symbol}` per 30 seconds (a refused subscribe states no reason, so the venue's
 status stands in for it: a 400 and a 429 are separate keys). The first one after the window
-carries
-`details.suppressed`, the number it covers. Lifecycle notices (`:link_up`, `:link_down`,
+carries `details.suppressed`, the number it covers. Lifecycle notices (`:link_up`, `:link_down`,
 `:coverage_change`) are never throttled.
 
 ## Two session behaviours this package deliberately leaves to you
@@ -1089,8 +1182,10 @@ and you will size an order against ten and place it against zero.
 the asset is unbonding; treating the return value as settled spends an asset you do not have
 yet.
 
-`provider_id` is **required** on `stake/3` and `unstake/3`, as a non-blank string. The same asset
-stakes with several providers at different rates, and this package will not pick one for you.
+`provider_id` is **required** on `stake/3` and `unstake/3`, as a non-blank string: absent is
+`{:error, :missing_provider_id}`, anything else is `{:error, {:invalid_option, :provider_id,
+value}}`. The same asset stakes with several providers at different rates, and this package
+will not pick one for you.
 
 **`get_staking_rewards/1` returns one `StakingReward` per rate period, not per currency.**
 `POST /v1/staking/rewards` answers an object keyed by provider, then by currency, each
@@ -1108,6 +1203,11 @@ until that counterparty confirms**. Read `is_confirmed`, not `status`.
 `confirm_clearing_order/3` **re-states every term** — symbol, amount, price, side — and this
 package fills none of them in from the order being confirmed. That is the whole point of the
 check: reading them back from the venue would confirm whatever the venue had.
+
+A confirm or cancel the venue declines is still HTTP 200 with a `result` other than the
+success word; it comes back `{:refused, body}`, not `{:ok, body}`, and a 200 naming no
+`result` is `{:error, :unexpected_response_shape}`. On a confirm, `side` is the confirming
+party's own side — the opposite of the side the order was created with.
 
 The broker form names **both** counterparties and `side` belongs to the *source*. Passing the
 two the wrong way round produces a valid order in which each side trades the direction the
@@ -1141,7 +1241,11 @@ caller that keeps only the access token has a session that ends at the next refr
 The refresh is sent **once**, never retried by this package: a retry after a timeout would
 present the already-rotated token and lose the new pair. If it returns `{:error, _}`, the
 outcome is unknown — try the refresh token you hold, and if the venue refuses it, the
-session needs a new consent.
+session needs a new consent. Only a 400, 401 or 403 is `{:refused, body}` (the OAuth error
+map, e.g. `%{"error" => "invalid_grant"}`); any other status is
+`{:error, {:exchange_error, :gemini, _}}`. `client_secret:` is sent only when given (a
+confidential client); one that is not a string is
+`{:error, {:invalid_option, :client_secret, :redacted}}`, the value kept out of the result.
 
 A blank client id or refresh token, or one that is not a string at all (a `nil` from an unset
 variable), is refused before anything is sent
@@ -1150,8 +1254,9 @@ successful reply is **unmeasured**: the vendor's OpenAPI document does not descr
 `/auth/token`, so the decoded body is returned as the venue sent it and is not checked for an
 `access_token`. Check it yourself before replacing the token you hold.
 
-`revoke_access_token/1` needs an OAuth token and refuses an API key: an API-key-signed call
-there would revoke nothing and come back shaped like success.
+`revoke_access_token/1` needs an OAuth token and refuses an API key
+(`{:error, :oauth_token_required}`): an API-key-signed call there would revoke nothing and
+come back shaped like success.
 
 ## The spreadsheet reports are bytes
 
@@ -1161,7 +1266,7 @@ number this package chose from a layout the venue can change without notice.
 
 `from` and `to` must be given **together or not at all** — the venue makes each mandatory if
 the other is present, and one alone comes back bounded by `numRows` instead, which is a real
-report over the wrong window.
+report over the wrong window. One alone is `{:error, :from_and_to_together}`.
 
 ## `has_staking` and `supports_margin` are `true` — an account entitlement, not a package one
 
@@ -1285,6 +1390,7 @@ anything is signed, in this order:
 | `opts[:account]` set but not a non-blank string | `{:error, {:invalid_option, :account, v}}` |
 
 Pass amounts as `Decimal`, integers or numeric strings; a float has already lost digits.
+The accepted `:order_type`s are `:limit`, `:stop_limit`, `:post_only`, `:ioc` and `:fok`.
 `:post_only` is the one atom for maker-or-cancel. `:maker_or_cancel`, which this package used to
 accept as an alias, is not a Core order type and is refused.
 
@@ -1345,6 +1451,17 @@ A dropped connection (no crash, just the venue or the network closing it) reconn
 inside the same socket, and a reconnected socket carries no subscriptions. This package
 resends your `wanted` set the moment the socket reports it is back. A 60-second
 unconditional resend also runs, as a safety net.
+
+**The first reconnect after a live session drops is immediate; every failed attempt after it
+waits longer.** The wait doubles from 1s to a 30s ceiling, each wait shortened by a random
+amount of up to a quarter so a fleet of sockets dropped together does not redial together,
+and a session that dies within 5s of connecting counts as a failed attempt, not a healthy one.
+The wait ends at once if `Feed` stops the socket.
+
+**A socket that crashes (rather than being closed) is redialled by `Feed`** and announced as a
+`:link_down` notice (`severity: :warning`, `details.reason` the bounded crash reason). The
+first crash in a run redials at once; a crash within 30s of the last waits 1s, doubling to
+30s. One redial timer is pending at a time, so a later crash replaces an earlier one's.
 
 **While the socket is reconnecting, `Feed.subscribe/3`, `unsubscribe/2` and
 `update_symbols/2` answer `:ok` without touching the socket.** Your change is recorded
@@ -1444,4 +1561,12 @@ changes are announced as the gap they are (previously the unreadable frame reset
 to "nothing applied yet", which can never be a gap).
 
 Likewise an undecodable trade frame raises a `:data_quality` notice
-(`details.reason: "undecodable trade"`) instead of vanishing; one notice per frame.
+(`details.reason: "undecodable trade"`) instead of vanishing, as does a bookTicker frame
+whose symbol is absent, blank or not text (`"undecodable book ticker"`) and a level that
+cannot be read (`"unreadable bookTicker level"`). The socket raises one per frame; `Feed`
+forwards one per `{kind, reason, symbol}` per 30 seconds (see above).
+
+Two more `:degraded` notices close the connection and reconnect it: `details.reason:
+:silent_connection` (nothing heard, not even a pong) and `:subscribe_unanswered` (subscribes
+unanswered for 15s while pings are). A symbol's last reported trade is forgotten when its
+bookTicker is unsubscribed, so subscribing it again reports the current last trade once.

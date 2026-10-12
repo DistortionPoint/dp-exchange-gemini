@@ -43,14 +43,21 @@ end
 # In your supervision tree. Nothing starts itself.
 children = [{DpExchange.Gemini, []}]
 
-{:ok, quote} = DpExchange.Gemini.get_price("BTCUSD", [])
+{:ok, last_trade} = DpExchange.Gemini.get_price("BTC-USD", [])
 
-:ok = DpExchange.Gemini.subscribe(["BTCUSD"], to: self())
+:ok = DpExchange.Gemini.subscribe(["BTC-USD"], to: self())
 
 # Credentials are an argument to the call that needs them. The child keeps none: they sign
 # that one request and are not stored.
 {:ok, balances} = DpExchange.Gemini.get_balances(my_credentials(), [])
 ```
+
+Streamed data arrives in the subscriber's mailbox as `{:dp_exchange, :gemini, payload}`, where
+`payload` is a `Quote`, `TopOfBook` or (with `channels: [..., :trades]`) a `Trade`. Link and
+data-quality conditions arrive separately, as the same message shape carrying a
+`DpExchange.Core.Notice`, to processes that called `DpExchange.Gemini.subscribe_notices/1`.
+`Quote.venue_time` and `TopOfBook.venue_time` are `nil` from REST (the venue states no quote
+time); `observed_at` states freshness.
 
 `DpExchange.Gemini` is the **entire public API**. Everything else — transport, signing,
 session handling, supervision — is internal, and the conformance suite asserts it.

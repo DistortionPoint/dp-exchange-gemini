@@ -854,8 +854,9 @@ defmodule DpExchange.Gemini do
   @doc """
   Starts delivering live data for `symbols` to `opts[:to]`.
 
-  Symbols are upper-cased on the way in. `opts[:channels]` opts in to the `:trades` kind,
-  and `opts[:feed]` names the feed process (by default the one for `opts[:environment]`).
+  Symbols are upper-cased on the way in. `opts[:feed]` names the feed process (by default
+  the one for `opts[:environment]`). Which kinds are delivered is set when the feed starts
+  (its `:channels` option, e.g. `[:book_ticker, :trades]`), not per call.
   With no feed running it answers `{:error, :feed_not_started}`. See
   `c:DpExchange.Core.Venue.subscribe/2`.
   """

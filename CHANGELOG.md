@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Docs (`usage-rules.md` and README checked line by line against the code):** corrected the
+  bookTicker `Quote` re-send rule, the `1w`/`1M` behaviour for a `:start` older than the reply
+  (the bars the venue sent, not an empty list, also corrected in the `Rest` moduledoc), auth
+  scheme inference, the nonce rate (a tenth of the private ceiling, not 1/600th), the
+  `{:refused, :not_found}` condition, and `order_unconfirmed` for a placement; the
+  `subscribe/2` doc no longer claims `:channels` is a per-call option. Documented the jittered
+  reconnect and crash-redial backoff, the bookTicker and socket notices, `:depth`, the
+  `get_trades/2` options, the candle refusals, the streaming-call error shapes, every call sent
+  once, and the staking, OAuth, clearing and funding-report refusal shapes.
+
 ## [0.2.132] - 2026-10-12
 
 - **A second socket crash left the first crash's redial timer live.** `Feed` scheduled an
