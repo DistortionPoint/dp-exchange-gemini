@@ -1414,7 +1414,6 @@ defmodule DpExchange.Gemini.Rest do
   # `{:refused, reason}` for a generic error.
   defp refusal(body), do: refusal_reason(body)
 
-  @doc false
   # Shared with `DpExchange.Gemini.Private`, which refuses on the same venue vocabulary.
   # One implementation rather than two copies that can drift apart on a security fix.
   #
@@ -1479,6 +1478,13 @@ defmodule DpExchange.Gemini.Rest do
   # keeps every message-less refusal matching exactly as it did — including the `Fake`'s,
   # which builds refusals literally and must stay shape-identical to the real venue
   # (assertion 9). The only callers that change are the ones that were being under-informed.
+  @doc """
+  Classifies a venue refusal body (a decoded JSON map, or plain text) into a reason.
+
+  A recognised category is an atom, or `{atom, message}` when the venue also sent a message;
+  a word nothing here recognises is `{:unknown_reason, text}` with the text bounded; a body
+  with no readable reason is `:refused`.
+  """
   @spec refusal_reason(term()) ::
           :refused | atom() | {atom(), String.t()} | {:unknown_reason, String.t()}
   def refusal_reason(%{"reason" => reason} = body) when is_binary(reason) do

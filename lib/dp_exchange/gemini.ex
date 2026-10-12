@@ -211,6 +211,13 @@ defmodule DpExchange.Gemini do
 
   # --- lifecycle ---------------------------------------------------------
 
+  @doc """
+  The supervisor child spec for this venue, so `{DpExchange.Gemini, opts}` works in your tree.
+
+  Wraps any credentials in `opts` before the spec is built, so they never appear in a
+  supervisor's crash report. Recognised options: `:environment`, `:name`. The child is
+  declared `type: :supervisor`. See `c:DpExchange.Core.Venue.child_spec/1` for the contract.
+  """
   @impl true
   def child_spec(opts) do
     # Credentials are wrapped HERE, and not in `start_link/1` or `init/1` — that
@@ -236,14 +243,31 @@ defmodule DpExchange.Gemini do
     }
   end
 
+  @doc """
+  Starts this venue's supervision tree (rate limiter and feed) by delegating to
+  `DpExchange.Gemini.Supervisor.start_link/1`.
+
+  Prefer supervising `{DpExchange.Gemini, opts}`. See `c:DpExchange.Core.Venue.start_link/1`
+  for the contract.
+  """
   @impl true
   def start_link(opts), do: DpExchange.Gemini.Supervisor.start_link(opts)
 
   # --- declaration -------------------------------------------------------
 
+  @doc """
+  The display name of this venue: `"Gemini"`.
+
+  See `c:DpExchange.Core.Venue.provider_name/0`.
+  """
   @impl true
   def provider_name, do: "Gemini"
 
+  @doc """
+  The stable runtime identifier of this venue: `:gemini`.
+
+  See `c:DpExchange.Core.Venue.runtime_id/0`.
+  """
   @impl true
   def runtime_id, do: :gemini
 
@@ -260,9 +284,22 @@ defmodule DpExchange.Gemini do
   @spec venue_does_not_serve() :: [{atom(), arity()}]
   def venue_does_not_serve, do: @venue_does_not_serve
 
+  @doc """
+  The asset classes this venue serves: `[:crypto]`.
+
+  See `c:DpExchange.Core.Venue.asset_classes/0`.
+  """
   @impl true
   def asset_classes, do: [:crypto]
 
+  @doc """
+  What this venue can do and how well that is known, per endpoint.
+
+  Every implemented endpoint is declared `:experimental`; those in `venue_does_not_serve/0`
+  (and the two not yet ported) are `:unsupported`. Ceilings, timeframes and the
+  `measured_at` / `measured_against` provenance are carried in the result. See
+  `c:DpExchange.Core.Venue.capabilities/0`.
+  """
   @impl true
   def capabilities do
     Capabilities.new(
@@ -405,31 +442,83 @@ defmodule DpExchange.Gemini do
 
   # --- market data -------------------------------------------------------
 
+  @doc """
+  The latest price for `symbol`, from the public `/v1/pubticker` endpoint.
+
+  `venue_time` on the result is always `nil` because the venue publishes no quote time.
+  See `c:DpExchange.Core.Venue.get_price/2` for the contract.
+  """
   @impl true
   def get_price(symbol, opts \\ []), do: Rest.get_price(symbol, with_limiter(opts))
 
+  @doc """
+  Candles for `symbol` at `timeframe`, from the public `/v2/candles` endpoint.
+
+  The venue returns a fixed window per width and this package filters it to `range`,
+  refusing a range that starts before the window rather than shortening it. See
+  `DpExchange.Gemini.Rest.get_historical_prices/4` and
+  `c:DpExchange.Core.Venue.get_historical_prices/4`.
+  """
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []),
     do: Rest.get_historical_prices(symbol, timeframe, range, with_limiter(opts))
 
+  @doc """
+  The symbols the venue lists, from the public `/v1/symbols` endpoint, in canonical form.
+
+  See `c:DpExchange.Core.Venue.get_symbols/1`.
+  """
   @impl true
   def get_symbols(opts \\ []), do: Rest.get_symbols(with_limiter(opts))
 
+  @doc """
+  Best bid and ask for `symbol`, from the public `/v1/pubticker` endpoint.
+
+  `venue_time` is always `nil` here. See `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  """
   @impl true
   def get_top_of_book(symbol, opts \\ []), do: Rest.get_top_of_book(symbol, with_limiter(opts))
 
+  @doc """
+  The order book for `symbol`, from the public `/v1/book` endpoint.
+
+  See `DpExchange.Gemini.Rest.get_order_book/2` for the options it reads and
+  `c:DpExchange.Core.Venue.get_order_book/2` for the contract.
+  """
   @impl true
   def get_order_book(symbol, opts \\ []), do: Rest.get_order_book(symbol, with_limiter(opts))
 
+  @doc """
+  A snapshot of every pair, from the public `/v1/pricefeed` endpoint.
+
+  See `c:DpExchange.Core.Venue.get_market_overview/1`.
+  """
   @impl true
   def get_market_overview(opts \\ []), do: Rest.get_market_overview(with_limiter(opts))
 
+  @doc """
+  The tradable instruments with their trading status.
+
+  Per-symbol status exists only in `/v1/symbols/details`, so this paces one request per
+  symbol through the rate limiter; pass `symbols:` to narrow it. See
+  `DpExchange.Gemini.Rest.list_instruments/1` and `c:DpExchange.Core.Venue.list_instruments/1`.
+  """
   @impl true
   def list_instruments(opts \\ []), do: Rest.list_instruments(with_limiter(opts))
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. A crypto book has no auction.
+
+  See `c:DpExchange.Core.Venue.get_auction_imbalance/2`.
+  """
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. No volume-at-price is published.
+
+  See `c:DpExchange.Core.Venue.get_volume_profile/3`.
+  """
   @impl true
   def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
 
@@ -440,6 +529,12 @@ defmodule DpExchange.Gemini do
   # host supplied — never a guess between two, which the venue punishes with
   # `AmbiguousAuthentication`.
 
+  @doc """
+  The account's balances, from the signed `/v1/balances` endpoint.
+
+  Credentials are used for this one request and not kept; `:auth_scheme` names the scheme.
+  See `c:DpExchange.Core.Venue.get_balances/2`.
+  """
   @impl true
   def get_balances(credentials, opts),
     do: Private.get_balances(credentials, with_limiter(opts))
@@ -620,13 +715,30 @@ defmodule DpExchange.Gemini do
   @impl true
   def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  The account's own record of itself, from the signed `/v1/account` endpoint.
+
+  See `c:DpExchange.Core.Venue.get_accounts/2`.
+  """
   @impl true
   def get_accounts(credentials, opts),
     do: Private.get_accounts(credentials, with_limiter(opts))
 
+  @doc """
+  The fee schedule that applies to this credential, from the signed `/v1/notionalvolume`
+  endpoint.
+
+  Not `list_fee_promos/1`. See `c:DpExchange.Core.Venue.get_fees/2`.
+  """
   @impl true
   def get_fees(credentials, opts), do: Private.get_fees(credentials, with_limiter(opts))
 
+  @doc """
+  Deposits and withdrawals on the account, from the signed transfers endpoint.
+
+  History options are validated before any request is sent. See
+  `DpExchange.Gemini.Private.get_transfers/2` and `c:DpExchange.Core.Venue.get_transfers/2`.
+  """
   @impl true
   def get_transfers(credentials, opts),
     do: Private.get_transfers(credentials, with_limiter(opts))
@@ -675,9 +787,20 @@ defmodule DpExchange.Gemini do
   @impl true
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. There is no replace to preview.
+
+  See `c:DpExchange.Core.Venue.preview_replace/4`.
+  """
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. The venue publishes no
+  close-position endpoint; close by placing the offsetting order.
+
+  See `c:DpExchange.Core.Venue.close_position/3`.
+  """
   @impl true
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
@@ -706,16 +829,36 @@ defmodule DpExchange.Gemini do
   def get_order(credentials, order_id, opts \\ []),
     do: Private.get_order(credentials, order_id, with_limiter(opts))
 
+  @doc """
+  Resting orders, or order history with `history: true`, from the signed orders endpoints.
+
+  The resting read takes no filter; `:symbol`, `:limit` and `:since` narrow the history read
+  only. See `DpExchange.Gemini.Private.get_orders/2` and `c:DpExchange.Core.Venue.get_orders/2`.
+  """
   @impl true
   def get_orders(credentials, opts \\ []),
     do: Private.get_orders(credentials, with_limiter(opts))
 
+  @doc """
+  The account's own fills, from the signed `/v1/mytrades` endpoint.
+
+  See `DpExchange.Gemini.Private.get_trade_history/2` and
+  `c:DpExchange.Core.Venue.get_trade_history/2`.
+  """
   @impl true
   def get_trade_history(credentials, opts),
     do: Private.get_trade_history(credentials, with_limiter(opts))
 
   # --- streaming ---------------------------------------------------------
 
+  @doc """
+  Starts delivering live data for `symbols` to `opts[:to]`.
+
+  Symbols are upper-cased on the way in. `opts[:channels]` opts in to the `:trades` kind,
+  and `opts[:feed]` names the feed process (by default the one for `opts[:environment]`).
+  With no feed running it answers `{:error, :feed_not_started}`. See
+  `c:DpExchange.Core.Venue.subscribe/2`.
+  """
   @impl true
   def subscribe(symbols, opts \\ []),
     do:
@@ -724,10 +867,22 @@ defmodule DpExchange.Gemini do
         {:error, :feed_not_started}
       )
 
+  @doc """
+  Stops delivering `symbols`, which are upper-cased on the way in.
+
+  With no feed running it answers `:ok`, since there is nothing to stop. See
+  `c:DpExchange.Core.Venue.unsubscribe/2`.
+  """
   @impl true
   def unsubscribe(symbols, opts \\ []),
     do: feed_call(fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols)) end, :ok)
 
+  @doc """
+  Replaces the live subscription's symbol set with `symbols`, upper-cased on the way in.
+
+  With no feed running it answers `{:error, :feed_not_started}`. See
+  `c:DpExchange.Core.Venue.update_symbols/2`.
+  """
   @impl true
   def update_symbols(symbols, opts \\ []),
     do:
@@ -739,6 +894,13 @@ defmodule DpExchange.Gemini do
   # NOT declarable `:unsupported`: `coverage/1` returns a map, so it has no way to answer
   # `{:error, :not_supported}`. It always answers, and an empty map is the honest answer
   # for a venue delivering nothing.
+  @doc """
+  Which symbols are actually arriving, and by what route.
+
+  Answers an empty map when no feed is running or the feed cannot be reached, meaning "not
+  observed". See `coverage_by_kind/1` for the split by data kind and
+  `c:DpExchange.Core.Venue.coverage/1` for the contract.
+  """
   @impl true
   def coverage(opts \\ []) do
     feed = feed(opts)
@@ -808,6 +970,12 @@ defmodule DpExchange.Gemini do
     if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
   end
 
+  @doc """
+  Subscribes the calling process to this venue's notices (for example `:data_quality`).
+
+  With no feed running it answers `{:error, :feed_not_started}`. See
+  `c:DpExchange.Core.Venue.subscribe_notices/1`.
+  """
   @impl true
   def subscribe_notices(opts \\ []),
     do: feed_call(fn -> Feed.subscribe_notices(feed(opts), opts) end, {:error, :feed_not_started})
@@ -899,18 +1067,41 @@ defmodule DpExchange.Gemini do
   @spec live?(keyword()) :: boolean()
   def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
 
+  @doc """
+  Checks that the credentials reach the venue, with a signed call to `/v1/heartbeat`.
+
+  On a key with *Requires Heartbeat* this keeps open orders alive. See
+  `DpExchange.Gemini.Private.test_connection/2` and `c:DpExchange.Core.Venue.test_connection/2`.
+  """
   @impl true
   def test_connection(credentials, opts),
     do: Private.test_connection(credentials, with_limiter(opts))
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. The venue publishes no
+  rate-limit headers; the published limits are in `capabilities/0`.
+
+  See `c:DpExchange.Core.Venue.get_rate_limit_status/2`.
+  """
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
 
   # Crypto, 24/7. Per-symbol trading status is a different question and lives in
   # `quantization/1`, which reports the venue's own `status` for that pair.
+  @doc """
+  Always `{:ok, :open}`: crypto trades around the clock.
+
+  Per-symbol trading status is `quantization/1`. See `c:DpExchange.Core.Venue.market_status/1`.
+  """
   @impl true
   def market_status(_opts), do: {:ok, :open}
 
+  @doc """
+  Price and quantity increments for `symbol`, from `/v1/symbols/details`.
+
+  `tick_size` is the base-asset increment and `quote_increment` the price increment. See
+  `DpExchange.Gemini.Rest.quantization/2` and `c:DpExchange.Core.Venue.quantization/1`.
+  """
   @impl true
   def quantization(symbol), do: Rest.quantization(symbol, with_limiter([]))
 
@@ -1242,47 +1433,124 @@ defmodule DpExchange.Gemini do
 
   # **No quote-status endpoint.** The venue quotes and executes; it does not answer "what
   # became of quote N". A caller that lost a quote re-quotes.
+  @doc """
+  Not served by this package: answers `{:error, :not_supported}`. The venue has no
+  quote-status endpoint.
+
+  See `c:DpExchange.Core.Venue.get_conversion/2`.
+  """
   @impl true
   def get_conversion(_id, _opts \\ []), do: Venue.not_supported()
+
+  @doc """
+  Not served by this package yet: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.list_portfolios/1`.
+  """
   @impl true
   def list_portfolios(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. Gemini lists no options.
+
+  See `c:DpExchange.Core.Venue.get_option_chain/2`.
+  """
   @impl true
   def get_option_chain(_underlying, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. Gemini lists no options.
+
+  See `c:DpExchange.Core.Venue.get_option_expirations/2`.
+  """
   @impl true
   def get_option_expirations(_underlying, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. Gemini lists no options.
+
+  See `c:DpExchange.Core.Venue.get_option_greeks/2`.
+  """
   @impl true
   def get_option_greeks(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.list_watchlists/1`.
+  """
   @impl true
   def list_watchlists(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.get_watchlist/2`.
+  """
   @impl true
   def get_watchlist(_id, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.create_watchlist/3`.
+  """
   @impl true
   def create_watchlist(_name, _symbols, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.update_watchlist/2`.
+  """
   @impl true
   def update_watchlist(_id, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.delete_watchlist/2`.
+  """
   @impl true
   def delete_watchlist(_id, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.get_financials/3`.
+  """
   @impl true
   def get_financials(_symbol, _kind, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.get_corporate_events/1`.
+  """
   @impl true
   def get_corporate_events(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.get_filings/2`.
+  """
   @impl true
   def get_filings(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.get_news/1`.
+  """
   @impl true
   def get_news(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+
+  See `c:DpExchange.Core.Venue.get_screener/2`.
+  """
   @impl true
   def get_screener(_name, _opts \\ []), do: Venue.not_supported()
 

@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- Docs: every public facade function is documented in HexDocs (137 added); docs build is warning-free.
+
 ## [0.2.130] - 2026-10-12
 
 - **A bookTicker frame with an absent, blank or non-text symbol was dropped in silence.** Trade
@@ -64,7 +66,7 @@ acceptable changelog line.
   `headers/5` documents `{:invalid_credentials, :gemini}`, `{:unsupported_nonce_mode, mode}` and
   `:nonce_exhausted`; `nonce/1`, `ensure_counter/0` and `seed_nonce/1` describe the three
   counters.
-- `Supervisor.start_link/1` gains its `@doc`; `SymbolFormat` says two (not three) overlapping
+- `DpExchange.Gemini.Supervisor.start_link/1` gains its `@doc`; `SymbolFormat` says two (not three) overlapping
   pairs bite.
 
 ## [0.2.127] - 2026-10-12
@@ -410,7 +412,7 @@ acceptable changelog line.
   gets verification added beneath the caller's own keys (a caller's `:cacerts` or
   `:cacertfile` replaces the OS trust store). Only an explicit `verify: :verify_none` turns
   verification off.
-- **`Supervisor.start_link/1` and `Feed.start_link/1` wrap raw credentials**
+- **`DpExchange.Gemini.Supervisor.start_link/1` and `Feed.start_link/1` wrap raw credentials**
   (`Credentials.wrap_opt/1`, idempotent). Only `child_spec/1` did, so a tree started with
   `DpExchange.Gemini.start_link(credentials: ...)` held the raw map in the supervisor's init
   argument and child specs, printed by `:sys.get_status/1` and any crash report.
@@ -1125,7 +1127,7 @@ Found by reading `Private` against `docs/reference/gemini/openapi/rest.yaml`.
   `environment: :sandbox` (or from a process on `Config.put_override(:environment, :sandbox)`,
   which `usage-rules.md` promises sends "everything it spawns" to demo) went to the live feed
   while the same process's `get_price/2` went to demo. The default is now
-  `Supervisor.feed_name/1`, environment-derived like the others; an explicit `:feed` still
+  `DpExchange.Gemini.Supervisor.feed_name/1`, environment-derived like the others; an explicit `:feed` still
   wins.
 - **A symbol list that was not a list of strings crashed the shared feed.** `subscribe/2`,
   `unsubscribe/2` and `update_symbols/2` passed whatever they were given into the named `Feed`
@@ -2130,8 +2132,8 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   a fake exists not to have.
 
   `c:DpExchange.Core.Venue.subscribe/2`'s own doc does not state which it is, and it does not
-  need to — the contract settles it by shape. `c:update_symbols/2` exists to "change a live
-  subscription's symbol set" and `c:unsubscribe/2` to stop delivery for named symbols; neither
+  need to — the contract settles it by shape. `c:DpExchange.Core.Venue.update_symbols/2` exists to "change a live
+  subscription's symbol set" and `c:DpExchange.Core.Venue.unsubscribe/2` to stop delivery for named symbols; neither
   has any purpose if `subscribe/2` already replaces, since a caller would just subscribe the
   new list. Two callbacks the contract distinguishes, implemented as one function, is the tell.
 

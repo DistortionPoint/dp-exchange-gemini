@@ -93,27 +93,48 @@ defmodule DpExchange.Gemini.Fake do
   @trades_key {__MODULE__, :trades}
   @top_of_book_key {__MODULE__, :top_of_book}
 
+  @doc """
+  A child spec for the fake. It is accepted anywhere the real one is, but starts nothing:
+  `start_link/1` answers `:ignore`.
+
+  See `c:DpExchange.Core.Venue.child_spec/1`.
+  """
   @impl true
   def child_spec(opts),
     do: %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
 
+  @doc """
+  Starts nothing and answers `:ignore`: the fake keeps its state per process, not in a tree.
+
+  See `c:DpExchange.Core.Venue.start_link/1`.
+  """
   @impl true
   def start_link(_opts), do: :ignore
 
+  @doc "The real adapter's `DpExchange.Gemini.provider_name/0`, unchanged."
   @impl true
   def provider_name, do: DpExchange.Gemini.provider_name()
 
+  @doc "The real adapter's `DpExchange.Gemini.runtime_id/0`, unchanged."
   @impl true
   def runtime_id, do: DpExchange.Gemini.runtime_id()
 
+  @doc "The real adapter's `DpExchange.Gemini.asset_classes/0`, unchanged."
   @impl true
   def asset_classes, do: DpExchange.Gemini.asset_classes()
 
   # The real declaration, deliberately. A fake declaring different capabilities from the
   # venue it stands in for is a fake a consumer cannot use to test capability branching.
+  @doc "The real adapter's `DpExchange.Gemini.capabilities/0`, unchanged, deliberately."
   @impl true
   def capabilities, do: DpExchange.Gemini.capabilities()
 
+  @doc """
+  A fixed in-memory price for a symbol the fake carries; one it does not carry is refused
+  as the real endpoint refuses it.
+
+  See `DpExchange.Gemini.get_price/2` and `c:DpExchange.Core.Venue.get_price/2`.
+  """
   @impl true
   def get_price(symbol, _opts \\ []) do
     with :ok <- Rest.validate_symbol(symbol) do
@@ -146,6 +167,11 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @doc """
+  A fixed in-memory top of book for a symbol the fake carries.
+
+  See `DpExchange.Gemini.get_top_of_book/2` and `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  """
   @impl true
   def get_top_of_book(symbol, _opts \\ []) do
     with :ok <- Rest.validate_symbol(symbol) do
@@ -178,6 +204,13 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @doc """
+  In-memory candles on this venue's own grid, with its refusals: a timeframe Gemini does not
+  serve, and a range starting before the fixed window (`{:range_unavailable, ...}`).
+
+  See `DpExchange.Gemini.get_historical_prices/4` and
+  `c:DpExchange.Core.Venue.get_historical_prices/4`.
+  """
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
     # The real call's own order: the symbol, then the options it cannot honour (`:limit`,
@@ -258,11 +291,22 @@ defmodule DpExchange.Gemini.Fake do
       else: :ok
   end
 
+  @doc """
+  The four symbols the fake carries.
+
+  See `DpExchange.Gemini.get_symbols/1` and `c:DpExchange.Core.Venue.get_symbols/1`.
+  """
   @impl true
   def get_symbols(_opts \\ []) do
     with_injection(fn -> {:ok, @symbols} end)
   end
 
+  @doc """
+  An in-memory book for a symbol the fake carries. The book options are validated by the
+  real `DpExchange.Gemini.Rest` check before anything is answered.
+
+  See `DpExchange.Gemini.get_order_book/2` and `c:DpExchange.Core.Venue.get_order_book/2`.
+  """
   @impl true
   def get_order_book(symbol, opts \\ []) do
     with :ok <- Rest.validate_symbol(symbol),
@@ -340,6 +384,12 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @doc """
+  An in-memory trade tape. `:since`, `:since_tid` and `:limit` are checked by the real
+  `DpExchange.Gemini.Rest` validator first.
+
+  See `DpExchange.Gemini.get_trades/2` and `c:DpExchange.Core.Venue.get_trades/2`.
+  """
   @impl true
   def get_trades(symbol, opts \\ []) do
     # The real call's own checks, before the venue is asked: a symbol that is not a
@@ -432,6 +482,12 @@ defmodule DpExchange.Gemini.Fake do
   defp most_recent(trades, nil), do: trades
   defp most_recent(trades, limit), do: Enum.take(trades, -limit)
 
+  @doc """
+  An in-memory reference rate. An unsupported pair is refused before the credential, and a
+  credential is required, as on the real call.
+
+  See `DpExchange.Gemini.get_fx_rate/3` and `c:DpExchange.Core.Venue.get_fx_rate/3`.
+  """
   @impl true
   def get_fx_rate(pair, at, opts \\ []) do
     with_injection(fn ->
@@ -462,6 +518,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  In-memory network lookups for an asset, or for `opts[:network]`. A blank asset or network
+  is refused before the credential, as on the real call.
+
+  See `DpExchange.Gemini.list_networks/2` and `c:DpExchange.Core.Venue.list_networks/2`.
+  """
   @impl true
   def list_networks(asset, opts \\ []) do
     with_injection(fn ->
@@ -495,11 +557,22 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @doc """
+  One fixed promotional symbol.
+
+  See `DpExchange.Gemini.list_fee_promos/1` and `c:DpExchange.Core.Venue.list_fee_promos/1`.
+  """
   @impl true
   def list_fee_promos(_opts \\ []) do
     with_injection(fn -> {:ok, [%{"symbol" => "btcusd"}]} end)
   end
 
+  @doc """
+  A fixed price and 24-hour change for each symbol the fake carries.
+
+  See `DpExchange.Gemini.get_market_overview/1` and
+  `c:DpExchange.Core.Venue.get_market_overview/1`.
+  """
   @impl true
   def get_market_overview(_opts \\ []) do
     with_injection(fn ->
@@ -510,6 +583,11 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed increments for a symbol the fake carries.
+
+  See `DpExchange.Gemini.quantization/1` and `c:DpExchange.Core.Venue.quantization/1`.
+  """
   @impl true
   def quantization(symbol) do
     with :ok <- Rest.validate_symbol(symbol), do: fake_quantization(canonical(symbol))
@@ -539,6 +617,12 @@ defmodule DpExchange.Gemini.Fake do
   # `Rest.list_instruments/1`'s shape: every listed symbol `:tradable`, honouring `symbols:`, and
   # an unlisted one failing the whole call with the venue's own `InvalidSymbol` refusal
   # inside, as the real call does.
+  @doc """
+  The instruments the fake carries, or those named by `opts[:symbols]`; a symbol it does not
+  carry is refused.
+
+  See `DpExchange.Gemini.list_instruments/1` and `c:DpExchange.Core.Venue.list_instruments/1`.
+  """
   @impl true
   def list_instruments(opts \\ []) do
     with_injection(fn ->
@@ -570,9 +654,17 @@ defmodule DpExchange.Gemini.Fake do
     )
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_auction_imbalance/2`.
+  """
   @impl true
   def get_auction_imbalance(_symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_volume_profile/3`.
+  """
   @impl true
   def get_volume_profile(_symbol, _timeframe, _opts \\ []), do: Venue.not_supported()
 
@@ -582,6 +674,11 @@ defmodule DpExchange.Gemini.Fake do
   # something credential-shaped arrived and otherwise refuses — a fake that accepted `nil`
   # would let a consumer's test pass while the real call fails on a missing key.
 
+  @doc """
+  Fixed USD and BTC balances for an accepted credential.
+
+  See `DpExchange.Gemini.get_balances/2` and `c:DpExchange.Core.Venue.get_balances/2`.
+  """
   @impl true
   def get_balances(credentials, opts \\ []) do
     with_injection(fn ->
@@ -609,6 +706,11 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  One fixed account row for an accepted credential.
+
+  See `DpExchange.Gemini.get_accounts/2` and `c:DpExchange.Core.Venue.get_accounts/2`.
+  """
   @impl true
   def get_accounts(credentials, opts \\ []) do
     with_injection(fn ->
@@ -618,6 +720,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  A fixed fee schedule. A `:symbol` the real call would refuse is refused before the
+  credential.
+
+  See `DpExchange.Gemini.get_fees/2` and `c:DpExchange.Core.Venue.get_fees/2`.
+  """
   @impl true
   def get_fees(credentials, opts \\ []) do
     with_injection(fn ->
@@ -629,6 +737,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  An empty transfer history for an accepted credential; the window and page options are
+  validated by the real function first.
+
+  See `DpExchange.Gemini.get_transfers/2` and `c:DpExchange.Core.Venue.get_transfers/2`.
+  """
   @impl true
   def get_transfers(credentials, opts \\ []) do
     with_injection(fn ->
@@ -640,6 +754,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Validates the request with the same `DpExchange.Gemini.Private` function the real adapter
+  uses, then remembers the order in this process.
+
+  See `DpExchange.Gemini.place_order/3` and `c:DpExchange.Core.Venue.place_order/3`.
+  """
   @impl true
   def place_order(credentials, request, opts \\ []) do
     with_injection(fn ->
@@ -691,24 +811,50 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.place_orders/3`.
+  """
   @impl true
   def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
 
   # These four are refused (`{:error, :not_supported}`), matching the facade. A fake that
   # answered where the real package refuses lets a consumer's suite go green against
   # behaviour that cannot happen.
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.preview_order/3`.
+  """
   @impl true
   def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.replace_order/4`.
+  """
   @impl true
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.preview_replace/4`.
+  """
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.close_position/3`.
+  """
   @impl true
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Cancels an order this process knows. The id is checked before the credential, as the real
+  call does; an order that already filled stays `:filled`.
+
+  See `DpExchange.Gemini.cancel_order/3` and `c:DpExchange.Core.Venue.cancel_order/3`.
+  """
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
     with_injection(fn ->
@@ -726,6 +872,11 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  One order's state, from this process's memory. An unknown id is `{:refused, :not_found}`.
+
+  See `DpExchange.Gemini.get_order/3` and `c:DpExchange.Core.Venue.get_order/3`.
+  """
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
     with_injection(fn ->
@@ -736,6 +887,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Open orders, or history with `history: true`, as two separate reads like the venue's two
+  endpoints. The history read filters by `:symbol`, `:since` and `:limit`.
+
+  See `DpExchange.Gemini.get_orders/2` and `c:DpExchange.Core.Venue.get_orders/2`.
+  """
   @impl true
   def get_orders(credentials, opts \\ []) do
     with_injection(fn ->
@@ -805,6 +962,12 @@ defmodule DpExchange.Gemini.Fake do
 
   defp on_or_after?(at, bound), do: DateTime.compare(at, since_instant(bound)) != :lt
 
+  @doc """
+  Bulk cancel. `opts[:scope]` is required and checked first, as on the real call.
+
+  See `DpExchange.Gemini.cancel_all_orders/2` and
+  `c:DpExchange.Core.Venue.cancel_all_orders/2`.
+  """
   @impl true
   def cancel_all_orders(credentials, opts \\ []) do
     with_injection(fn ->
@@ -820,6 +983,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  The account's fills from memory. `opts[:symbol]` is optional, as on the real endpoint.
+
+  See `DpExchange.Gemini.get_trade_history/2` and
+  `c:DpExchange.Core.Venue.get_trade_history/2`.
+  """
   @impl true
   def get_trade_history(credentials, opts) do
     with_injection(fn ->
@@ -1007,6 +1176,13 @@ defmodule DpExchange.Gemini.Fake do
   # (`WsDecode.to_trade/2`) — a real `id`, a real `side`, `broken: false` because the
   # socket publishes no bust flag, and a non-nil `timestamp`, never the placeholders a
   # less careful fake would reach for.
+  @doc """
+  Pushes a quote (and a top of book, per `opts[:channels]`) for each carried symbol to
+  `opts[:to]` (default: the caller), and records the symbols as covered for this process.
+
+  Not wired to failure injection. See `DpExchange.Gemini.subscribe/2` and
+  `c:DpExchange.Core.Venue.subscribe/2`.
+  """
   @impl true
   def subscribe(symbols, opts \\ []) do
     with {:ok, symbols} <- Feed.canonical_symbols(symbols),
@@ -1060,6 +1236,11 @@ defmodule DpExchange.Gemini.Fake do
     :ok
   end
 
+  @doc """
+  Drops `symbols` from this process's covered sets and answers `:ok`.
+
+  See `DpExchange.Gemini.unsubscribe/2` and `c:DpExchange.Core.Venue.unsubscribe/2`.
+  """
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
     with {:ok, symbols} <- Feed.canonical_symbols(symbols) do
@@ -1071,6 +1252,11 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @doc """
+  Replaces this process's covered symbols with `symbols`, pushing data for any it adds.
+
+  See `DpExchange.Gemini.update_symbols/2` and `c:DpExchange.Core.Venue.update_symbols/2`.
+  """
   @impl true
   def update_symbols(symbols, _opts \\ []) do
     with {:ok, symbols} <- Feed.canonical_symbols(symbols) do
@@ -1133,6 +1319,11 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   # Observed, not intended — only symbols actually pushed for.
+  @doc """
+  Every symbol this process has subscribed, each as `:stream`.
+
+  See `DpExchange.Gemini.coverage/1` and `c:DpExchange.Core.Venue.coverage/1`.
+  """
   @impl true
   def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
 
@@ -1163,6 +1354,13 @@ defmodule DpExchange.Gemini.Fake do
     }
   end
 
+  @doc """
+  Registers `opts[:to]` (default: the caller) for notices and sends nothing, as the real feed
+  does.
+
+  See `DpExchange.Gemini.subscribe_notices/1` and
+  `c:DpExchange.Core.Venue.subscribe_notices/1`.
+  """
   @impl true
   def subscribe_notices(opts \\ []) do
     # Registers, and sends nothing: the real Feed answers `:ok` and notifies on the next
@@ -1171,6 +1369,12 @@ defmodule DpExchange.Gemini.Fake do
     with {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())), do: :ok
   end
 
+  @doc """
+  The same keys the real call answers, with the venue's heartbeat body, for an accepted
+  credential.
+
+  See `DpExchange.Gemini.test_connection/2` and `c:DpExchange.Core.Venue.test_connection/2`.
+  """
   @impl true
   def test_connection(credentials, opts \\ []) do
     with_injection(fn ->
@@ -1187,9 +1391,18 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_rate_limit_status/2`.
+  """
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
 
+  @doc """
+  Always `{:ok, :open}`, as the real adapter answers.
+
+  See `DpExchange.Gemini.market_status/1` and `c:DpExchange.Core.Venue.market_status/1`.
+  """
   @impl true
   def market_status(_opts) do
     with_injection(fn -> {:ok, :open} end)
@@ -1306,6 +1519,11 @@ defmodule DpExchange.Gemini.Fake do
   # asserting a venue had no streaming API when it had fifteen services. See
   # `DpExchange.Gemini`'s `@venue_does_not_serve` for which of these the venue itself lacks.
 
+  @doc """
+  Fixed perpetual positions including a short, so the sign convention is exercised.
+
+  See `DpExchange.Gemini.get_positions/1` and `c:DpExchange.Core.Venue.get_positions/1`.
+  """
   @impl true
   def get_positions(opts \\ []) do
     with_injection(fn ->
@@ -1334,6 +1552,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed funding for a perpetual; a symbol that is not a perpetual is refused as the venue
+  refuses it.
+
+  See `DpExchange.Gemini.get_funding/2` and `c:DpExchange.Core.Venue.get_funding/2`.
+  """
   @impl true
   def get_funding(symbol, _opts \\ []) do
     with :ok <- Rest.validate_symbol(symbol), do: fake_funding(symbol)
@@ -1365,6 +1589,12 @@ defmodule DpExchange.Gemini.Fake do
 
   defp perpetual_symbol?(symbol), do: is_binary(symbol) and SymbolFormat.perpetual?(symbol)
 
+  @doc """
+  Fixed risk statistics for a perpetual; any other symbol is refused as the venue refuses it.
+
+  See `DpExchange.Gemini.get_contract_stats/2` and
+  `c:DpExchange.Core.Venue.get_contract_stats/2`.
+  """
   @impl true
   def get_contract_stats(symbol, _opts \\ []) do
     with :ok <- Rest.validate_symbol(symbol), do: fake_contract_stats(symbol)
@@ -1394,6 +1624,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed staking rates, with two providers for one asset at different rates.
+
+  See `DpExchange.Gemini.get_staking_rates/1` and
+  `c:DpExchange.Core.Venue.get_staking_rates/1`.
+  """
   @impl true
   def get_staking_rates(_opts \\ []) do
     with_injection(fn ->
@@ -1420,6 +1656,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed staked positions for an accepted credential.
+
+  See `DpExchange.Gemini.get_staking_balances/1` and
+  `c:DpExchange.Core.Venue.get_staking_balances/1`.
+  """
   @impl true
   def get_staking_balances(opts \\ []) do
     with_injection(fn ->
@@ -1444,6 +1686,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed staking rewards for an accepted credential.
+
+  See `DpExchange.Gemini.get_staking_rewards/1` and
+  `c:DpExchange.Core.Venue.get_staking_rewards/1`.
+  """
   @impl true
   def get_staking_rewards(opts \\ []) do
     with_injection(fn ->
@@ -1488,6 +1736,12 @@ defmodule DpExchange.Gemini.Fake do
     end
   end
 
+  @doc """
+  Fixed staking history for an accepted credential.
+
+  See `DpExchange.Gemini.get_staking_history/1` and
+  `c:DpExchange.Core.Venue.get_staking_history/1`.
+  """
   @impl true
   def get_staking_history(opts \\ []) do
     with_injection(fn ->
@@ -1541,6 +1795,12 @@ defmodule DpExchange.Gemini.Fake do
   defp bound_ok?(at, %DateTime{} = bound, :lower), do: DateTime.compare(at, bound) != :lt
   defp bound_ok?(at, %DateTime{} = bound, :upper), do: DateTime.compare(at, bound) != :gt
 
+  @doc """
+  A fixed staking deposit. `opts[:provider_id]` is required, and the terms are validated by
+  the real function before the credential.
+
+  See `DpExchange.Gemini.stake/3` and `c:DpExchange.Core.Venue.stake/3`.
+  """
   @impl true
   def stake(asset, amount, opts \\ []) do
     with_injection(fn ->
@@ -1569,6 +1829,11 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  A fixed staking redemption. `opts[:provider_id]` is required, as for `stake/3`.
+
+  See `DpExchange.Gemini.unstake/3` and `c:DpExchange.Core.Venue.unstake/3`.
+  """
   @impl true
   def unstake(asset, amount, opts \\ []) do
     with_injection(fn ->
@@ -1602,6 +1867,13 @@ defmodule DpExchange.Gemini.Fake do
 
   defp fake_provider_id(opts), do: Private.provider_id(opts)
 
+  @doc """
+  A fixed conversion quote. An ambiguous direction is refused by the real function before
+  the credential.
+
+  See `DpExchange.Gemini.quote_conversion/4` and
+  `c:DpExchange.Core.Venue.quote_conversion/4`.
+  """
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do
     with_injection(fn ->
@@ -1638,6 +1910,13 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Commits a quoted conversion. The quoted terms are required, checked by the real function
+  before the credential.
+
+  See `DpExchange.Gemini.commit_conversion/2` and
+  `c:DpExchange.Core.Venue.commit_conversion/2`.
+  """
   @impl true
   def commit_conversion(id, opts \\ []) do
     with_injection(fn ->
@@ -1693,6 +1972,11 @@ defmodule DpExchange.Gemini.Fake do
     }
   end
 
+  @doc """
+  A one-step conversion, already settled: no rate is held.
+
+  See `DpExchange.Gemini.convert/4` and `c:DpExchange.Core.Venue.convert/4`.
+  """
   @impl true
   def convert(from, to, amount, opts \\ []) do
     with_injection(fn ->
@@ -1721,6 +2005,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  One fixed volume row for an accepted credential.
+
+  See `DpExchange.Gemini.get_trade_volume/2` and
+  `c:DpExchange.Core.Venue.get_trade_volume/2`.
+  """
   @impl true
   def get_trade_volume(credentials, opts \\ []) do
     with_injection(fn ->
@@ -1731,11 +2021,27 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Not served by this package: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_conversion/2`.
+  """
   @impl true
   def get_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+
+  @doc """
+  Not served by this package yet: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_portfolios/1`.
+  """
   @impl true
   def list_portfolios(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  A fixed deposit address. The network and asset are validated by the real function before
+  the credential.
+
+  See `DpExchange.Gemini.get_deposit_address/3` and
+  `c:DpExchange.Core.Venue.get_deposit_address/3`.
+  """
   @impl true
   def get_deposit_address(asset, network, opts \\ []) do
     with_injection(fn ->
@@ -1760,6 +2066,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed approved addresses. `opts[:network]` is required and checked before the credential.
+
+  See `DpExchange.Gemini.list_approved_addresses/1` and
+  `c:DpExchange.Core.Venue.list_approved_addresses/1`.
+  """
   @impl true
   def list_approved_addresses(opts \\ []) do
     with_injection(fn ->
@@ -1804,6 +2116,13 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  A fixed withdrawal fee estimate. Moves nothing; the request is validated by the real
+  function before the credential.
+
+  See `DpExchange.Gemini.estimate_withdrawal_fee/4` and
+  `c:DpExchange.Core.Venue.estimate_withdrawal_fee/4`.
+  """
   @impl true
   def estimate_withdrawal_fee(asset, network, amount, opts \\ []) do
     with_injection(fn ->
@@ -1823,6 +2142,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  A fixed withdrawal answer; moves nothing. The memo rule, destination and amount are
+  validated by the real functions before the credential.
+
+  See `DpExchange.Gemini.withdraw/5` and `c:DpExchange.Core.Venue.withdraw/5`.
+  """
   @impl true
   def withdraw(asset, network, amount, address, opts \\ []) do
     with_injection(fn ->
@@ -1867,6 +2192,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed payment methods in the venue's two-array shape, tagged balance or bank.
+
+  See `DpExchange.Gemini.list_payment_methods/2` and
+  `c:DpExchange.Core.Venue.list_payment_methods/2`.
+  """
   @impl true
   def list_payment_methods(credentials, opts \\ []) do
     with_injection(fn ->
@@ -1898,6 +2229,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Registers a bank account as pending, never verified. `opts[:country]` selects the endpoint.
+
+  See `DpExchange.Gemini.add_payment_method/2` and
+  `c:DpExchange.Core.Venue.add_payment_method/2`.
+  """
   @impl true
   def add_payment_method(details, opts \\ []) do
     with_injection(fn ->
@@ -1918,6 +2255,13 @@ defmodule DpExchange.Gemini.Fake do
   defp fake_country("CA"), do: {:ok, :ca}
   defp fake_country(country), do: {:error, {:unsupported_country, country}}
 
+  @doc """
+  A fixed transfer between two accounts. `:from` and `:to` are required and validated by the
+  real function before the credential.
+
+  See `DpExchange.Gemini.transfer_internal/4` and
+  `c:DpExchange.Core.Venue.transfer_internal/4`.
+  """
   @impl true
   def transfer_internal(asset, amount, transfer_opts, opts \\ []) do
     with_injection(fn ->
@@ -1947,6 +2291,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Requests an allowlist entry; the answer is pending, never active.
+
+  See `DpExchange.Gemini.request_approved_address/4` and
+  `c:DpExchange.Core.Venue.request_approved_address/4`.
+  """
   @impl true
   def request_approved_address(network, address, label, opts \\ []) do
     with_injection(fn ->
@@ -1968,6 +2318,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Removes an allowlist entry; the answer carries `"status" => "removed"`.
+
+  See `DpExchange.Gemini.remove_approved_address/3` and
+  `c:DpExchange.Core.Venue.remove_approved_address/3`.
+  """
   @impl true
   def remove_approved_address(network, address, opts \\ []) do
     with_injection(fn ->
@@ -1978,6 +2334,13 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed ledger rows that are neither trades nor transfers. `:since` is nanoseconds (or a
+  `DateTime`) and `:limit` takes the first rows.
+
+  See `DpExchange.Gemini.get_transactions/2` and
+  `c:DpExchange.Core.Venue.get_transactions/2`.
+  """
   @impl true
   def get_transactions(credentials, opts \\ []) do
     with_injection(fn ->
@@ -2016,6 +2379,13 @@ defmodule DpExchange.Gemini.Fake do
 
   defp transactions_since_ms(nanos), do: div(nanos, 1_000_000)
 
+  @doc """
+  Fixed balances each carrying a quantity and a separate notional valuation. A blank
+  currency is refused before the credential.
+
+  See `DpExchange.Gemini.get_notional_balances/3` and
+  `c:DpExchange.Core.Venue.get_notional_balances/3`.
+  """
   @impl true
   def get_notional_balances(credentials, currency, opts \\ []) do
     with_injection(fn ->
@@ -2039,6 +2409,12 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Fixed custody charges. `:since` and `:limit` narrow them.
+
+  See `DpExchange.Gemini.list_custody_fees/2` and
+  `c:DpExchange.Core.Venue.list_custody_fees/2`.
+  """
   @impl true
   def list_custody_fees(credentials, opts \\ []) do
     with_injection(fn ->
@@ -2067,6 +2443,10 @@ defmodule DpExchange.Gemini.Fake do
     |> Enum.take(Keyword.get(opts, :limit) || 50)
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_payment_method/3`.
+  """
   @impl true
   def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
 
@@ -2078,45 +2458,103 @@ defmodule DpExchange.Gemini.Fake do
 
   defp fake_withdrawal_memo(memo), do: memo
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_option_chain/2`.
+  """
   @impl true
   def get_option_chain(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_option_expirations/2`.
+  """
   @impl true
   def get_option_expirations(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_option_greeks/2`.
+  """
   @impl true
   def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.list_watchlists/1`.
+  """
   @impl true
   def list_watchlists(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_watchlist/2`.
+  """
   @impl true
   def get_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.create_watchlist/3`.
+  """
   @impl true
   def create_watchlist(_name, _symbols, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.update_watchlist/2`.
+  """
   @impl true
   def update_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.delete_watchlist/2`.
+  """
   @impl true
   def delete_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_financials/3`.
+  """
   @impl true
   def get_financials(_symbol, _kind, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_corporate_events/1`.
+  """
   @impl true
   def get_corporate_events(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_filings/2`.
+  """
   @impl true
   def get_filings(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_news/1`.
+  """
   @impl true
   def get_news(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. See
+  `c:DpExchange.Core.Venue.get_screener/2`.
+  """
   @impl true
   def get_screener(_name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Creates a subaccount. `opts[:name]` is required; the answer carries a kebab-cased
+  shortname, not the name sent.
+
+  See `DpExchange.Gemini.create_account/1` and `c:DpExchange.Core.Venue.create_account/1`.
+  """
   @impl true
   def create_account(opts \\ []) do
     with_injection(fn ->
@@ -2135,6 +2573,11 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
+  @doc """
+  Renames a subaccount. A call that would change nothing is refused as `:nothing_to_rename`.
+
+  See `DpExchange.Gemini.rename_account/3` and `c:DpExchange.Core.Venue.rename_account/3`.
+  """
   @impl true
   def rename_account(id, name, opts \\ []) do
     with_injection(fn ->
@@ -2160,6 +2603,11 @@ defmodule DpExchange.Gemini.Fake do
   defp renamed(id, nil, shortname), do: %{"account" => shortname || id}
   defp renamed(id, name, shortname), do: %{"name" => name, "account" => shortname || id}
 
+  @doc """
+  Fixed roles: trader and fund manager, not auditor.
+
+  See `DpExchange.Gemini.get_roles/1` and `c:DpExchange.Core.Venue.get_roles/1`.
+  """
   @impl true
   def get_roles(opts \\ []) do
     with_injection(fn ->

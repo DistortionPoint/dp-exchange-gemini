@@ -64,9 +64,9 @@ defmodule DpExchange.Gemini.Auth do
   requirement), a strictly increasing value for incremental. **No single value satisfies
   both**, and the venue exposes no way to ask how a key was made.
 
-  It is the host's key, so it is the host's answer: `nonce_mode: :time_based | :incremental |
-  :incremental_us | :incremental_ns | {:incremental_ns, scale: k}` (the last three for a key
-  whose mark a millisecond counter cannot reach; see below).
+  It is the host's key, so it is the host's answer: `nonce_mode:` takes `:time_based`,
+  `:incremental`, `:incremental_us`, `:incremental_ns` or `{:incremental_ns, scale: k}` (the
+  last three for a key whose mark a millisecond counter cannot reach; see below).
   The default is `:time_based`, matching the venue's own recommendation, and a mismatch
   fails loudly with `InvalidNonce` on the first request rather than producing a wrong
   result.

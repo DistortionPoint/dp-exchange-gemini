@@ -118,6 +118,11 @@ defmodule DpExchange.Gemini.SymbolFormat do
   def perpetual?(native) when is_binary(native),
     do: native |> String.downcase() |> String.ends_with?("perp")
 
+  @doc """
+  Gemini's native symbol (such as `"btcusd"`) to canonical `BASE-QUOTE` (`"BTC-USD"`).
+
+  See `c:DpExchange.Core.SymbolNormalizer.to_canonical_symbol/1`.
+  """
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()
   def to_canonical_symbol(native) when is_binary(native),
@@ -126,6 +131,11 @@ defmodule DpExchange.Gemini.SymbolFormat do
         CanonicalPair.to_canonical(mapping(), native)
       end)
 
+  @doc """
+  Canonical `BASE-QUOTE` to Gemini's native, lower-case symbol (`"BTC-USD"` to `"btcusd"`).
+
+  See `c:DpExchange.Core.SymbolNormalizer.to_exchange_symbol/1`.
+  """
   @impl true
   @spec to_exchange_symbol(String.t()) :: String.t()
   def to_exchange_symbol(canonical) when is_binary(canonical) do
