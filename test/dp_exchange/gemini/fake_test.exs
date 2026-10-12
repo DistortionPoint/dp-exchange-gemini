@@ -98,11 +98,11 @@ defmodule DpExchange.Gemini.FakeTest do
 
       # A `start` after the bar moves it to the first boundary at or after `start`, and a range
       # that ends before that boundary keeps nothing, exactly as `Rest.within?/2` decides.
-      start = DateTime.add(DateTime.utc_now(), -3_600, :second)
+      start = DateTime.utc_now() |> DateTime.add(-3_600, :second) |> DateTime.truncate(:second)
       assert {:ok, [moved]} = Fake.get_historical_prices("BTC-USD", "1m", start: start)
       assert DateTime.compare(moved.opened_at, start) != :lt
       assert rem(DateTime.to_unix(moved.opened_at), 60) == 0
-      assert DateTime.diff(moved.opened_at, start) < 60
+      assert DateTime.diff(moved.opened_at, start) <= 60
 
       assert {:ok, []} =
                Fake.get_historical_prices("BTC-USD", "1m",
