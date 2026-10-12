@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.128] - 2026-10-12
+
 ### Changed (documentation only, tick T pass over `private.ex`, `fake.ex`, `auth.ex`, `environment.ex`, `supervisor.ex`, `credentials.ex`, `symbol_format.ex`)
 
 - `Private`: the moduledoc now covers the whole authenticated surface and states the DV6 rule
