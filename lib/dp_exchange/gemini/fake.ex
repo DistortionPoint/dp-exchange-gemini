@@ -62,7 +62,7 @@ defmodule DpExchange.Gemini.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Config, FakeInjection, Fanout, Timeframe, Types, Venue}
-  alias DpExchange.Gemini.{Environment, Feed, Private, Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Auth, Environment, Feed, Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
 
@@ -1061,7 +1061,7 @@ defmodule DpExchange.Gemini.Fake do
       String.trim(key) == "" or String.trim(secret) == "" ->
         {:error, {:missing_credentials, :gemini}}
 
-      String.trim(key) != key or String.trim(secret) != secret ->
+      Auth.unsafe_credential?(key) or Auth.unsafe_credential?(secret) ->
         {:error, {:invalid_credentials, :gemini}}
 
       true ->
@@ -1072,7 +1072,7 @@ defmodule DpExchange.Gemini.Fake do
   defp authenticated_venue_faithful(:oauth, %{access_token: token}) when is_binary(token) do
     cond do
       String.trim(token) == "" -> {:error, {:missing_credentials, :gemini}}
-      String.trim(token) != token -> {:error, {:invalid_credentials, :gemini}}
+      Auth.unsafe_credential?(token) -> {:error, {:invalid_credentials, :gemini}}
       true -> :ok
     end
   end

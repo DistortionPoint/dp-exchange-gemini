@@ -1186,6 +1186,31 @@ defmodule DpExchange.Gemini.Private do
   # `wrap` is applied to the per-attempt signer, so a caller that must know how many attempts
   # actually left the process (`withdraw/6`, which retries a keyed write) can count them.
   defp post_signed(path, params, credentials, opts, subject, wrap) do
+    with :ok <- https_only(base_url(opts), :base_url),
+         do: post_signed_checked(path, params, credentials, opts, subject, wrap)
+  end
+
+  # **An authenticated request is never sent over cleartext.** `:base_url` (and `:auth_url`
+  # for the token refresh) is the consumer-overridable test/proxy seam, and every private call
+  # carries the API key, the signed payload and the signature (or a bearer token, or a
+  # refresh token and client secret) in its headers or body. An `http://` override, a typo, a
+  # config copied from a dev box, put all of it on the wire in the clear, and a signed payload
+  # is replayable until its nonce is consumed. Refused before anything is signed. Loopback
+  # stays allowed over `http` (a local stub never leaves the machine). The URL is not echoed:
+  # it may carry userinfo.
+  @loopback_hosts ["localhost", "127.0.0.1", "::1"]
+
+  defp https_only(url, option) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: "https"} -> :ok
+      %URI{scheme: "http", host: host} when host in @loopback_hosts -> :ok
+      _other -> {:error, {:insecure_url, option}}
+    end
+  end
+
+  defp https_only(_not_a_string, option), do: {:error, {:insecure_url, option}}
+
+  defp post_signed_checked(path, params, credentials, opts, subject, wrap) do
     scheme = auth_scheme(credentials, opts)
 
     headers = wrap.(signer(scheme, path, stringify(params), credentials, opts))
@@ -1352,6 +1377,11 @@ defmodule DpExchange.Gemini.Private do
   # valid signature over the wrong string, which the venue reports as a credential problem
   # rather than a parameter one. One string, used in both places, is what keeps them equal.
   defp signed_get(path, credentials, opts) do
+    with :ok <- https_only(base_url(opts), :base_url),
+         do: signed_get_checked(path, credentials, opts)
+  end
+
+  defp signed_get_checked(path, credentials, opts) do
     scheme = auth_scheme(credentials, opts)
 
     headers = signer(scheme, path, %{}, credentials, opts)
@@ -1382,6 +1412,11 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp signed_get_bytes(path, credentials, opts) do
+    with :ok <- https_only(base_url(opts), :base_url),
+         do: signed_get_bytes_checked(path, credentials, opts)
+  end
+
+  defp signed_get_bytes_checked(path, credentials, opts) do
     scheme = auth_scheme(credentials, opts)
 
     headers = signer(scheme, path, %{}, credentials, opts)
@@ -5230,7 +5265,14 @@ defmodule DpExchange.Gemini.Private do
       }
       |> put_present("client_secret", present_secret(Keyword.get(opts, :client_secret)))
 
-    url = Config.opt(opts, :auth_url, "https://exchange.gemini.com") <> "/auth/token"
+    auth_url = Config.opt(opts, :auth_url, "https://exchange.gemini.com")
+
+    # The body carries the refresh token and the client secret: https only (see `https_only/2`).
+    with :ok <- https_only(auth_url, :auth_url),
+         do: post_refresh_checked(form, auth_url <> "/auth/token", opts)
+  end
+
+  defp post_refresh_checked(form, url, opts) do
     headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
 
     # Sent once. The refresh token is single-use (see above): a refresh that timed out after
@@ -5852,5 +5894,15 @@ defmodule DpExchange.Gemini.Private do
   # so a value carrying `/` or `?` changed the path or started a query, and on a signed
   # request the venue was asked for a resource the caller never named. Every value the venue
   # documents is unreserved already, so for them this changes nothing.
-  defp segment(value), do: value |> to_string() |> URI.encode(&URI.char_unreserved?/1)
+  #
+  # `.` is unreserved, so `..` survived encoding and `/v2/withdraw/../x` is a dot-segment a
+  # proxy or the venue's router may resolve to another endpoint. A segment that is only dots
+  # has its dots encoded (`%2E`), which no normaliser treats as a dot-segment.
+  defp segment(value) do
+    value |> to_string() |> URI.encode(&URI.char_unreserved?/1) |> encode_dot_segment()
+  end
+
+  defp encode_dot_segment("."), do: "%2E"
+  defp encode_dot_segment(".."), do: "%2E%2E"
+  defp encode_dot_segment(segment), do: segment
 end

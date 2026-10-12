@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Security: a credential with a control character anywhere is refused.** A key, secret or
+  OAuth token holding CR, LF, NUL, TAB or DEL in its interior reached the `X-GEMINI-APIKEY` or
+  `Authorization` header (only the ends were checked). It is now `{:invalid_credentials, :gemini}`,
+  in the real calls and the `Fake` alike.
+- **Security: authenticated calls and the token refresh are https only.** A non-https
+  `:base_url` or `:auth_url` answers `{:error, {:insecure_url, :base_url | :auth_url}}` before
+  anything is signed; it sent the key, signature, bearer token, refresh token and client secret
+  in the clear. Loopback http stays allowed for a local stub.
+- **A `.` or `..` path parameter is percent-encoded**, so it is not a dot-segment.
+
 ## [0.2.133] - 2026-10-12
 
 - **Docs (`usage-rules.md` and README checked line by line against the code):** corrected the

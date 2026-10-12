@@ -587,7 +587,22 @@ defmodule DpExchange.Gemini.Auth do
   # `""`, because a trailing space in a `.env` line produces `" "` and means the same thing.
   defp blank?(value), do: String.trim(value) == ""
 
-  defp padded?(value), do: String.trim(value) != value
+  defp padded?(value), do: unsafe_credential?(value)
+
+  @doc false
+  # A credential that is padded, or carries a control character anywhere (CR, LF, NUL, TAB,
+  # DEL). `String.trim/1` only sees the ends, so `"key\r\nX-Injected: 1"` passed as a
+  # well-formed key and became the `X-GEMINI-APIKEY` header value: a header-injection
+  # attempt at best, and at worst a transport error (Mint's `invalid_header_value`) that
+  # carries the offending value, the key, into the error tuple returned to the caller. The
+  # `X-GEMINI-PAYLOAD` header is base64 and the signature hex, so neither can carry one;
+  # the key and the OAuth token are the only caller-controlled header values. The secret is
+  # checked too: an interior newline means a corrupted `.env` value, and signing with it
+  # produces a signature error that blames the venue. Exposed for `Fake`, which mirrors it.
+  @spec unsafe_credential?(String.t()) :: boolean()
+  def unsafe_credential?(value) when is_binary(value) do
+    String.trim(value) != value or String.match?(value, ~r/[\x00-\x1F\x7F]/)
+  end
 
   @doc """
   Raises the millisecond (`:incremental`) nonce counter to `value`, once. The `_us` and `_ns`

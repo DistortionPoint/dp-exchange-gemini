@@ -1954,7 +1954,17 @@ defmodule DpExchange.Gemini.Rest do
   # so a value carrying `/` or `?` changed the path or started a query, and on a signed
   # request the venue was asked for a resource the caller never named. Every value the venue
   # documents is unreserved already, so for them this changes nothing.
-  defp segment(value), do: value |> to_string() |> URI.encode(&URI.char_unreserved?/1)
+  #
+  # `.` is unreserved, so `..` survived encoding and `/v1/book/..` is a dot-segment a proxy or
+  # the venue's router may resolve to another endpoint. A segment that is only dots has its
+  # dots encoded (`%2E`), which no normaliser treats as a dot-segment.
+  defp segment(value) do
+    value |> to_string() |> URI.encode(&URI.char_unreserved?/1) |> encode_dot_segment()
+  end
+
+  defp encode_dot_segment("."), do: "%2E"
+  defp encode_dot_segment(".."), do: "%2E%2E"
+  defp encode_dot_segment(segment), do: segment
 
   # The symbol a returned struct names. A spot pair reports its canonical `BASE-QUOTE`. A
   # perpetual reports the caller's symbol, uppercased, because `SymbolFormat` deliberately
