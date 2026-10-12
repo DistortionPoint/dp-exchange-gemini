@@ -548,6 +548,13 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
         assert {:error, {:exchange_error, :gemini, message}} = result
         assert message =~ "502"
       end
+
+      big = status_plug(502, String.duplicate("x", 100_000))
+
+      for result <- [erroring_post(big), erroring_get(big)] do
+        assert {:error, {:exchange_error, :gemini, message}} = result
+        assert byte_size(message) < 4_096
+      end
     end
 
     test "any 4xx but a 429 is a refusal, bounded, on a POST and on a signed GET (DV6)" do
