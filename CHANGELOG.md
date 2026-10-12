@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.124] - 2026-10-12
+
 ### Fixed (tick R regression review)
 
 - **BREAKING: a placement answered 2xx with `"order_id": null`, blank or not an id is
