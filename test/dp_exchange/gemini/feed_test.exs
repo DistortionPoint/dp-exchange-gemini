@@ -970,6 +970,63 @@ defmodule DpExchange.Gemini.FeedTest do
       assert System.monotonic_time(:millisecond) - killed_at >= 900
     end
 
+    test "a second crash replaces the pending redial instead of stacking a second timer" do
+      # Crash one schedules a redial 1s out. A socket dialled meanwhile (here injected, as a
+      # consumer's `subscribe/3` would) crashes too, and the run's delay doubles to 2s. The
+      # first timer used to stay live and fire at 1s, redialling ahead of the backoff the
+      # second crash had earned.
+      feed = start_feed(url: "ws://127.0.0.1:1/nowhere")
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      first = :sys.get_state(feed).socket
+      Process.unlink(first)
+      link_socket_into_feed(feed, first)
+
+      :sys.replace_state(feed, fn state ->
+        Map.put(state, :crash_run, {1, System.monotonic_time(:millisecond)})
+      end)
+
+      Process.exit(first, :kill)
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 5_000
+
+      second = fake_socket(self())
+      Process.unlink(second)
+
+      :sys.replace_state(feed, fn state ->
+        Process.link(second)
+        %{state | socket: second}
+      end)
+
+      killed_at = System.monotonic_time(:millisecond)
+      Process.exit(second, :kill)
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 5_000
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
+                     5_000
+
+      # A LOWER bound, which load can only lengthen: the second crash is the third of a run
+      # (2s). The stale first timer put the redial about a second after the first kill.
+      assert System.monotonic_time(:millisecond) - killed_at >= 1_900
+    end
+
+    test "a redial timer message that is not the current one does nothing" do
+      feed = start_feed(url: "ws://127.0.0.1:1/nowhere")
+      :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      :sys.replace_state(feed, fn state ->
+        %{state | socket: nil} |> Map.delete(:redial_timer)
+      end)
+
+      send(feed, {:redial_after_crash, make_ref()})
+
+      # `get_state` is answered after the stale message, so no dial can still be pending.
+      assert :sys.get_state(feed).resubscribe_notice_state == :ok
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
+    end
+
     test "the redial delay doubles through a run and is capped" do
       assert Feed.crash_redial_delay(1) == 0
       assert Feed.crash_redial_delay(2) == 1_000

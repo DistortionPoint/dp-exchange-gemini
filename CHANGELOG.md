@@ -20,6 +20,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **A second socket crash left the first crash's redial timer live.** `Feed` scheduled an
+  unidentified redial per crash and never cancelled one, so after two crashes the earlier timer
+  fired first and redialled ahead of the doubled backoff the second crash had earned. The redial
+  timer is now replaced on each crash and a stale one does nothing.
+- **A Socket in its reconnect backoff ignored its parent stopping it.** The wait, up to 30s, was
+  a bare sleep, so a socket `Feed` had stopped or orphaned slept out the delay and dialled the
+  venue once more. The wait now exits with the parent's reason.
+- **Reconnect backoff is jittered** (`Socket.jittered_delay_ms/1`: shortened by up to a quarter,
+  never lengthened; an immediate first reconnect stays immediate), so sockets dropped together
+  by one venue fault no longer retry in lockstep. The `link_reconnect_attempt` telemetry
+  `delay_ms` reports the delay actually waited.
+- **A bookTicker unsubscribe forgets the symbol's last reported trade.** It was only reset on
+  connect, so a long-lived connection kept an entry for every symbol it had ever carried. A later
+  resubscribe reports the current last trade once, as a reconnect already does.
+
 ## [0.2.131] - 2026-10-12
 
 - Docs: every public facade function is documented in HexDocs (137 added); docs build is warning-free.

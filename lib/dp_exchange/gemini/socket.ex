@@ -272,6 +272,27 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   @doc """
+  `delay_ms` shortened by a random amount of up to a quarter of itself, never lengthened.
+
+  **Every socket the venue drops is dropped together, and they all retried together.** This
+  package opens one socket per `Feed` (no sharding, see `Feed`'s moduledoc), and a
+  venue-side restart or a network fault closes the socket of every `Feed` a consumer runs,
+  and of every node in a consumer's fleet, in the same instant. `reconnect_delay_ms/1` is a
+  pure function of the attempt number, so all of them then retried on identical schedules:
+  1s, 2s, 4s, 8s... together, a connect burst on every turn of the ladder, at the one time
+  a venue is already refusing connections. A random shortening per socket spreads the turns
+  apart.
+
+  Only shortened, so `reconnect_delay_ms/1` stays the ceiling it documents (30 seconds).
+  `0` stays `0`: attempt 1 is a live session that just dropped and reconnects at once.
+  """
+  @spec jittered_delay_ms(non_neg_integer()) :: non_neg_integer()
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms) and delay_ms < 4, do: delay_ms
+
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms),
+    do: delay_ms - :rand.uniform(div(delay_ms, 4))
+
+  @doc """
   The `websockex` connection opts `start_link/1` passes to `VendoredWebSockex.start_link/4` —
   `:socket_connect_timeout` and `:socket_recv_timeout`, defaulted to this module's own
   budget (see the moduledoc) and overridable by `opts`.
@@ -395,6 +416,10 @@ defmodule DpExchange.Gemini.Socket do
 
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
+      # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
+      # the link to it is how this socket learns it was stopped, and a backoff has to keep
+      # listening for that.
+      parent: self(),
       request_id: 0,
       # Whether `handle_connect/2` has run before — so only a RE-connect is reported to
       # `Feed`. See `report_reconnected/1`.
@@ -654,6 +679,18 @@ defmodule DpExchange.Gemini.Socket do
       |> Map.update(:depth_retry, %{}, &Map.drop(&1, keys))
       |> Map.update(:depth_resync_at, %{}, &Map.drop(&1, keys))
       |> Map.update(:depth_resync_failures, %{}, &Map.drop(&1, keys))
+    end)
+  end
+
+  # **A bookTicker unsubscribe forgets the symbol's last reported trade.** `last_trade_price`
+  # was only ever reset on connect, so on a long-lived connection every symbol ever
+  # subscribed kept an entry after it was dropped. Forgetting it makes a later resubscribe
+  # report the current last trade once, the same thing a reconnect already does.
+  defp forget_depth(socket, symbols, :book_ticker) do
+    canonical = canonical_symbols(symbols)
+
+    sys_replace_state(socket, fn state ->
+      Map.update(state, :last_trade_price, %{}, &Map.drop(&1, canonical))
     end)
   end
 
@@ -1358,15 +1395,42 @@ defmodule DpExchange.Gemini.Socket do
     # short sessions are counted here and fed into the same backoff.
     {short_sessions, state} = count_short_session(state)
     attempt = max(Map.get(status, :attempt_number, 1), short_sessions + 1)
-    delay = reconnect_delay_ms(attempt)
+    # Jittered per socket — see `jittered_delay_ms/1`. The telemetry event below reports the
+    # delay actually waited, not the ladder's rung.
+    delay = attempt |> reconnect_delay_ms() |> jittered_delay_ms()
 
     Telemetry.link_reconnect_attempt(:gemini, attempt, delay)
 
     # Blocks THIS socket process only, and only while it has no connection to serve anyway —
-    # the same trade `dp_exchange_schwab.Socket` already makes.
-    if delay > 0, do: Process.sleep(delay)
+    # the same trade `dp_exchange_schwab.Socket` already makes. See `wait_to_reconnect/2`: it
+    # is a wait, not a bare sleep, so `Feed` stopping this socket still ends it.
+    wait_to_reconnect(state, delay)
 
     {:reconnect, state}
+  end
+
+  # The backoff wait, which still hears its parent stop it.
+  #
+  # `WebSockex` traps exits and learns that its parent has gone (or that `Feed` stopped it)
+  # from an `{:EXIT, parent, reason}` message that only its own receive loops read. This wait
+  # used to be a bare `Process.sleep/1` of up to `@max_reconnect_delay_ms`, during which that
+  # message sat unread: a socket told to stop, or orphaned by a `Feed` restart, slept out the
+  # whole delay and then dialled the venue once more before it noticed. That is a stray
+  # connection from a socket nobody owns.
+  #
+  # Exiting with the parent's own reason is what `WebSockex` does when it reads the message
+  # itself (`terminate/4`). A state with no `:parent` (one a test built by hand) matches no
+  # exit and waits the full delay, exactly as the sleep did.
+  defp wait_to_reconnect(_state, 0), do: :ok
+
+  defp wait_to_reconnect(state, delay) do
+    parent = Map.get(state, :parent)
+
+    receive do
+      {:EXIT, ^parent, reason} when is_pid(parent) -> exit(reason)
+    after
+      delay -> :ok
+    end
   end
 
   # Consecutive sessions that ended within `@short_session_ms` of connecting. Read once per

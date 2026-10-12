@@ -751,8 +751,18 @@ defmodule DpExchange.Gemini.Feed do
 
   # The delayed redial `isolate_crashed_socket/2` schedules once crashes come in a run. A
   # socket some other path already dialled in the meantime makes this a no-op.
-  def handle_info(:redial_after_crash, %{socket: nil} = state),
-    do: {:noreply, resubscribe(state)}
+  #
+  # **Only the redial the LAST crash scheduled is honoured** (`schedule_redial/2`). A consumer's
+  # `subscribe/3` can dial a socket while a redial is pending, and if that socket crashes too
+  # the run's delay doubles, but the first timer was still live: it fired at the OLD, shorter
+  # delay and redialled ahead of the backoff the second crash had earned, once per stacked
+  # timer. A timer message whose ref is not the current one is stale and does nothing.
+  def handle_info({:redial_after_crash, ref}, %{socket: nil} = state) do
+    case Map.get(state, :redial_timer) do
+      {^ref, _timer} -> {:noreply, resubscribe(Map.delete(state, :redial_timer))}
+      _stale -> {:noreply, state}
+    end
+  end
 
   def handle_info(_other, state), do: {:noreply, state}
 
@@ -958,14 +968,30 @@ defmodule DpExchange.Gemini.Feed do
     # a connect storm with no delay anywhere in it. A crash within `@crash_run_ms` of the
     # last one now waits, doubling from `@crash_base_delay_ms` to `@crash_max_delay_ms`.
     {run, state} = crash_run(state)
+    state = cancel_redial(state)
 
     case crash_redial_delay(run) do
-      0 ->
-        resubscribe(state)
+      0 -> resubscribe(state)
+      delay -> schedule_redial(state, delay)
+    end
+  end
 
-      delay ->
-        Process.send_after(self(), :redial_after_crash, delay)
-        state
+  # One redial timer at a time, identified by a ref the message carries. See the
+  # `:redial_after_crash` clause of `handle_info/2`.
+  defp schedule_redial(state, delay) do
+    ref = make_ref()
+    timer = Process.send_after(self(), {:redial_after_crash, ref}, delay)
+    Map.put(state, :redial_timer, {ref, timer})
+  end
+
+  defp cancel_redial(state) do
+    case Map.pop(state, :redial_timer) do
+      {{_ref, timer}, rest} ->
+        Process.cancel_timer(timer)
+        rest
+
+      {nil, rest} ->
+        rest
     end
   end
 

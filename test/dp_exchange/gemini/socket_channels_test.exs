@@ -856,5 +856,21 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert Map.get(state, :partial_depth_claims, MapSet.new()) == MapSet.new()
       assert Map.get(state, :depth_streams, MapSet.new()) == MapSet.new()
     end
+
+    test "a bookTicker unsubscribe forgets the symbol's last reported trade, and only its" do
+      {:ok, socket} =
+        SocketStub.start_link(
+          state(%{
+            last_trade_price: %{"BTC-USD" => Decimal.new("1"), "ETH-USD" => Decimal.new("2")}
+          })
+        )
+
+      assert :ok = Socket.unsubscribe(socket, ["BTC-USD"], :book_ticker)
+      assert :sys.get_state(socket).last_trade_price == %{"ETH-USD" => Decimal.new("2")}
+
+      # Another channel's unsubscribe leaves it alone.
+      assert :ok = Socket.unsubscribe(socket, ["ETH-USD"], :trade)
+      assert :sys.get_state(socket).last_trade_price == %{"ETH-USD" => Decimal.new("2")}
+    end
   end
 end
