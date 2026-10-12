@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.132] - 2026-10-12
+
 - **A second socket crash left the first crash's redial timer live.** `Feed` scheduled an
   unidentified redial per crash and never cancelled one, so after two crashes the earlier timer
   fired first and redialled ahead of the doubled backoff the second crash had earned. The redial
