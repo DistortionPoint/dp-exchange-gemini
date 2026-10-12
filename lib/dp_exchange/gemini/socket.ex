@@ -80,15 +80,27 @@ defmodule DpExchange.Gemini.Socket do
   more than one, which should not be reachable through `subscribe/3` but is not assumed
   impossible — is claimed raises a `:degraded` notice rather than vanishing.
 
-  ## A depth gap raises one notice, and the consumer must act on that one
+  ## A depth gap raises one notice, and the consumer must discard that book
 
   A `depthUpdate` whose `U` skips ahead of the last applied `u` raises a `:degraded` notice
-  (`details.reason: "depth sequence gap"`) and then **advances** the per-symbol sequence past
-  the gap. The next frame shows no gap, so the notice does not repeat. A consumer that waits
-  for a second one is applying diffs to a book that is wrong from the gap onward, with every
-  price real: the first notice is the instruction to discard that symbol's book and
-  resubscribe. An undecodable trade frame likewise raises one `:data_quality` notice
-  (`"undecodable trade"`) per frame, rather than being dropped in silence.
+  (`details.reason: "depth sequence gap"`), as does a sequence that goes BACKWARDS by more
+  than one frame's span (`"depth sequence restart"`: the venue reset its counter). The
+  first notice is the instruction to discard that symbol's book. A replay (`u` at or just
+  behind the last applied) is dropped without one.
+
+  This socket then resynchronises the symbol itself, per `{symbol, channel}` (`depth_streams`,
+  recorded by `subscribe/3`): unsubscribe, wait for that answer, subscribe, and take the first
+  frame after it as the snapshot. Every frame for the symbol is dropped meanwhile, so the
+  consumer receives nothing for it until the snapshot, which is the signal that the book is
+  whole again. At most one resync per key per 5s; a gap inside that window waits out the rest
+  of it, and a resync that fails (the subscribe refused, or the unsubscribe never answered)
+  is announced as a `:coverage_change` notice with `details.delivering: false` and retried
+  after a doubling backoff, to 60s. A refused subscribe also takes the symbol out of
+  `depth_streams`. Depth is not a `coverage/1` kind, so the notice is the not-delivering
+  signal. UNMEASURED: that the venue answers an unsubscribe and writes nothing of the old
+  subscription after the answer; if it does not, the retries are the only recovery. An
+  undecodable trade frame likewise raises one `:data_quality` notice (`"undecodable trade"`)
+  per frame, rather than being dropped in silence.
 
   ## Event time is nanoseconds
 
@@ -406,6 +418,14 @@ defmodule DpExchange.Gemini.Socket do
   # Only answers to `@subscribe_id` are counted against it now — see `note_answer/2`.
   @subscribe_id 1
   @unsubscribe_id 2
+  # The unsubscribe a depth resync sends itself. Its own id, so its answer is the barrier the
+  # resync waits for and a caller's unsubscribe answer (id 2) is never taken for it.
+  @resync_unsubscribe_id 3
+
+  # A depth resync (family rule MD9): at most one per `{symbol, channel}` in this window, and
+  # a resync that failed waits twice as long each time, to the cap.
+  @resync_min_gap_ms 5_000
+  @resync_max_backoff_ms 60_000
 
   @doc """
   Subscribes the connection to `channel` for each symbol.
@@ -460,10 +480,10 @@ defmodule DpExchange.Gemini.Socket do
   # Which diff channel each symbol was subscribed on, so a sequence gap can resubscribe the
   # right stream (the frame does not say which one it came from). Forgotten by `unsubscribe/3`.
   defp remember_depth_streams(socket, symbols, channel) when channel in [:depth, :depth_fast] do
-    subscribed = Map.new(canonical_symbols(symbols), &{&1, channel})
+    subscribed = MapSet.new(canonical_symbols(symbols), &{&1, channel})
 
     sys_replace_state(socket, fn state ->
-      Map.update(state, :depth_streams, subscribed, &Map.merge(&1, subscribed))
+      Map.update(state, :depth_streams, subscribed, &MapSet.union(&1, subscribed))
     end)
   end
 
@@ -525,12 +545,17 @@ defmodule DpExchange.Gemini.Socket do
   defp forget_depth(socket, symbols, channel) when channel in @depth_channels do
     canonical = canonical_symbols(symbols)
 
+    keys = Enum.map(canonical, &{&1, channel})
+
     sys_replace_state(socket, fn state ->
       state
       |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(canonical)))
       |> Map.update(:last_depth_update, %{}, &Map.drop(&1, canonical))
-      |> Map.update(:depth_streams, %{}, &Map.drop(&1, canonical))
-      |> Map.update(:depth_resync, %{}, &Map.drop(&1, canonical))
+      |> Map.update(:depth_streams, MapSet.new(), &MapSet.difference(&1, MapSet.new(keys)))
+      |> Map.update(:depth_resync, %{}, &Map.drop(&1, keys))
+      |> Map.update(:depth_retry, %{}, &Map.drop(&1, keys))
+      |> Map.update(:depth_resync_at, %{}, &Map.drop(&1, keys))
+      |> Map.update(:depth_resync_failures, %{}, &Map.drop(&1, keys))
     end)
   end
 
@@ -831,6 +856,9 @@ defmodule DpExchange.Gemini.Socket do
        # * `depth_resync` — a gap resubscribe in flight on the old connection. The new one
        #   starts with no subscriptions and its own fresh snapshots.
        depth_resync: %{},
+       depth_retry: %{},
+       depth_resync_at: %{},
+       depth_resync_failures: %{},
        partial_depth_claims: MapSet.new(),
        last_trade_price: %{},
        # A request sent on the old connection is not owed an answer on this one.
@@ -879,21 +907,98 @@ defmodule DpExchange.Gemini.Socket do
     {:ok, state}
   end
 
-  # The resubscribe a depth gap asked for (`resync_or_deliver/4`): the unsubscribe frame went
-  # out as the gap frame's reply, and this sends the subscribe that follows it. The symbol
-  # stays dropped until the venue answers THIS request (`finish_resync/2`), so a diff still in
-  # flight from the old subscription is never read as the fresh snapshot. A symbol the caller
-  # unsubscribed meanwhile is left unsubscribed.
-  def handle_info({:resubscribe_depth, symbol, channel}, state) do
-    resync = Map.get(state, :depth_resync, %{})
-    still_wanted? = Map.get(Map.get(state, :depth_streams, %{}), symbol) == channel
+  # **The depth resync (family rule MD9), one `{symbol, channel}` at a time.** A gap or a
+  # sequence restart puts the key in `depth_resync` as `{:pending, ref}` and schedules
+  # `{:resync_depth, key, ref}` after the throttle/backoff delay (`schedule_resync/2`). From
+  # there the key moves through four states, and EVERY frame for the symbol is dropped until
+  # the last one:
+  #
+  #   1. `{:pending, ref}`         waiting out the delay.
+  #   2. `{:unsubscribing, ref, seq}`  the unsubscribe (id 3) is out; waiting for ITS answer.
+  #   3. `{:subscribing, ref}`     that answer came, so the old subscription's frames are
+  #                                behind us; the subscribe is about to go out.
+  #   4. `{:awaiting, ref, deadline}`  the subscribe is out. The FIRST frame for the symbol now
+  #                                is the fresh snapshot (the vendor: "the FIRST frame after
+  #                                subscribing is the snapshot"), whether it comes before or
+  #                                after the subscribe's own answer, so nothing depends on
+  #                                that order.
+  #
+  # What this does depend on, UNMEASURED: that the venue answers an unsubscribe, and writes
+  # no frame of the old subscription after that answer. If it never answers, `:resync_timeout`
+  # retries with backoff and a notice rather than waiting forever.
+  def handle_info({:resync_depth, key, ref}, state) do
+    resync = depth_resync(state)
 
-    if Map.get(resync, symbol) == :pending and still_wanted? do
-      {deadline, state} = add_ack_request(state)
-      state = put_resync(state, Map.put(resync, symbol, {:awaiting, deadline}))
-      {:reply, {:text, rpc_frame("subscribe", symbol, channel)}, state}
-    else
-      {:ok, put_resync(state, Map.delete(resync, symbol))}
+    cond do
+      Map.get(resync, key) != {:pending, ref} ->
+        {:ok, state}
+
+      not MapSet.member?(depth_streams(state), key) ->
+        {:ok, put_resync(state, Map.delete(resync, key))}
+
+      true ->
+        {symbol, channel} = key
+        seq = System.unique_integer([:monotonic, :positive])
+        Process.send_after(self(), {:resync_timeout, key, ref}, @ack_timeout_ms)
+
+        state =
+          state
+          |> put_resync(Map.put(resync, key, {:unsubscribing, ref, seq}))
+          |> Map.update(:depth_resync_at, %{key => now_ms()}, &Map.put(&1, key, now_ms()))
+
+        frame = rpc_frame("unsubscribe", @resync_unsubscribe_id, symbol, channel)
+        {:reply, {:text, frame}, state}
+    end
+  end
+
+  # The unsubscribe was never answered. The venue's state is unknown, so start over (the
+  # unsubscribe is idempotent), later, and say so.
+  def handle_info({:resync_timeout, key, ref}, state) do
+    case Map.get(depth_resync(state), key) do
+      {:unsubscribing, ^ref, _seq} ->
+        {:ok, resync_failed(state, key, "depth resync unsubscribe unanswered")}
+
+      _moved_on ->
+        {:ok, state}
+    end
+  end
+
+  def handle_info({:resubscribe_depth, key, ref}, state) do
+    resync = depth_resync(state)
+
+    cond do
+      Map.get(resync, key) != {:subscribing, ref} ->
+        {:ok, state}
+
+      not MapSet.member?(depth_streams(state), key) ->
+        {:ok, put_resync(state, Map.delete(resync, key))}
+
+      true ->
+        subscribe_for_resync(state, key, ref)
+    end
+  end
+
+  # A resubscribe the venue REFUSED was dropped from `depth_streams` (`refused_resync/3`) and
+  # is tried again after a backoff. Skipped if the caller subscribed it again meanwhile (the
+  # key is back in `depth_streams`) or unsubscribed it (`depth_retry` was forgotten).
+  def handle_info({:retry_depth, key, ref}, state) do
+    retry = Map.get(state, :depth_retry, %{})
+
+    cond do
+      Map.get(retry, key) != ref ->
+        {:ok, state}
+
+      MapSet.member?(depth_streams(state), key) ->
+        {:ok, Map.put(state, :depth_retry, Map.delete(retry, key))}
+
+      true ->
+        state =
+          state
+          |> Map.put(:depth_retry, Map.delete(retry, key))
+          |> Map.put(:depth_streams, MapSet.put(depth_streams(state), key))
+          |> put_resync(Map.put(depth_resync(state), key, {:subscribing, ref}))
+
+        subscribe_for_resync(state, key, ref)
     end
   end
 
@@ -935,6 +1040,69 @@ defmodule DpExchange.Gemini.Socket do
 
   def handle_info(_message, state), do: {:ok, state}
 
+  defp subscribe_for_resync(state, {symbol, channel} = key, ref) do
+    {deadline, state} = add_ack_request(state)
+    state = put_resync(state, Map.put(depth_resync(state), key, {:awaiting, ref, deadline}))
+    {:reply, {:text, rpc_frame("subscribe", @subscribe_id, symbol, channel)}, state}
+  end
+
+  defp depth_resync(state), do: Map.get(state, :depth_resync, %{})
+  defp depth_streams(state), do: Map.get(state, :depth_streams, MapSet.new())
+
+  # A resync that did not complete: counted, announced, and started over after a longer wait.
+  defp resync_failed(state, key, reason) do
+    failures = Map.get(Map.get(state, :depth_resync_failures, %{}), key, 0) + 1
+
+    state
+    |> Map.update(:depth_resync_failures, %{key => failures}, &Map.put(&1, key, failures))
+    |> notify_not_delivering(key, reason)
+    |> schedule_resync(key)
+  end
+
+  # Starts (or restarts) the resync of `key` as `{:pending, ref}` and arms its timer. The wait
+  # is the longer of what is left of the `@resync_min_gap_ms` window since the last resync of
+  # this key began, and the backoff its failures have earned. A gap inside the window is
+  # therefore not a second resync: the symbol is simply not delivering until the timer fires.
+  defp schedule_resync(state, key) do
+    ref = make_ref()
+    delay = resync_delay(state, key)
+
+    if delay == 0,
+      do: send(self(), {:resync_depth, key, ref}),
+      else: Process.send_after(self(), {:resync_depth, key, ref}, delay)
+
+    put_resync(state, Map.put(depth_resync(state), key, {:pending, ref}))
+  end
+
+  defp resync_delay(state, key) do
+    since_last =
+      case Map.fetch(Map.get(state, :depth_resync_at, %{}), key) do
+        {:ok, at} -> max(@resync_min_gap_ms - (now_ms() - at), 0)
+        :error -> 0
+      end
+
+    max(since_last, resync_backoff(Map.get(Map.get(state, :depth_resync_failures, %{}), key, 0)))
+  end
+
+  defp resync_backoff(0), do: 0
+
+  defp resync_backoff(failures),
+    do: min(@resync_min_gap_ms * Bitwise.bsl(1, min(failures - 1, 10)), @resync_max_backoff_ms)
+
+  defp notify_not_delivering(state, {symbol, channel}, reason, extra \\ %{}) do
+    notify(
+      state,
+      Notice.new(:coverage_change, :gemini,
+        severity: :warning,
+        message: "#{reason} — #{symbol} is not delivering until a resync completes",
+        details:
+          Map.merge(extra, %{reason: reason, symbol: symbol, channel: channel, delivering: false})
+      )
+    )
+
+    state
+  end
+
   defp ack_requests(state), do: Map.get(state, :ack_requests, [])
 
   defp add_ack_request(state) do
@@ -963,34 +1131,64 @@ defmodule DpExchange.Gemini.Socket do
   # Any answer counts, a refusal included: the question is whether the connection is being
   # served, and a non-200 is already reported on its own by `handle_message/2`. It retires the
   # oldest outstanding request: the venue's answers do not say which request they answer.
-  defp note_answer(%{"id" => @subscribe_id, "status" => _status}, state) do
+  defp note_answer(%{"id" => @subscribe_id, "status" => status}, state) do
     case ack_requests(state) do
       [] ->
         state
 
       [{deadline, timer} | newer] ->
         Process.cancel_timer(timer)
-        state |> put_ack_requests(newer) |> finish_resync(deadline)
+        state |> put_ack_requests(newer) |> resync_subscribe_answered(deadline, status)
+    end
+  end
+
+  # The answer to a resync's own unsubscribe (id 3): the old subscription is over, so the
+  # oldest key still waiting on one moves on to its subscribe. Any status counts; a refused
+  # unsubscribe of a stream that is gone changes nothing the resync needs.
+  defp note_answer(%{"id" => @resync_unsubscribe_id}, state) do
+    waiting =
+      for {key, {:unsubscribing, ref, seq}} <- depth_resync(state), do: {seq, key, ref}
+
+    case Enum.min(waiting, fn -> nil end) do
+      nil ->
+        state
+
+      {_seq, key, ref} ->
+        send(self(), {:resubscribe_depth, key, ref})
+        put_resync(state, Map.put(depth_resync(state), key, {:subscribing, ref}))
     end
   end
 
   defp note_answer(_message, state), do: state
 
-  # The venue has answered the resubscribe sent for a depth gap: the old subscription's frames
-  # are behind us, so the symbol's sequence and anchor are forgotten and its next frame is the
-  # fresh snapshot (the anchor on a `snapshot` connection), not a continuation of the old book.
-  defp finish_resync(state, deadline) do
-    resync = Map.get(state, :depth_resync, %{})
-    done = for {symbol, {:awaiting, ^deadline}} <- resync, do: symbol
+  # The venue has answered the subscribe a resync sent. Accepted, there is nothing to do: the
+  # key stays `:awaiting` until the first frame, which `begin_snapshot/2` takes. REFUSED, the
+  # symbol has no depth subscription at all, so it is taken out of `depth_streams` rather than
+  # left listed while unsubscribed, announced as not delivering, and retried after a backoff.
+  defp resync_subscribe_answered(state, deadline, status) do
+    awaiting = for {key, {:awaiting, ref, ^deadline}} <- depth_resync(state), do: {key, ref}
 
-    if done == [] do
+    if status == 200 or awaiting == [] do
       state
     else
-      state
-      |> put_resync(Map.drop(resync, done))
-      |> Map.update(:last_depth_update, %{}, &Map.drop(&1, done))
-      |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(done)))
+      Enum.reduce(awaiting, state, fn {key, _ref}, acc -> refused_resync(acc, key, status) end)
     end
+  end
+
+  defp refused_resync(state, key, status) do
+    failures = Map.get(Map.get(state, :depth_resync_failures, %{}), key, 0) + 1
+
+    state =
+      Map.update(state, :depth_resync_failures, %{key => failures}, &Map.put(&1, key, failures))
+
+    retry_ref = make_ref()
+    Process.send_after(self(), {:retry_depth, key, retry_ref}, resync_delay(state, key))
+
+    state
+    |> put_resync(Map.delete(depth_resync(state), key))
+    |> Map.put(:depth_streams, MapSet.delete(depth_streams(state), key))
+    |> Map.update(:depth_retry, %{key => retry_ref}, &Map.put(&1, key, retry_ref))
+    |> notify_not_delivering(key, "depth resubscribe refused", %{status: status})
   end
 
   @impl true
@@ -1273,17 +1471,28 @@ defmodule DpExchange.Gemini.Socket do
   # re-applied old changes and set `last_depth_update` BACK, so the frame after it was
   # judged against the replay instead of the book.
   #
-  # **A symbol being resynchronised drops every diff** until the venue has answered the
-  # resubscribe (`depth_resync`, see `begin_resync/2`): they continue a book that was
-  # already declared wrong, and a second notice per frame would bury the first.
+  # **A symbol being resynchronised drops every diff** (`depth_resync`, see the `handle_info`
+  # comment on the four states): they continue a book that was already declared wrong, and a
+  # second notice per frame would bury the first. The one exception is the first frame after
+  # the resubscribe went out, which is the fresh snapshot (`take_snapshot/3`).
+  #
+  # **A sequence that goes BACKWARDS by more than one frame's span is a restart, not a
+  # replay** (`WsDecode.depth_restart?/2`): the venue reset the book's counter, and dropping
+  # every frame as stale until it climbed past the old value would be silence for as long as
+  # that takes. It is announced and resynchronised like a gap. A replay or a frame only just
+  # behind (`u` at or before what was applied, within a span) is still dropped.
   defp deliver_depth_update(message, symbol, state) do
     last_by_symbol = Map.get(state, :last_depth_update, %{})
+    applied = Map.get(last_by_symbol, symbol)
 
     cond do
-      Map.has_key?(Map.get(state, :depth_resync, %{}), symbol) ->
-        {:ok, state}
+      symbol_resync(state, symbol) != [] ->
+        resyncing_frame(message, symbol, state)
 
-      WsDecode.stale_depth?(message["u"], Map.get(last_by_symbol, symbol)) ->
+      WsDecode.depth_restart?(message, applied) ->
+        declare_gap(message, symbol, state, last_by_symbol, "depth sequence restart")
+
+      WsDecode.stale_depth?(message["u"], applied) ->
         {:ok, state}
 
       is_integer(message["u"]) ->
@@ -1325,42 +1534,64 @@ defmodule DpExchange.Gemini.Socket do
       # Per symbol — websocket.yaml:1269-1270 states the rule per book, and a single
       # node-wide counter (this package's own defect until now) could mask a real gap on
       # one symbol behind unrelated traffic on another, or flag one that never happened.
-      notify(
-        state,
-        Notice.new(:degraded, :gemini, details: %{reason: "depth sequence gap", symbol: symbol})
-      )
-
-      resync_or_deliver(message, symbol, state, last_by_symbol)
+      declare_gap(message, symbol, state, last_by_symbol, "depth sequence gap")
     else
       deliver_depth_frame(message, symbol, state, last_by_symbol)
     end
   end
 
-  # Family rule MD9: on a gap the symbol is resubscribed for a fresh snapshot, and the gapped
-  # frame is NOT delivered (it continues a book already declared wrong). That needs the
-  # channel the symbol was subscribed on (`depth_streams`, recorded by `subscribe/3`); with
-  # none known (a frame fed to a bare socket state), no resubscribe is possible and the
-  # frame is delivered as before, after the notice.
-  defp resync_or_deliver(message, symbol, state, last_by_symbol) do
-    case Map.get(Map.get(state, :depth_streams, %{}), symbol) do
-      nil ->
+  # Family rule MD9: on a gap the symbol is resubscribed, on every depth channel it is
+  # subscribed on (`depth_streams`, recorded by `subscribe/3`), for a fresh snapshot, and the
+  # gapped frame is NOT delivered (it continues a book already declared wrong). The resync
+  # itself is `schedule_resync/2`: throttled to one per `{symbol, channel}` per 5s, so a book
+  # that keeps gapping is not unsubscribed and resubscribed in a loop. With no channel known
+  # (a frame fed to a bare socket state) no resubscribe is possible and the frame is
+  # delivered as before, after the notice.
+  defp declare_gap(message, symbol, state, last_by_symbol, reason) do
+    notify(state, Notice.new(:degraded, :gemini, details: %{reason: reason, symbol: symbol}))
+
+    case for({^symbol, _channel} = key <- depth_streams(state), do: key) do
+      [] ->
         deliver_depth_frame(message, symbol, state, last_by_symbol)
 
-      channel ->
-        send(self(), {:resubscribe_depth, symbol, channel})
-        resync = Map.put(Map.get(state, :depth_resync, %{}), symbol, :pending)
-        {:reply, {:text, rpc_frame("unsubscribe", symbol, channel)}, put_resync(state, resync)}
+      keys ->
+        {:ok, Enum.reduce(keys, state, &schedule_resync(&2, &1))}
     end
+  end
+
+  defp symbol_resync(state, symbol),
+    do: for({{^symbol, _channel}, entry} <- depth_resync(state), do: entry)
+
+  # A frame for a symbol whose resync is not finished. Dropped, unless EVERY channel of the
+  # symbol is `:awaiting` (its subscribe is out and the old subscription is over): then this
+  # is the first frame of the new subscription, the vendor's snapshot, and it is taken. With
+  # another channel of the symbol still unsubscribing the frame cannot be attributed, so it
+  # is dropped.
+  defp resyncing_frame(message, symbol, state) do
+    entries = symbol_resync(state, symbol)
+
+    if Enum.all?(entries, &match?({:awaiting, _ref, _deadline}, &1)),
+      do: deliver_depth_update(message, symbol, take_snapshot(state, symbol)),
+      else: {:ok, state}
+  end
+
+  # The resync is over: the sequence and the anchor are forgotten so this frame is judged
+  # against nothing and, on a `snapshot` connection, decoded as the absolute book; the
+  # failures that earned a backoff are forgiven.
+  defp take_snapshot(state, symbol) do
+    keys = for {{^symbol, _channel} = key, _entry} <- depth_resync(state), do: key
+
+    state
+    |> put_resync(Map.drop(depth_resync(state), keys))
+    |> Map.update(:depth_resync_failures, %{}, &Map.drop(&1, keys))
+    |> Map.update(:last_depth_update, %{}, &Map.delete(&1, symbol))
+    |> Map.update(:depth_anchored, MapSet.new(), &MapSet.delete(&1, symbol))
   end
 
   defp put_resync(state, resync), do: Map.put(state, :depth_resync, resync)
 
-  defp rpc_frame(method, symbol, channel) do
-    Jason.encode!(%{
-      "method" => method,
-      "params" => streams([symbol], channel),
-      "id" => request_id(method)
-    })
+  defp rpc_frame(method, id, symbol, channel) do
+    Jason.encode!(%{"method" => method, "params" => streams([symbol], channel), "id" => id})
   end
 
   defp deliver_depth_frame(message, symbol, state, last_by_symbol) do

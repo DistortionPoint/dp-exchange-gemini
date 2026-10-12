@@ -273,6 +273,29 @@ defmodule DpExchange.Gemini.WsDecode do
   def stale_depth?(_u, _last_applied), do: false
 
   @doc """
+  Whether a depth frame's sequence went BACKWARDS by more than the frame's own span: the
+  venue restarted the book's counter, which is a gap in effect (family rule MD9), not a
+  replay to drop.
+
+  The span is `u - U + 1` (1 when `U` is unreadable). A frame ending at or before the last
+  applied `u`, but no further behind it than that span, is a duplicate or a frame only just
+  late, and `stale_depth?/2` has it dropped. Anything unreadable is not a restart.
+  """
+  @spec depth_restart?(map(), term()) :: boolean()
+  def depth_restart?(%{"u" => u} = frame, last_applied)
+      when is_integer(u) and is_integer(last_applied) do
+    span =
+      case frame["U"] do
+        first when is_integer(first) and first <= u -> u - first + 1
+        _unreadable -> 1
+      end
+
+    u + span < last_applied
+  end
+
+  def depth_restart?(_frame, _last_applied), do: false
+
+  @doc """
   An anchor `OrderBook` from the FIRST `{symbol}@depth`/`@depthFast` frame after
   (re)subscribing on a connection that requested the `snapshot` connection parameter
   (websocket.yaml:1263-1270).

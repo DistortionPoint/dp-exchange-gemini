@@ -20,6 +20,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (tick S review of the tick R changes)
+
+- **`get_historical_prices/4` with `include_partial: true` no longer drops a bar that opened
+  ahead of this clock.** The default `:end` of "now" cut it off when the venue's clock ran a
+  little ahead. With `include_partial: true` and no `:end` there is no upper bound; an explicit
+  `:end` is still exclusive. `Rest.select_candles/4` (shared with the Fake) does it.
+- **The depth resync no longer depends on the order of the venue's subscribe answer and the
+  snapshot.** It is now unsubscribe (own id 3), wait for its answer, subscribe, and take the
+  FIRST frame after the subscribe as the snapshot. Before, a snapshot that came ahead of the
+  subscribe answer was dropped and the next diff taken as the anchor. UNMEASURED: that the
+  venue answers an unsubscribe and sends no old frame after it; an unanswered unsubscribe
+  times out (15s) into a retry.
+- **A refused resubscribe no longer leaves the symbol listed and unsubscribed.** It is removed
+  from `depth_streams`, announced (`:coverage_change`, `details.delivering: false`) and
+  retried after a backoff of 5s doubling to 60s.
+- **A depth sequence that restarts (goes backwards by more than one frame's span) is a gap in
+  effect** (`"depth sequence restart"`, resynced) instead of every frame being dropped as stale
+  until the counter passed the old value. A duplicate or just-late frame is still dropped
+  (`WsDecode.depth_restart?/2`).
+- **`depth_streams` and `depth_resync` are keyed by `{symbol, channel}`**, so `:depth` and
+  `:depth_fast` on one symbol no longer overwrite each other. `depth_streams` is a `MapSet`
+  of keys (internal state).
+- **Resyncs are rate-limited** to one per `{symbol, channel}` per 5s: a gap inside the window
+  waits out the rest of it, so a book that keeps gapping is not unsubscribed and resubscribed
+  in a loop.
+- **`Fake.get_order_book/2` honours `:depth`** (the first N levels a side; `0` or absent is the
+  whole ladder), as the real call's `limit_bids`/`limit_asks`.
+- Removed a stray blank line before `Rest.validate_trade_opts/1`.
+
 ## [0.2.125] - 2026-10-12
 
 ### Changed (tick R market-data conventions, family rules MD1-MD9 and DV1, DV6, DV7)

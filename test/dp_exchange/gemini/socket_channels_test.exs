@@ -250,7 +250,8 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     test "a stale or duplicate frame (u <= the last applied) is dropped, not applied (MD9)" do
       start = state(%{last_depth_update: %{"BTC-USD" => 15}})
 
-      for u <- [15, 12] do
+      # Within one frame's span (2 here) of the last applied: a replay, not a restart.
+      for u <- [15, 14] do
         stale = %{@diff | "U" => u - 1, "u" => u}
 
         assert {:ok, kept} = Socket.handle_frame(frame(stale), start)
@@ -260,59 +261,206 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       end
     end
 
-    test "a gap resubscribes the symbol for a fresh snapshot, once, and drops the gapped frame" do
-      start =
-        state(%{
-          depth_snapshot?: true,
-          depth_anchored: MapSet.new(["BTC-USD"]),
-          last_depth_update: %{"BTC-USD" => 5},
-          depth_streams: %{"BTC-USD" => :depth}
-        })
+    @key {"BTC-USD", :depth}
+    @later %{@diff | "U" => 40, "u" => 45}
 
-      # The gapped frame is answered with the unsubscribe; it is not delivered.
-      assert {:reply, {:text, unsubscribe}, resyncing} = Socket.handle_frame(frame(@diff), start)
+    defp resync_start(overrides \\ %{}) do
+      state(
+        Map.merge(
+          %{
+            depth_snapshot?: true,
+            depth_anchored: MapSet.new(["BTC-USD"]),
+            last_depth_update: %{"BTC-USD" => 5},
+            depth_streams: MapSet.new([@key])
+          },
+          overrides
+        )
+      )
+    end
 
-      assert %{"method" => "unsubscribe", "params" => ["btcusd@depth"]} =
+    # Drives a gap through the unsubscribe and its answer, to the point the subscribe is out.
+    defp resync_to_awaiting(start) do
+      assert {:ok, pending} = Socket.handle_frame(frame(@diff), start)
+      assert %{@key => {:pending, ref}} = pending.depth_resync
+      assert_received {:resync_depth, @key, ^ref}
+
+      assert {:reply, {:text, unsubscribe}, unsubscribing} =
+               Socket.handle_info({:resync_depth, @key, ref}, pending)
+
+      assert %{"method" => "unsubscribe", "params" => ["btcusd@depth"], "id" => 3} =
                Jason.decode!(unsubscribe)
 
-      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
-      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
-      assert_received {:resubscribe_depth, "BTC-USD", :depth}
+      assert {:ok, subscribing} =
+               Socket.handle_frame(frame(%{"id" => 3, "status" => 200}), unsubscribing)
 
-      # Then the subscribe follows, awaiting the venue's answer.
+      assert_received {:resubscribe_depth, @key, ^ref}
+
       assert {:reply, {:text, subscribe}, awaiting} =
-               Socket.handle_info({:resubscribe_depth, "BTC-USD", :depth}, resyncing)
+               Socket.handle_info({:resubscribe_depth, @key, ref}, subscribing)
 
       assert %{"method" => "subscribe", "params" => ["btcusd@depth"], "id" => 1} =
                Jason.decode!(subscribe)
 
-      # Until it is answered every diff for the symbol is dropped, without a second notice.
-      later = %{@diff | "U" => 40, "u" => 45}
-      assert {:ok, still} = Socket.handle_frame(frame(later), awaiting)
-      refute_received {:dp_exchange, :gemini, %Notice{}}
-      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
-
-      # The answer clears the symbol's sequence and anchor: its next frame is the fresh
-      # anchor snapshot, a full book, and not a gap against the old sequence.
-      assert {:ok, answered} =
-               Socket.handle_frame(frame(%{"id" => 1, "status" => 200}), still)
-
-      assert answered.depth_resync == %{}
-      refute Map.has_key?(answered.last_depth_update, "BTC-USD")
-      refute MapSet.member?(answered.depth_anchored, "BTC-USD")
-
-      assert {:ok, _state} = Socket.handle_frame(frame(later), answered)
-      assert_received {:dp_exchange, :gemini, %Types.OrderBook{sequence: 45}}
-      refute_received {:dp_exchange, :gemini, %Notice{}}
+      {ref, unsubscribing, awaiting}
     end
 
-    test "a resubscribe for a symbol unsubscribed meanwhile is not sent" do
-      resyncing = state(%{depth_resync: %{"BTC-USD" => :pending}, depth_streams: %{}})
+    test "a gap resyncs the symbol for a fresh snapshot, and drops every frame until it" do
+      {ref, unsubscribing, awaiting} = resync_to_awaiting(resync_start())
 
-      assert {:ok, cleared} =
-               Socket.handle_info({:resubscribe_depth, "BTC-USD", :depth}, resyncing)
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
 
+      assert %{@key => {:unsubscribing, ^ref, _seq}} = unsubscribing.depth_resync
+      assert %{@key => {:awaiting, ^ref, _deadline}} = awaiting.depth_resync
+      assert awaiting.unanswered_subscribes == 1
+
+      # Old frames still arriving while the unsubscribe is unanswered are dropped, quietly.
+      assert {:ok, ^unsubscribing} = Socket.handle_frame(frame(@later), unsubscribing)
+      refute_received {:dp_exchange, :gemini, _anything}
+
+      # The first frame after the subscribe went out IS the snapshot, whether or not the
+      # subscribe's own answer has come yet: a full book, not a gap against the old sequence.
+      assert {:ok, taken} = Socket.handle_frame(frame(@later), awaiting)
+      assert_received {:dp_exchange, :gemini, %Types.OrderBook{sequence: 45}}
+      refute_received {:dp_exchange, :gemini, %Notice{}}
+      assert taken.depth_resync == %{}
+      assert taken.last_depth_update == %{"BTC-USD" => 45}
+
+      # The answer arriving afterwards changes nothing and retires the ack request.
+      assert {:ok, answered} = Socket.handle_frame(frame(%{"id" => 1, "status" => 200}), taken)
+      assert answered.unanswered_subscribes == 0
+      assert answered.depth_resync == %{}
+    end
+
+    test "the snapshot is taken after the subscribe's answer too" do
+      {_ref, _unsubscribing, awaiting} = resync_to_awaiting(resync_start())
+
+      assert {:ok, answered} = Socket.handle_frame(frame(%{"id" => 1, "status" => 200}), awaiting)
+      assert Map.has_key?(answered.depth_resync, @key)
+
+      assert {:ok, taken} = Socket.handle_frame(frame(@later), answered)
+      assert_received {:dp_exchange, :gemini, %Types.OrderBook{sequence: 45}}
+      assert taken.depth_resync == %{}
+    end
+
+    test "a refused resubscribe leaves depth_streams, says not delivering, and retries later" do
+      {_ref, _unsubscribing, awaiting} = resync_to_awaiting(resync_start())
+
+      assert {:ok, refused} = Socket.handle_frame(frame(%{"id" => 1, "status" => 400}), awaiting)
+
+      refute MapSet.member?(refused.depth_streams, @key)
+      assert refused.depth_resync == %{}
+      assert refused.depth_resync_failures == %{@key => 1}
+      assert %{@key => retry_ref} = refused.depth_retry
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{
+                         kind: :coverage_change,
+                         details: %{delivering: false, symbol: "BTC-USD", status: 400}
+                       }}
+
+      # The retry is a delayed message (backoff), not an immediate one.
+      refute_received {:retry_depth, _key, _ref}
+
+      assert {:reply, {:text, subscribe}, retrying} =
+               Socket.handle_info({:retry_depth, @key, retry_ref}, refused)
+
+      assert %{"method" => "subscribe", "params" => ["btcusd@depth"]} = Jason.decode!(subscribe)
+      assert MapSet.member?(retrying.depth_streams, @key)
+      assert %{@key => {:awaiting, ^retry_ref, _deadline}} = retrying.depth_resync
+      assert retrying.depth_retry == %{}
+
+      # A retry nobody wants any more (unsubscribed: depth_retry forgotten) is not sent.
+      assert {:ok, ^refused} =
+               Socket.handle_info({:retry_depth, @key, make_ref()}, refused)
+    end
+
+    test "an unsubscribe that is never answered is retried with a backoff and a notice" do
+      {ref, unsubscribing, _awaiting} = resync_to_awaiting(resync_start())
+
+      assert {:ok, restarted} = Socket.handle_info({:resync_timeout, @key, ref}, unsubscribing)
+
+      assert %{@key => {:pending, new_ref}} = restarted.depth_resync
+      assert new_ref != ref
+      assert restarted.depth_resync_failures == %{@key => 1}
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :coverage_change, details: %{delivering: false}}}
+
+      # The old timer firing again, after the key moved on, does nothing.
+      assert {:ok, ^restarted} = Socket.handle_info({:resync_timeout, @key, ref}, restarted)
+    end
+
+    test "resyncs are throttled: a gap inside the window waits, it does not resubscribe" do
+      just_now = System.monotonic_time(:millisecond)
+      start = resync_start(%{depth_resync_at: %{@key => just_now}})
+
+      assert {:ok, waiting} = Socket.handle_frame(frame(@diff), start)
+      assert %{@key => {:pending, ref}} = waiting.depth_resync
+
+      # Not immediate: the message is due after the rest of the 5s window.
+      refute_received {:resync_depth, @key, ^ref}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+
+      # Meanwhile the symbol is not delivering and says nothing more.
+      assert {:ok, ^waiting} = Socket.handle_frame(frame(@later), waiting)
+      refute_received {:dp_exchange, :gemini, _anything}
+
+      # A window long past does not delay the resync.
+      long_ago = System.monotonic_time(:millisecond) - 60_000
+      idle = resync_start(%{depth_resync_at: %{@key => long_ago}})
+      assert {:ok, started} = Socket.handle_frame(frame(@diff), idle)
+      assert %{@key => {:pending, now_ref}} = started.depth_resync
+      assert_received {:resync_depth, @key, ^now_ref}
+    end
+
+    test "a restart in the sequence is a gap in effect; a replay is still just dropped" do
+      start = resync_start(%{last_depth_update: %{"BTC-USD" => 15_000}})
+      restarted = %{@diff | "U" => 1, "u" => 5}
+
+      assert {:ok, pending} = Socket.handle_frame(frame(restarted), start)
+      assert %{@key => {:pending, _ref}} = pending.depth_resync
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{details: %{reason: "depth sequence restart"}}}
+
+      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+
+      # A duplicate of the last frame is not a restart: dropped, no notice, no resync.
+      duplicate = %{@diff | "U" => 14_999, "u" => 15_000}
+      assert {:ok, kept} = Socket.handle_frame(frame(duplicate), start)
+      assert Map.get(kept, :depth_resync, %{}) == %{}
+      assert kept.last_depth_update == %{"BTC-USD" => 15_000}
+      refute_received {:dp_exchange, :gemini, _anything}
+    end
+
+    test "depth and depth_fast on one symbol are resynced as two keys" do
+      fast = {"BTC-USD", :depth_fast}
+      start = resync_start(%{depth_streams: MapSet.new([@key, fast])})
+
+      assert {:ok, pending} = Socket.handle_frame(frame(@diff), start)
+      assert %{@key => {:pending, _ref}, ^fast => {:pending, _fast_ref}} = pending.depth_resync
+
+      # Not every channel of the symbol is awaiting, so a frame is not yet the snapshot.
+      {:pending, ref} = pending.depth_resync[@key]
+
+      assert {:reply, {:text, _unsubscribe}, half} =
+               Socket.handle_info({:resync_depth, @key, ref}, pending)
+
+      assert {:ok, ^half} = Socket.handle_frame(frame(@later), half)
+      refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
+    end
+
+    test "a resync for a symbol unsubscribed meanwhile is not sent" do
+      ref = make_ref()
+      key = {"BTC-USD", :depth}
+      resyncing = state(%{depth_resync: %{key => {:pending, ref}}, depth_streams: MapSet.new()})
+
+      assert {:ok, cleared} = Socket.handle_info({:resync_depth, key, ref}, resyncing)
       assert cleared.depth_resync == %{}
+
+      # A stale ref (the resync was restarted or reset) does nothing at all.
+      assert {:ok, ^resyncing} = Socket.handle_info({:resync_depth, key, make_ref()}, resyncing)
     end
 
     test "an undated diff delivers nothing, but still advances the sequence" do

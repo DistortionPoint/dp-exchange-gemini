@@ -804,7 +804,6 @@ defmodule DpExchange.Gemini.Rest do
   `DpExchange.Gemini.Fake` refuses exactly as this does.
   """
   @spec validate_trade_opts(keyword()) :: :ok | {:error, {:invalid_option, atom(), term()}}
-
   def validate_trade_opts(opts) do
     checks = [
       since: &(is_nil(&1) or is_struct(&1, DateTime) or non_negative?(&1)),
@@ -1798,16 +1797,24 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp keep_candle?(candle, timeframe, range, now, partial?),
-    do: within?(candle, range, now) and (partial? or not in_progress?(candle, timeframe, now))
+    do:
+      within?(candle, range, now, partial?) and
+        (partial? or not in_progress?(candle, timeframe, now))
 
-  # `:start` inclusive, `:end` exclusive, on `opened_at`; an absent `:end` is now.
-  defp within?(candle, range, now) do
+  # `:start` inclusive, `:end` exclusive, on `opened_at`. An absent `:end` is now, EXCEPT for a
+  # caller who asked for partial bars: a bar just opened must not vanish because this clock
+  # runs a little behind the venue's, so no upper bound is applied then.
+  defp within?(candle, range, now, partial?) do
     after_start?(candle, Keyword.get(range, :start)) and
-      before_end?(candle, Keyword.get(range, :end) || now)
+      before_end?(candle, Keyword.get(range, :end), now, partial?)
   end
 
   defp after_start?(_candle, nil), do: true
   defp after_start?(candle, start), do: DateTime.compare(candle.opened_at, start) != :lt
+
+  defp before_end?(_candle, nil, _now, true), do: true
+  defp before_end?(candle, nil, now, false), do: before_end?(candle, now)
+  defp before_end?(candle, finish, _now, _partial?), do: before_end?(candle, finish)
 
   defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) == :lt
 

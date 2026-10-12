@@ -249,10 +249,22 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert :ok = Socket.subscribe(socket_pid, ["SOL-USD"], :trade)
 
     assert :sys.get_state(socket_pid).depth_streams ==
-             %{"BTC-USD" => :depth, "ETH-USD" => :depth_fast}
+             MapSet.new([{"BTC-USD", :depth}, {"ETH-USD", :depth_fast}])
+
+    # The same symbol on the other diff channel is a second key, not an overwrite.
+    assert :ok = Socket.subscribe(socket_pid, ["BTC-USD"], :depth_fast)
+
+    assert :sys.get_state(socket_pid).depth_streams ==
+             MapSet.new([
+               {"BTC-USD", :depth},
+               {"BTC-USD", :depth_fast},
+               {"ETH-USD", :depth_fast}
+             ])
 
     assert :ok = Socket.unsubscribe(socket_pid, ["BTC-USD"], :depth)
-    assert :sys.get_state(socket_pid).depth_streams == %{"ETH-USD" => :depth_fast}
+
+    assert :sys.get_state(socket_pid).depth_streams ==
+             MapSet.new([{"BTC-USD", :depth_fast}, {"ETH-USD", :depth_fast}])
   end
 
   test "no :channels means no snapshot parameter and depth_snapshot? stays falsy" do

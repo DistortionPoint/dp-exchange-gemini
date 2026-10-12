@@ -276,7 +276,9 @@ the same reason `opts[:limit]` is `{:error, {:unsupported_option, :limit}}`, nev
 and ignored (BREAKING, tick R).
 
 **The range and the bar still forming (BREAKING, tick R).** `:start` is inclusive and `:end`
-exclusive, on `opened_at`; an absent `:end` is now. The bar that is still forming
+exclusive, on `opened_at`; an absent `:end` is now (except with `include_partial: true`,
+which applies no upper bound, so a bar the venue just opened is kept even if your clock runs
+behind its). The bar that is still forming
 (`opened_at + width > now`) is **not returned** unless you pass `include_partial: true` in
 `opts`; with it the last bar comes back as the venue sent it and **may change on the next
 call** (`Core.Types.Candle` has no flag for it). Before, the forming bar was always returned,
@@ -1398,14 +1400,30 @@ single `:degraded` notice (`details.reason: "depth sequence gap"`, with the `sym
 you applying diffs to a book that is wrong from the gap onward, with every price real.
 
 **The socket resubscribes the symbol itself (BREAKING, tick R).** When it knows which depth
-channel (`:depth` or `:depth_fast`) the symbol was subscribed on (recorded by
-`Socket.subscribe/3`), it unsubscribes and subscribes it again, does NOT deliver the gapped
-frame, and drops every further diff for that symbol, without more notices, until the venue
-has answered the resubscribe. The next frame is then the venue's fresh snapshot (on a
-connection started with `:depth`/`:depth_fast` in `:channels`, a full `OrderBook`; otherwise
-diffs resume from the new sequence). Where the channel is not known, the notice is all you
-get and the gapped frame is delivered as before. A stale or duplicate frame (`u` at or before
-the last applied) is dropped silently, never applied.
+channel(s) (`:depth` / `:depth_fast`, tracked per `{symbol, channel}`) the symbol was
+subscribed on (recorded by `Socket.subscribe/3`), it unsubscribes, waits for the venue's
+answer to that unsubscribe, subscribes again, and takes the **first frame after the subscribe
+as the fresh snapshot**, whether it arrives before or after the subscribe's own answer. It
+does NOT deliver the gapped frame and drops every other frame for that symbol, without more
+notices, until that snapshot (on a connection started with `:depth`/`:depth_fast` in
+`:channels`, a full `OrderBook`; otherwise diffs resume from the new sequence). So the
+snapshot is also your signal that the book is whole again. Where the channel is not known,
+the notice is all you get and the gapped frame is delivered as before.
+
+- **At most one resync per `{symbol, channel}` per 5 seconds.** A gap inside that window waits
+  out the rest of it; the symbol delivers nothing meanwhile.
+- **A resync that fails is announced and retried.** A subscribe the venue refuses, or an
+  unsubscribe it never answers (15s), raises a `:coverage_change` notice with
+  `details.delivering: false` (plus `symbol`, `channel`, and `status` for a refusal) and is
+  retried after 5s, doubling to 60s. A refused subscribe also removes the key from the
+  socket's `depth_streams`. Depth is not a `coverage/1` kind, so this notice is the
+  not-delivering signal.
+- **A sequence that goes backwards** by more than one frame's span (`u + (u - U + 1) <` the
+  last applied) is a counter restart: `"depth sequence restart"`, resynced like a gap. A
+  duplicate or a frame only just behind (`u` at or before the last applied, within a span)
+  is dropped silently, never applied.
+- **UNMEASURED:** that the venue answers an unsubscribe (id 3) and writes no frame of the old
+  subscription after that answer. If it does not answer, only the retries recover the book.
 
 A `depthUpdate` whose `u` is missing or not an integer is the exception: its sequence cannot
 be stated, so the socket does **not** advance past it. It raises `"undecodable depth update"`

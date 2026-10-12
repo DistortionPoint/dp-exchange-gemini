@@ -464,6 +464,35 @@ defmodule DpExchange.Gemini.RestTest do
                )
     end
 
+    test "include_partial: true keeps a bar that opened ahead of this clock (skew)" do
+      # A venue clock a little ahead of ours: its newest bar opens "in the future" to us.
+      ahead = (div(DateTime.to_unix(DateTime.utc_now()), 60) + 1) * 60_000
+      rows = [[ahead, 10.5, 12.0, 10.0, 11.0, 0.5]]
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert {:ok, [bar]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(rows),
+                 retry_attempts: 0,
+                 include_partial: true
+               )
+
+      assert DateTime.to_unix(bar.opened_at, :millisecond) == ahead
+
+      # An explicit :end is still honoured, exclusive.
+      assert {:ok, []} =
+               Rest.get_historical_prices("BTC-USD", "1m", [end: bar.opened_at],
+                 plug: responding(rows),
+                 retry_attempts: 0,
+                 include_partial: true
+               )
+    end
+
     test "start is inclusive and end is exclusive on opened_at (MD2)" do
       # Inside the 1m window, on minute boundaries, both closed.
       newer = (div(DateTime.to_unix(DateTime.utc_now()), 60) - 2) * 60_000

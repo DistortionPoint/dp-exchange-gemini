@@ -270,11 +270,19 @@ defmodule DpExchange.Gemini.Fake do
       symbol = canonical(symbol)
       # The depth is checked by the real call's own function, before the symbol: the venue is
       # never asked, so it never gets to refuse the symbol.
-      with_injection(symbol, fn -> fake_order_book(symbol) end)
+      depth = Config.opt(opts, :depth, nil)
+      with_injection(symbol, fn -> fake_order_book(symbol, depth) end)
     end
   end
 
-  defp fake_order_book(symbol) do
+  # The first `depth` levels a side, as the real call's `limit_bids`/`limit_asks`; `nil` and
+  # `0` (the venue: "May be 0 to return the full order book on this side") are the whole ladder.
+  defp take_depth(levels, depth) when is_integer(depth) and depth > 0,
+    do: Enum.take(levels, depth)
+
+  defp take_depth(levels, _whole_book), do: levels
+
+  defp fake_order_book(symbol, depth) do
     case Map.fetch(@price, symbol) do
       {:ok, price} ->
         bid = Decimal.new(price)
@@ -294,16 +302,24 @@ defmodule DpExchange.Gemini.Fake do
         {:ok,
          %Types.OrderBook{
            symbol: symbol,
-           bids: [
-             {bid, Decimal.new("0.0031")},
-             {Decimal.sub(bid, Decimal.new("0.01")), Decimal.new("0.0140")},
-             {Decimal.sub(bid, Decimal.new("0.02")), Decimal.new("0.2500")}
-           ],
-           asks: [
-             {Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")},
-             {Decimal.add(bid, Decimal.new("0.02")), Decimal.new("0.0910")},
-             {Decimal.add(bid, Decimal.new("0.03")), Decimal.new("0.3300")}
-           ],
+           bids:
+             take_depth(
+               [
+                 {bid, Decimal.new("0.0031")},
+                 {Decimal.sub(bid, Decimal.new("0.01")), Decimal.new("0.0140")},
+                 {Decimal.sub(bid, Decimal.new("0.02")), Decimal.new("0.2500")}
+               ],
+               depth
+             ),
+           asks:
+             take_depth(
+               [
+                 {Decimal.add(bid, Decimal.new("0.01")), Decimal.new("0.0182")},
+                 {Decimal.add(bid, Decimal.new("0.02")), Decimal.new("0.0910")},
+                 {Decimal.add(bid, Decimal.new("0.03")), Decimal.new("0.3300")}
+               ],
+               depth
+             ),
            # `nil`, not `@at` — `Rest.get_order_book/2` never has a real time to report
            # here: the venue's own schema marks the only field this endpoint carries a
            # "timestamp" — `OrderBookEntry.timestamp` — a dummy value, "DO NOT USE". A

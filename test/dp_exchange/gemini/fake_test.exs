@@ -161,6 +161,21 @@ defmodule DpExchange.Gemini.FakeTest do
       assert length(asks) >= 2, "a one-level book makes assertion 25 incapable of failing"
     end
 
+    test "depth takes the first N levels a side; 0 or absent is the whole ladder" do
+      {:ok, whole} = Fake.get_order_book("BTC-USD")
+      assert length(whole.bids) == 3
+
+      assert {:ok, one} = Fake.get_order_book("BTC-USD", depth: 1)
+      assert one.bids == Enum.take(whole.bids, 1)
+      assert one.asks == Enum.take(whole.asks, 1)
+
+      assert {:ok, two} = Fake.get_order_book("BTC-USD", depth: 2)
+      assert two.bids == Enum.take(whole.bids, 2)
+
+      assert {:ok, ^whole} = Fake.get_order_book("BTC-USD", depth: 0)
+      assert {:ok, ^whole} = Fake.get_order_book("BTC-USD", depth: 50)
+    end
+
     test "the book is ordered the way Core.Types.OrderBook requires" do
       assert {:ok, %OrderBook{bids: bids, asks: asks}} = Fake.get_order_book("BTC-USD")
 
