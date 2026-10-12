@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.134] - 2026-10-12
+
 - **Security: a credential with a control character anywhere is refused.** A key, secret or
   OAuth token holding CR, LF, NUL, TAB or DEL in its interior reached the `X-GEMINI-APIKEY` or
   `Authorization` header (only the ends were checked). It is now `{:invalid_credentials, :gemini}`,
