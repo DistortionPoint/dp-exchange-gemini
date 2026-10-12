@@ -32,12 +32,17 @@ defmodule DpExchange.Gemini do
   range afterward, so a range outside the true window still comes back empty rather than
   wrong, just without the named boundary. See `DpExchange.Gemini.Rest`'s moduledoc.
 
-  **`Quote.venue_time` comes from the venue's clock, or it is `nil` — a consumer needs a
+  **REST `Quote.venue_time` and `TopOfBook.venue_time` are always `nil` — a consumer needs a
   `nil` branch.** Neither Gemini ticker publishes a quote time: `/v1/pubticker`'s only
-  timestamp stamps its 24-hour volume window, about a minute stale. This package uses the
-  venue's HTTP `Date` header; when that is absent or unreadable the real traded price is
-  still returned with `venue_time: nil`, and `observed_at` states freshness. It never
-  substitutes the local clock.
+  timestamp stamps its 24-hour volume window, about a minute stale. The HTTP `Date` header
+  is when the reply was served, not when the last trade happened, so it is not used either
+  (tick R). The real traded price is still returned, and `observed_at` states freshness.
+  Nothing is substituted, least of all the local clock.
+
+  **Candles:** the bar still forming is not returned unless `include_partial: true`; `:start`
+  is inclusive and `:end` exclusive; a bar not aligned to its width, or two with one
+  timestamp, refuses the reply; `:limit` is `{:unsupported_option, :limit}`. See
+  `DpExchange.Gemini.Rest.get_historical_prices/4`.
 
   **Gemini publishes no rate-limit headers.** Measured 2026-08-28: a response carries
   `date`, `x-request-id` and `x-envoy-upstream-service-time`, and nothing else. It does

@@ -116,6 +116,40 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert_received {:dp_exchange, :gemini, %Types.Trade{side: :buy}}
     end
 
+    test "a print priced at zero or less is not delivered, and says so (MD6)" do
+      for price <- ["0", "-1"] do
+        assert {:ok, _state} = Socket.handle_frame(frame(%{@trade | "p" => price}), state())
+
+        refute_received {:dp_exchange, :gemini, %Types.Trade{}}
+        assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
+      end
+    end
+
+    test "a book ticker's last trade of zero is no Quote; a zero side is no resting order (MD6)" do
+      ticker = %{
+        "s" => "btcusd",
+        "b" => "0",
+        "B" => "3",
+        "a" => "3611.00",
+        "A" => "2",
+        "c" => "0"
+      }
+
+      assert {:ok, _state} = Socket.handle_frame(frame(ticker), state())
+
+      refute_received {:dp_exchange, :gemini, %Types.Quote{}}
+
+      assert_received {:dp_exchange, :gemini, %Types.TopOfBook{} = top}
+      assert top.bid == nil
+      assert top.bid_size == nil
+      assert Decimal.equal?(top.ask, Decimal.new("3611.00"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("2"))
+
+      assert {:ok, _state} = Socket.handle_frame(frame(%{ticker | "b" => "-1"}), state())
+      refute_received {:dp_exchange, :gemini, %Types.TopOfBook{}}
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
+    end
+
     test "an undated print is dropped rather than placed at the wrong moment" do
       undated = Map.delete(@trade, "E")
 
@@ -211,6 +245,74 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     test "the first frame is never a gap" do
       assert {:ok, _state} = Socket.handle_frame(frame(@diff), state())
       refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+    end
+
+    test "a stale or duplicate frame (u <= the last applied) is dropped, not applied (MD9)" do
+      start = state(%{last_depth_update: %{"BTC-USD" => 15}})
+
+      for u <- [15, 12] do
+        stale = %{@diff | "U" => u - 1, "u" => u}
+
+        assert {:ok, kept} = Socket.handle_frame(frame(stale), start)
+        assert kept.last_depth_update == %{"BTC-USD" => 15}
+        refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+        refute_received {:dp_exchange, :gemini, %Notice{}}
+      end
+    end
+
+    test "a gap resubscribes the symbol for a fresh snapshot, once, and drops the gapped frame" do
+      start =
+        state(%{
+          depth_snapshot?: true,
+          depth_anchored: MapSet.new(["BTC-USD"]),
+          last_depth_update: %{"BTC-USD" => 5},
+          depth_streams: %{"BTC-USD" => :depth}
+        })
+
+      # The gapped frame is answered with the unsubscribe; it is not delivered.
+      assert {:reply, {:text, unsubscribe}, resyncing} = Socket.handle_frame(frame(@diff), start)
+
+      assert %{"method" => "unsubscribe", "params" => ["btcusd@depth"]} =
+               Jason.decode!(unsubscribe)
+
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+      assert_received {:resubscribe_depth, "BTC-USD", :depth}
+
+      # Then the subscribe follows, awaiting the venue's answer.
+      assert {:reply, {:text, subscribe}, awaiting} =
+               Socket.handle_info({:resubscribe_depth, "BTC-USD", :depth}, resyncing)
+
+      assert %{"method" => "subscribe", "params" => ["btcusd@depth"], "id" => 1} =
+               Jason.decode!(subscribe)
+
+      # Until it is answered every diff for the symbol is dropped, without a second notice.
+      later = %{@diff | "U" => 40, "u" => 45}
+      assert {:ok, still} = Socket.handle_frame(frame(later), awaiting)
+      refute_received {:dp_exchange, :gemini, %Notice{}}
+      refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
+
+      # The answer clears the symbol's sequence and anchor: its next frame is the fresh
+      # anchor snapshot, a full book, and not a gap against the old sequence.
+      assert {:ok, answered} =
+               Socket.handle_frame(frame(%{"id" => 1, "status" => 200}), still)
+
+      assert answered.depth_resync == %{}
+      refute Map.has_key?(answered.last_depth_update, "BTC-USD")
+      refute MapSet.member?(answered.depth_anchored, "BTC-USD")
+
+      assert {:ok, _state} = Socket.handle_frame(frame(later), answered)
+      assert_received {:dp_exchange, :gemini, %Types.OrderBook{sequence: 45}}
+      refute_received {:dp_exchange, :gemini, %Notice{}}
+    end
+
+    test "a resubscribe for a symbol unsubscribed meanwhile is not sent" do
+      resyncing = state(%{depth_resync: %{"BTC-USD" => :pending}, depth_streams: %{}})
+
+      assert {:ok, cleared} =
+               Socket.handle_info({:resubscribe_depth, "BTC-USD", :depth}, resyncing)
+
+      assert cleared.depth_resync == %{}
     end
 
     test "an undated diff delivers nothing, but still advances the sequence" do

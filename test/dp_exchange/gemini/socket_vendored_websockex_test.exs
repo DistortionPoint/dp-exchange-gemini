@@ -237,6 +237,24 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert state.last_depth_update == %{"ETH-USD" => 40}
   end
 
+  test "a depth subscribe records the channel per symbol, for the gap resubscribe (MD9)" do
+    {listen_socket, port} = listen()
+    serve(listen_socket, [&upgrade_and_hold/1])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port) ++ [channels: [:depth]])
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert :ok = Socket.subscribe(socket_pid, ["BTC-USD"], :depth)
+    assert :ok = Socket.subscribe(socket_pid, ["ETH-USD"], :depth_fast)
+    assert :ok = Socket.subscribe(socket_pid, ["SOL-USD"], :trade)
+
+    assert :sys.get_state(socket_pid).depth_streams ==
+             %{"BTC-USD" => :depth, "ETH-USD" => :depth_fast}
+
+    assert :ok = Socket.unsubscribe(socket_pid, ["BTC-USD"], :depth)
+    assert :sys.get_state(socket_pid).depth_streams == %{"ETH-USD" => :depth_fast}
+  end
+
   test "no :channels means no snapshot parameter and depth_snapshot? stays falsy" do
     {listen_socket, port} = listen()
     serve(listen_socket, [&upgrade/1])

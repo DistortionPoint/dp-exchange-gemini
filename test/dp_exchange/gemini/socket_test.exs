@@ -139,8 +139,8 @@ defmodule DpExchange.Gemini.SocketTest do
       # field, which is the one thing nobody was proposing to do.
       #
       # Two things show the rule was a local anomaly rather than a principle. This package's
-      # own REST arm reads the time through `Rest.header_time_or_nil/1` and emits `nil` when
-      # the header is absent — same venue, same type, opposite answer, decided by transport.
+      # own REST arm states `venue_time: nil` — same venue, same type, opposite answer,
+      # decided by transport.
       # And `Core.Types.TopOfBook`'s moduledoc names another venue in this family whose BBO
       # publishes no time at all, which this rule would have made unrepresentable.
       #

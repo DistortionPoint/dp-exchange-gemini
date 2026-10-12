@@ -442,6 +442,7 @@ defmodule DpExchange.Gemini.Socket do
 
       case send_rpc(socket, "subscribe", streams) do
         :ok ->
+          remember_depth_streams(socket, symbols, channel)
           :ok
 
         # The frame did not go out, so no answer is coming. Left counted, the ack deadline
@@ -455,6 +456,21 @@ defmodule DpExchange.Gemini.Socket do
       end
     end
   end
+
+  # Which diff channel each symbol was subscribed on, so a sequence gap can resubscribe the
+  # right stream (the frame does not say which one it came from). Forgotten by `unsubscribe/3`.
+  defp remember_depth_streams(socket, symbols, channel) when channel in [:depth, :depth_fast] do
+    subscribed = Map.new(canonical_symbols(symbols), &{&1, channel})
+
+    sys_replace_state(socket, fn state ->
+      Map.update(state, :depth_streams, subscribed, &Map.merge(&1, subscribed))
+    end)
+  end
+
+  defp remember_depth_streams(_socket, _symbols, _channel), do: :ok
+
+  defp canonical_symbols(symbols),
+    do: Enum.map(symbols, &SymbolFormat.to_canonical_symbol(SymbolFormat.to_exchange_symbol(&1)))
 
   defp withdraw_ack(_socket, []), do: :ok
 
@@ -507,13 +523,14 @@ defmodule DpExchange.Gemini.Socket do
   @depth_channels [:depth, :depth_fast | WsChannels.partial_depth()]
 
   defp forget_depth(socket, symbols, channel) when channel in @depth_channels do
-    canonical =
-      Enum.map(symbols, &SymbolFormat.to_canonical_symbol(SymbolFormat.to_exchange_symbol(&1)))
+    canonical = canonical_symbols(symbols)
 
     sys_replace_state(socket, fn state ->
       state
       |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(canonical)))
       |> Map.update(:last_depth_update, %{}, &Map.drop(&1, canonical))
+      |> Map.update(:depth_streams, %{}, &Map.drop(&1, canonical))
+      |> Map.update(:depth_resync, %{}, &Map.drop(&1, canonical))
     end)
   end
 
@@ -811,6 +828,9 @@ defmodule DpExchange.Gemini.Socket do
        #   `c` is unchanged from what the OLD connection last said.
        last_depth_update: %{},
        depth_anchored: MapSet.new(),
+       # * `depth_resync` — a gap resubscribe in flight on the old connection. The new one
+       #   starts with no subscriptions and its own fresh snapshots.
+       depth_resync: %{},
        partial_depth_claims: MapSet.new(),
        last_trade_price: %{},
        # A request sent on the old connection is not owed an answer on this one.
@@ -855,9 +875,26 @@ defmodule DpExchange.Gemini.Socket do
   # Each announced request arms a deadline of its own, so a request is never closed on the
   # strength of a clock that started before it was sent.
   def handle_info(:awaiting_ack, state) do
-    deadline = make_ref()
-    timer = Process.send_after(self(), {:ack_deadline, deadline}, @ack_timeout_ms)
-    {:ok, put_ack_requests(state, ack_requests(state) ++ [{deadline, timer}])}
+    {_deadline, state} = add_ack_request(state)
+    {:ok, state}
+  end
+
+  # The resubscribe a depth gap asked for (`resync_or_deliver/4`): the unsubscribe frame went
+  # out as the gap frame's reply, and this sends the subscribe that follows it. The symbol
+  # stays dropped until the venue answers THIS request (`finish_resync/2`), so a diff still in
+  # flight from the old subscription is never read as the fresh snapshot. A symbol the caller
+  # unsubscribed meanwhile is left unsubscribed.
+  def handle_info({:resubscribe_depth, symbol, channel}, state) do
+    resync = Map.get(state, :depth_resync, %{})
+    still_wanted? = Map.get(Map.get(state, :depth_streams, %{}), symbol) == channel
+
+    if Map.get(resync, symbol) == :pending and still_wanted? do
+      {deadline, state} = add_ack_request(state)
+      state = put_resync(state, Map.put(resync, symbol, {:awaiting, deadline}))
+      {:reply, {:text, rpc_frame("subscribe", symbol, channel)}, state}
+    else
+      {:ok, put_resync(state, Map.delete(resync, symbol))}
+    end
   end
 
   # The announced request's frame never went out. It was announced last, so it is the newest.
@@ -900,6 +937,12 @@ defmodule DpExchange.Gemini.Socket do
 
   defp ack_requests(state), do: Map.get(state, :ack_requests, [])
 
+  defp add_ack_request(state) do
+    deadline = make_ref()
+    timer = Process.send_after(self(), {:ack_deadline, deadline}, @ack_timeout_ms)
+    {deadline, put_ack_requests(state, ack_requests(state) ++ [{deadline, timer}])}
+  end
+
   # `ack_deadline` and `unanswered_subscribes` are derived from `ack_requests` on every
   # change, so the three cannot disagree.
   defp put_ack_requests(state, requests) do
@@ -925,13 +968,30 @@ defmodule DpExchange.Gemini.Socket do
       [] ->
         state
 
-      [{_deadline, timer} | newer] ->
+      [{deadline, timer} | newer] ->
         Process.cancel_timer(timer)
-        put_ack_requests(state, newer)
+        state |> put_ack_requests(newer) |> finish_resync(deadline)
     end
   end
 
   defp note_answer(_message, state), do: state
+
+  # The venue has answered the resubscribe sent for a depth gap: the old subscription's frames
+  # are behind us, so the symbol's sequence and anchor are forgotten and its next frame is the
+  # fresh snapshot (the anchor on a `snapshot` connection), not a continuation of the old book.
+  defp finish_resync(state, deadline) do
+    resync = Map.get(state, :depth_resync, %{})
+    done = for {symbol, {:awaiting, ^deadline}} <- resync, do: symbol
+
+    if done == [] do
+      state
+    else
+      state
+      |> put_resync(Map.drop(resync, done))
+      |> Map.update(:last_depth_update, %{}, &Map.drop(&1, done))
+      |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(done)))
+    end
+  end
 
   @impl true
   def handle_pong(_frame, state), do: {:ok, %{state | last_heard_at: now_ms()}}
@@ -1212,17 +1272,25 @@ defmodule DpExchange.Gemini.Socket do
   # A frame ending at or before what was already applied is a replay, not news. Applied, it
   # re-applied old changes and set `last_depth_update` BACK, so the frame after it was
   # judged against the replay instead of the book.
+  #
+  # **A symbol being resynchronised drops every diff** until the venue has answered the
+  # resubscribe (`depth_resync`, see `begin_resync/2`): they continue a book that was
+  # already declared wrong, and a second notice per frame would bury the first.
   defp deliver_depth_update(message, symbol, state) do
     last_by_symbol = Map.get(state, :last_depth_update, %{})
 
-    case {message["u"], Map.get(last_by_symbol, symbol)} do
-      {u, applied} when is_integer(u) and is_integer(applied) and u <= applied ->
+    cond do
+      Map.has_key?(Map.get(state, :depth_resync, %{}), symbol) ->
         {:ok, state}
 
-      {u, applied} when is_integer(u) ->
+      WsDecode.stale_depth?(message["u"], Map.get(last_by_symbol, symbol)) ->
+        {:ok, state}
+
+      is_integer(message["u"]) ->
+        applied = Map.get(last_by_symbol, symbol)
         apply_depth_update(message, symbol, state, last_by_symbol, applied)
 
-      {_unreadable_u, _applied} ->
+      true ->
         refuse_unsequenced_depth_update(message, symbol, state)
     end
   end
@@ -1261,8 +1329,41 @@ defmodule DpExchange.Gemini.Socket do
         state,
         Notice.new(:degraded, :gemini, details: %{reason: "depth sequence gap", symbol: symbol})
       )
-    end
 
+      resync_or_deliver(message, symbol, state, last_by_symbol)
+    else
+      deliver_depth_frame(message, symbol, state, last_by_symbol)
+    end
+  end
+
+  # Family rule MD9: on a gap the symbol is resubscribed for a fresh snapshot, and the gapped
+  # frame is NOT delivered (it continues a book already declared wrong). That needs the
+  # channel the symbol was subscribed on (`depth_streams`, recorded by `subscribe/3`); with
+  # none known (a frame fed to a bare socket state), no resubscribe is possible and the
+  # frame is delivered as before, after the notice.
+  defp resync_or_deliver(message, symbol, state, last_by_symbol) do
+    case Map.get(Map.get(state, :depth_streams, %{}), symbol) do
+      nil ->
+        deliver_depth_frame(message, symbol, state, last_by_symbol)
+
+      channel ->
+        send(self(), {:resubscribe_depth, symbol, channel})
+        resync = Map.put(Map.get(state, :depth_resync, %{}), symbol, :pending)
+        {:reply, {:text, rpc_frame("unsubscribe", symbol, channel)}, put_resync(state, resync)}
+    end
+  end
+
+  defp put_resync(state, resync), do: Map.put(state, :depth_resync, resync)
+
+  defp rpc_frame(method, symbol, channel) do
+    Jason.encode!(%{
+      "method" => method,
+      "params" => streams([symbol], channel),
+      "id" => request_id(method)
+    })
+  end
+
+  defp deliver_depth_frame(message, symbol, state, last_by_symbol) do
     {decoded, state} = decode_depth_frame(message, symbol, state)
 
     case decoded do
@@ -1386,11 +1487,12 @@ defmodule DpExchange.Gemini.Socket do
     # nil` is the same substitution the family's own `Quote.price` typespec exists to
     # rule out. `"null"` (an unparsable last-trade string) is the same case as `""`
     # above: nothing traded, not a zero and not a missing-but-real price.
-    case decimal(last) do
-      nil ->
+    # A last price of zero or less is not a price either (MD6): no `Quote`.
+    case WsDecode.traded_price(last) do
+      :error ->
         state
 
-      price ->
+      {:ok, price} ->
         last_by_symbol = Map.get(state, :last_trade_price, %{})
 
         if unchanged_trade?(Map.get(last_by_symbol, symbol), price) do
@@ -1417,48 +1519,8 @@ defmodule DpExchange.Gemini.Socket do
 
   defp notify(state, notice), do: send(state.subscriber, {:dp_exchange, :gemini, notice})
 
-  defp decimal(nil), do: nil
-
-  # `Decimal.new/1` raises on a string that is not a number. **Reproduced live**: a
-  # 347-symbol subscribe against production `wss://ws.gemini.com` crashed this socket
-  # within seconds on a `bookTicker` frame carrying `""` for a bid/ask field — a single
-  # symbol's test, which is what shipped before, never sends enough traffic to hit it.
-  # `Decimal.parse/1`, requiring the whole string be consumed, is what `ws_decode.ex`
-  # already does for the same shape of field.
-  # `Decimal.parse/1` requiring the whole string be consumed is NOT a sufficient guard on
-  # its own, which is the half this copy was missing. "NaN", "Inf" and "-Inf" all parse
-  # fully and case-insensitively — `"-nan"` and `"inf"` too — so each arrived here as a
-  # perfectly well-formed `Decimal` and flowed onward as a real price.
-  #
-  # That is worse than the raise this parse replaced, and it fails a long way from the
-  # cause. Measured: `Decimal.add(nan, 1)` is NaN, so it poisons a consumer's arithmetic
-  # silently; `Decimal.compare(nan, _)` RAISES `invalid_operation: operation on NaN`, in
-  # the consumer's own process, with a message naming Decimal rather than the venue that
-  # sent it. An Infinity is quieter still — it compares greater than everything and never
-  # raises at all.
-  #
-  # `dp_exchange_webull` found this and guarded both of its own copies; the other four
-  # venues guarded none of their nine. Fixed where it was found, not where it applied —
-  # which is why this comment is in each of them now rather than one of them.
-  defp decimal(value) when is_binary(value) do
-    case Decimal.parse(value) do
-      {parsed, ""} ->
-        bounded(parsed)
-
-      _unparsable ->
-        nil
-    end
-  end
-
-  defp decimal(_other), do: nil
-
-  # A finite `Decimal` whose exponent is one a price can have, or `nil`. `"1e999999999"`
-  # parses, and `Decimal.equal?/2` against it aligns exponents by building an integer of that
-  # many digits: one frame stalls the socket process. NaN and Infinity carry no integer
-  # coefficient and are refused here too.
-  defp bounded(%Decimal{coef: coef, exp: exp} = value)
-       when is_integer(coef) and exp >= -100 and exp <= 100,
-       do: value
-
-  defp bounded(_nan_infinite_or_unbounded), do: nil
+  # The price decode (`WsDecode.traded_price/1`) carries the guards this module's own
+  # `decimal/1` used to: the whole string must parse (`Decimal.new/1` raised on `""`,
+  # reproduced live against `wss://ws.gemini.com` with a 347-symbol subscribe), and NaN,
+  # Infinity and exponents that stall a comparison are refused.
 end

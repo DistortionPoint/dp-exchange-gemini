@@ -746,7 +746,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       rows = for n <- 1..50, do: %{"currency" => "BTC", "amount" => "0.0001", "id" => n}
       me = self()
 
-      assert {:error, {:history_truncated, 50}} =
+      assert {:error, :history_truncated} =
                Private.list_custody_fees(@credentials,
                  plug: capturing(rows, me),
                  retry_attempts: 0

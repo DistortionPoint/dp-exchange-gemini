@@ -471,7 +471,7 @@ defmodule DpExchange.Gemini.StakingTest do
 
       body = history_body("provider-a", first) ++ history_body("provider-b", second)
 
-      assert {:error, {:history_truncated, 500}} =
+      assert {:error, :history_truncated} =
                Private.get_staking_history(@credentials,
                  plug: capturing(body, me),
                  retry_attempts: 0

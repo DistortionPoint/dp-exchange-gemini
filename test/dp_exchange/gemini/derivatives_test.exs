@@ -477,7 +477,7 @@ defmodule DpExchange.Gemini.DerivativesTest do
     test "a reply as long as the default cap, asked for without :rows, is refused" do
       rows = for n <- 1..8760, do: %{"timestamp" => n}
 
-      assert {:error, {:history_truncated, 8760}} =
+      assert {:error, :history_truncated} =
                Private.funding_payment_report(@credentials,
                  plug: responding(rows),
                  retry_attempts: 0

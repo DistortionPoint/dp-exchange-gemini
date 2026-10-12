@@ -245,9 +245,9 @@ defmodule DpExchange.Gemini.Private do
   The venue's page is 10 rows by default and 50 at most (`rest.yaml:3267`), and it carries no
   cursor, so the first 10 transfers were answered as the account's complete ledger while every
   later one was dropped. With no `:limit_transfers` this asks for the maximum, 50, and a page
-  that full is `{:error, {:history_truncated, 50}}` — narrow with `:timestamp`, or pass
-  `:limit_transfers` to take exactly one page on purpose. The same rule `get_orders/2` and
-  `get_trade_history/2` apply.
+  that full is `{:error, :history_truncated}` (the page was 50) — narrow with `:timestamp`, or
+  pass `:limit_transfers` to take exactly one page on purpose. The same rule `get_orders/2`
+  and `get_trade_history/2` apply.
   """
   @spec get_transfers(map(), keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transfers(credentials, opts) do
@@ -283,7 +283,7 @@ defmodule DpExchange.Gemini.Private do
 
   defp transfers_complete(rows, requested_limit) do
     if requested_limit == nil and length(rows) >= @transfers_page_max,
-      do: {:error, {:history_truncated, @transfers_page_max}},
+      do: {:error, :history_truncated},
       else: :ok
   end
 
@@ -794,7 +794,7 @@ defmodule DpExchange.Gemini.Private do
 
   defp complete_page(rows, true, opts) do
     if Keyword.get(opts, :limit) == nil and length(rows) >= @history_page_max,
-      do: {:error, {:history_truncated, @history_page_max}},
+      do: {:error, :history_truncated},
       else: :ok
   end
 
@@ -1194,8 +1194,11 @@ defmodule DpExchange.Gemini.Private do
           else: {:refused, refusal(body, opts)}
 
       # Permanent for the request as sent. A caller refreshes a token and calls again —
-      # that is a different request, not a retry of this one.
-      {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
+      # that is a different request, not a retry of this one. **Every 4xx but a 429 (family
+      # rule DV6)**: a 405, 409, 413, 415 or 422 answered to the first attempt is the venue
+      # declining this request, so it is a refusal and not a bare error that a placement then
+      # reads as "nothing happened". (The 429 is Core's: a retry or a rate-limited error.)
+      {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
@@ -1350,7 +1353,7 @@ defmodule DpExchange.Gemini.Private do
       when status in 200..299 ->
         with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
-      {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
+      {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
@@ -1379,7 +1382,7 @@ defmodule DpExchange.Gemini.Private do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 
-      {:ok, %{status: status, body: body}} when status in [400, 401, 403, 404] ->
+      {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
         {:refused, refusal(body, opts)}
 
       {:ok, %{status: status, body: body}} ->
@@ -3747,8 +3750,8 @@ defmodule DpExchange.Gemini.Private do
   **A full page with no `:limit` is refused, not returned as every fee.** The venue's page is
   10 by default and 50 at most (`rest.yaml:3446`) with no cursor, so the first 10 charges were
   answered as the whole history. With no `:limit` this asks for 50, and a page that full is
-  `{:error, {:history_truncated, 50}}`: narrow with `:since`, or pass `:limit` to take exactly
-  one page on purpose. See `get_transfers/2`.
+  `{:error, :history_truncated}` (the page was 50): narrow with `:since`, or pass `:limit` to
+  take exactly one page on purpose. See `get_transfers/2`.
   """
   @spec list_custody_fees(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -4025,8 +4028,8 @@ defmodule DpExchange.Gemini.Private do
   **A full page with no `:limit` is refused, not returned as the whole history.** The venue's
   page is 50 by default and 500 at most (`/v1/staking/history`, `rest.yaml:6677`) with no cursor, so the 50 most
   recent transactions were answered as everything. With no `:limit` this asks for 500, and a
-  reply that full is `{:error, {:history_truncated, 500}}`: narrow with `:since`/`:until`, or
-  pass `:limit` to take exactly one page on purpose.
+  reply that full is `{:error, :history_truncated}` (the page was 500): narrow with
+  `:since`/`:until`, or pass `:limit` to take exactly one page on purpose.
   """
   @spec get_staking_history(map(), keyword()) ::
           {:ok, [StakingTransaction.t()]} | {:error, term()} | {:refused, term()}
@@ -4638,10 +4641,10 @@ defmodule DpExchange.Gemini.Private do
   page size chosen here would silently truncate a report the caller asked for in full.
 
   **The venue's cap still applies, so a reply that reaches it is refused when no `:rows` was
-  given:** `{:error, {:history_truncated, 8760}}`. The cap is a row count and the reply says
-  nothing when it cut the report short, so 8760 rows is either the whole answer or the first
-  slice of a longer one. Narrow with `:from`/`:to`, or pass `:rows` to take exactly that many
-  on purpose.
+  given:** `{:error, :history_truncated}` (the cap is 8760). The cap is a row count and the
+  reply says nothing when it cut the report short, so 8760 rows is either the whole answer or
+  the first slice of a longer one. Narrow with `:from`/`:to`, or pass `:rows` to take exactly
+  that many on purpose.
   """
   @spec funding_payment_report(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -5097,7 +5100,7 @@ defmodule DpExchange.Gemini.Private do
   **The venue caps this at 500 and does not paginate.** `limit_accounts` is both the maximum
   and the default, so a group with more than 500 subaccounts returns a truncated list with
   nothing to say it was truncated. **A full page with no `:limit` is therefore refused, not
-  returned as every account:** `{:error, {:history_truncated, 500}}`. Pass `:limit` to take
+  returned as every account:** `{:error, :history_truncated}`. Pass `:limit` to take
   exactly one page on purpose, or `:since` to narrow — the venue reads it as "created on or
   before" (`rest.yaml:6037`), despite the name every other call gives it.
 
@@ -5124,7 +5127,7 @@ defmodule DpExchange.Gemini.Private do
   # A page that is exactly as full as the venue's maximum, asked for without a `:limit`, may
   # be the whole answer or the first slice of it, and nothing in the reply says which.
   defp page_complete(rows, nil, page_max) when length(rows) >= page_max,
-    do: {:error, {:history_truncated, page_max}}
+    do: {:error, :history_truncated}
 
   defp page_complete(_rows, _limit, _page_max), do: :ok
 
@@ -5538,8 +5541,8 @@ defmodule DpExchange.Gemini.Private do
   **A full page with no `:limit` is refused, not returned as every trade.** The venue's page
   is 100 by default and 300 at most (`rest.yaml:4700`) with no cursor, so the first 100
   trades were answered as the whole list. With no `:limit` this asks for 300, and a reply
-  that full is `{:error, {:history_truncated, 300}}`: narrow with `:since_nanos`, or pass
-  `:limit` to take exactly one page on purpose.
+  that full is `{:error, :history_truncated}` (the page was 300): narrow with `:since_nanos`,
+  or pass `:limit` to take exactly one page on purpose.
   """
   @spec list_clearing_trades(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}

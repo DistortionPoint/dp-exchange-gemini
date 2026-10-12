@@ -78,11 +78,22 @@ defmodule DpExchange.Gemini.RestTest do
       refute Map.has_key?(top, :price)
     end
 
-    test "the timestamp is the venue's Date header, not our clock" do
+    test "venue_time is nil even when the reply carries a Date header (MD7)" do
+      # The `Date` header is when the reply was served, not when the last trade happened.
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
-      assert quote_struct.venue_time == ~U[2026-08-28 17:00:01Z]
+      assert quote_struct.venue_time == nil
+      assert quote_struct.observed_at
+    end
+
+    test "a last price of zero or less is not a price (MD6)" do
+      for last <- ["0", "0.00000", "-1.5"] do
+        body = %{@ticker | "last" => last}
+
+        assert {:error, {:non_positive_price, :price, ^last}} =
+                 Rest.get_price("BTC-USD", plug: responding(body), retry_attempts: 0)
+      end
     end
 
     test "volume is the BASE asset's, recovered from the symbol" do
@@ -115,16 +126,7 @@ defmodule DpExchange.Gemini.RestTest do
     end
 
     test "a response with NO Date header is nil, and never our clock" do
-      # "Rather than substituting now" is the guarantee, and it holds. The refusal was not
-      # part of it, and the comment here had one step too many: the header is indeed the
-      # only venue-supplied time, but a quote's freshness does NOT become unstateable
-      # without it — `observed_at` states it, and `Core.Types.TopOfBook`'s moduledoc calls
-      # that "a different, honest fact" rather than a stand-in. `Core.Types.Quote` enforces
-      # `[:symbol, :price, :observed_at, :provider]`.
-      #
-      # `get_top_of_book/2` reads the SAME `/v1/pubticker` payload through
-      # `header_time_or_nil/1` and has always tolerated the absence, so the two calls
-      # disagreed about the same response.
+      # `observed_at` states freshness; `venue_time` is nil whatever the headers say.
       assert {:ok, quoted} =
                Rest.get_price("BTC-USD",
                  plug: responding(@ticker, date: nil),
@@ -136,14 +138,30 @@ defmodule DpExchange.Gemini.RestTest do
       refute quoted.venue_time == quoted.observed_at
     end
 
-    test "an unparseable Date header is also nil, not a guess" do
-      assert {:ok, quoted} =
-               Rest.get_price("BTC-USD",
-                 plug: responding(@ticker, date: "not a date"),
+    test "top of book venue_time is nil too, and a zero side is no resting order (MD6, MD7)" do
+      assert {:ok, top} =
+               Rest.get_top_of_book("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
+
+      assert top.venue_time == nil
+
+      zero_bid = %{@ticker | "bid" => "0.00"}
+
+      assert {:ok, %{bid: nil, ask: ask, venue_time: nil}} =
+               Rest.get_top_of_book("BTC-USD", plug: responding(zero_bid), retry_attempts: 0)
+
+      assert Decimal.equal?(ask, Decimal.new("77791.92000"))
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_top_of_book("BTC-USD",
+                 plug: responding(%{@ticker | "ask" => "-1"}),
                  retry_attempts: 0
                )
 
-      assert quoted.venue_time == nil
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_top_of_book("BTC-USD",
+                 plug: responding(%{@ticker | "ask" => "abc"}),
+                 retry_attempts: 0
+               )
     end
 
     test "the volume timestamp is NOT used as the quote time" do
@@ -303,8 +321,6 @@ defmodule DpExchange.Gemini.RestTest do
     end
   end
 
-  defp to_ms(datetime), do: DateTime.to_unix(datetime, :millisecond)
-
   describe "get_historical_prices/4 — the fixed window" do
     @candles [
       [1_787_935_740_000, 77_986.74, 77_995.93, 77_908.94, 77_941.47, 0.0],
@@ -324,7 +340,8 @@ defmodule DpExchange.Gemini.RestTest do
           ] do
         plug = fn conn ->
           assert String.ends_with?(conn.request_path, "/#{native}")
-          Req.Test.json(conn, @candles)
+          # 2026-08-24 00:00:00Z: on a boundary of every width up to a day.
+          Req.Test.json(conn, [[1_787_270_400_000, 1.5, 2.5, 1.0, 2.0, 3.0]])
         end
 
         assert {:ok, _candles} =
@@ -378,7 +395,8 @@ defmodule DpExchange.Gemini.RestTest do
       # twenty-four hours — so a hardcoded fixture stops being "inside the window" the
       # day after it is written, and this test failed for exactly that reason three days
       # after it was added. A time-relative fixture cannot rot that way.
-      newest = DateTime.utc_now() |> DateTime.add(-60, :second) |> to_ms()
+      # On a minute boundary, and a whole minute closed, so neither bar is still forming.
+      newest = (div(DateTime.to_unix(DateTime.utc_now()), 60) - 1) * 60_000
       older = newest - 60_000
 
       candles = [
@@ -404,6 +422,127 @@ defmodule DpExchange.Gemini.RestTest do
       assert DateTime.compare(first.opened_at, second.opened_at) == :lt
       assert Decimal.equal?(first.open, Decimal.from_float(77_950.54))
       assert first.provider == :gemini
+    end
+
+    # A closed minute and the minute still forming, both on a boundary.
+    defp closed_and_forming do
+      current = div(DateTime.to_unix(DateTime.utc_now()), 60) * 60_000
+      closed = current - 60_000
+
+      {closed, current,
+       [
+         [closed, 10.0, 11.0, 9.0, 10.5, 1.0],
+         [current, 10.5, 12.0, 10.0, 11.0, 0.5]
+       ]}
+    end
+
+    test "the bar still forming is dropped unless include_partial: true (MD1)" do
+      {closed, current, rows} = closed_and_forming()
+
+      assert {:ok, [only]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert DateTime.to_unix(only.opened_at, :millisecond) == closed
+
+      assert {:ok, [_closed, forming]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(rows),
+                 retry_attempts: 0,
+                 include_partial: true
+               )
+
+      assert DateTime.to_unix(forming.opened_at, :millisecond) == current
+
+      assert {:error, {:invalid_option, :include_partial, "yes"}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: responding(rows),
+                 retry_attempts: 0,
+                 include_partial: "yes"
+               )
+    end
+
+    test "start is inclusive and end is exclusive on opened_at (MD2)" do
+      # Inside the 1m window, on minute boundaries, both closed.
+      newer = (div(DateTime.to_unix(DateTime.utc_now()), 60) - 2) * 60_000
+      older = newer - 60_000
+
+      rows = [
+        [older, 10.0, 11.0, 9.0, 10.5, 1.0],
+        [newer, 10.5, 12.0, 10.0, 11.0, 0.5]
+      ]
+
+      at = &DateTime.from_unix!(&1, :millisecond)
+
+      assert {:ok, [only]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [end: at.(newer)],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert only.opened_at == at.(older)
+
+      assert {:ok, [only]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [start: at.(newer)],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert only.opened_at == at.(newer)
+    end
+
+    test "a bar not aligned to its width refuses the reply, with the venue's value (MD3)" do
+      # 1_559_755_800 s is on a half-hour but not an hour: the vendor's own example time.
+      rows = [[1_559_755_800_000, 1.0, 2.0, 0.5, 1.5, 1.0]]
+
+      assert {:error, {:unaligned_candle, 1_559_755_800_000}} =
+               Rest.get_historical_prices("BTC-USD", "1h", [],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert {:ok, [_aligned]} =
+               Rest.get_historical_prices("BTC-USD", "30m", [],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+    end
+
+    test "two bars with one timestamp refuse the reply (MD3, the vendor's own example)" do
+      rows = [
+        [1_559_755_800_000, 7781.6, 7820.23, 7776.56, 7819.39, 34.76],
+        [1_559_755_800_000, 7781.6, 7829.46, 7776.56, 7817.28, 43.42]
+      ]
+
+      assert {:error, {:duplicate_candle, ~U[2019-06-05 17:30:00.000Z]}} =
+               Rest.get_historical_prices("BTC-USD", "30m", [],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a candle price of zero or less refuses the reply (MD6)" do
+      for {row, field} <- [
+            {[1_787_935_740_000, 0, 2.0, 0.5, 1.5, 1.0], :open},
+            {[1_787_935_740_000, 1.0, 2.0, 0.5, -1.5, 1.0], :close}
+          ] do
+        assert {:error, {:non_positive_price, ^field, _value}} =
+                 Rest.get_historical_prices("BTC-USD", "1m", [],
+                   plug: responding([row]),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a limit is refused, never ignored (MD4)" do
+      assert {:error, {:unsupported_option, :limit}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [],
+                 plug: fn _conn -> raise "must not request" end,
+                 retry_attempts: 0,
+                 limit: 10
+               )
     end
   end
 

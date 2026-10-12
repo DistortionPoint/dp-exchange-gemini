@@ -1,12 +1,11 @@
 
-**`Quote.venue_time` CAN be `nil` here, and until 0.2.30 this section said it could not.**
-It read: "a response without a `Date` header fails the call outright … a `nil` branch for
-this venue's quotes is dead code." That stopped being true in 0.2.30, when `get_price/2`
-stopped discarding a real traded price over a missing or unreadable `Date` header —
-`Core.Types.Quote` does not enforce `venue_time`, and `observed_at` states freshness. **A
-`nil` branch for this venue's quotes is not dead code; write one.** Nothing is ever
-substituted into that field: it is the venue's own instant or it is `nil`, never this
-package's clock.
+**REST `Quote.venue_time` and `TopOfBook.venue_time` are always `nil` (BREAKING, tick R).**
+They used to be the HTTP `Date` response header. That is when the reply was served, not when
+the last trade happened or the quote was true, so it was a different event's time (family
+rule MD7). `/v1/pubticker` states no trade time (its only `timestamp` stamps the 24-hour
+volume window). **Write a `nil` branch for this venue's quotes;** `observed_at` states
+freshness. Nothing is ever substituted into that field: it is the venue's own instant or it
+is `nil`, never this package's clock and never a header.
 
 `get_order_book/2`'s `venue_time` is **always `nil`.** Until checked against the vendor's
 own OpenAPI spec (2026-09-29), this section said `venue_time` was derived from the
@@ -272,18 +271,41 @@ Rather than handing back the 364 bars it happens to hold, which would read as a 
 answer for a period the venue does not serve.
 
 **There is nothing to paginate.** `max_candles_per_request` is `nil`, not a number — one
-call is the whole history the venue offers at that width. Do not build a paging loop.
+call is the whole history the venue offers at that width. Do not build a paging loop. For
+the same reason `opts[:limit]` is `{:error, {:unsupported_option, :limit}}`, never accepted
+and ignored (BREAKING, tick R).
 
-## `Quote.venue_time` is the venue's HTTP `Date`, or `nil`
+**The range and the bar still forming (BREAKING, tick R).** `:start` is inclusive and `:end`
+exclusive, on `opened_at`; an absent `:end` is now. The bar that is still forming
+(`opened_at + width > now`) is **not returned** unless you pass `include_partial: true` in
+`opts`; with it the last bar comes back as the venue sent it and **may change on the next
+call** (`Core.Types.Candle` has no flag for it). Before, the forming bar was always returned,
+indistinguishable from a closed one.
+
+**`opened_at` must sit on the bar's width boundary, or the whole reply is refused**
+`{:error, {:unaligned_candle, time}}`, and two bars with one timestamp in a reply refuse it
+`{:error, {:duplicate_candle, opened_at}}`. The vendor does not say whether its candle
+timestamp is a bar's open or its close, and its own example repeats a timestamp, so this
+package fails closed rather than guess. **Both are UNMEASURED against the live venue.** `1w`
+and `1M` have no modelled width and are not alignment-checked. An open, high, low or close
+of zero or less refuses the reply (`{:error, {:non_positive_price, field, value}}`).
+
+## `Quote.venue_time` is `nil`
 
 Neither Gemini ticker publishes a quote time. `/v1/pubticker` has one, but it sits
 **inside the `volume` object** — it stamps the 24-hour volume window and lags about a
 minute. `/v2/ticker` has none at all.
 
-This package uses the venue's `Date` response header. When it is absent or not a GMT date,
-`venue_time` is `nil` and the quote is still returned: the traded price is real, and
-`observed_at` states freshness. It never substitutes the local clock, which is what makes a
-stale quote indistinguishable from a live one. Write a `nil` branch.
+`venue_time` is therefore `nil` on `get_price/2` and `get_top_of_book/2`, and the quote is
+still returned: the traded price is real, and `observed_at` states freshness. The HTTP `Date`
+header, which this package used until tick R, is when the reply was served and is no longer
+used. It never substitutes the local clock, which is what makes a stale quote
+indistinguishable from a live one. Write a `nil` branch.
+
+A `last` of zero or less is not a price and refuses the reply
+(`{:error, {:non_positive_price, :price, value}}`). In `get_top_of_book/2` a side priced `0`
+is no resting order (`nil`); a negative or unreadable side refuses the reply
+(`{:error, :unexpected_response_shape}`).
 
 If you need sub-second freshness, use `subscribe/2` — the `TopOfBook` it delivers carries a
 real nanosecond event time per update. The `Quote` `subscribe/2` also delivers, on a frame
@@ -291,10 +313,8 @@ that carries a last trade, does not — see the correction below the `venue_time
 the top of this file: the vendor documents no trade time for it, so it is `nil`
 unconditionally, on this transport as much as any other.
 
-This section used to say REST `Quote.venue_time` is never `nil` and that a response without
-a `Date` header fails the call. Neither has been true since 0.2.30, as the top of this file
-says. This section was corrected on 2026-10-10. The streamed last-trade `Quote` is `nil`
-every time, because the vendor documents no trade time for it.
+The streamed last-trade `Quote` is `nil` every time, because the vendor documents no trade
+time for it.
 
 `get_order_book/2`'s `venue_time` is always `nil` (see the top of this file). On the
 **stream**, a partial-depth
@@ -331,13 +351,25 @@ plain text rather than the usual `{"reason": …}` shape — the text itself is 
 `{:refused, {:unknown_reason, "Supplied value 'X' is not a valid symbol"}}`, not a bare
 `{:refused, :refused}` that throws the venue's own words away.
 
-**Private (authenticated) calls refuse on 404 too**, as they do on 400, 401 and 403:
-`rest.yaml` documents `404 NotFound` on the order and account endpoints, so an unknown
-order or account is `{:refused, reason}`, permanent for the request as sent, never the
-retryable `{:error, {:exchange_error, …}}` shape.
+**Private (authenticated) calls refuse on every 4xx but a 429** (BREAKING, tick R: a 405,
+409, 413, 415 or 422 was a bare `{:error, {:exchange_error, :gemini, "HTTP 4xx: …"}}`, which
+a placement read as "nothing happened"). `rest.yaml` documents `404 NotFound` on the order
+and account endpoints, so an unknown order or account is `{:refused, reason}`, permanent for
+the request as sent, never the retryable `{:error, {:exchange_error, …}}` shape. A 429 and a
+5xx stay plain errors (an order write answers `:order_unconfirmed` for the 5xx).
 
 `get_historical_prices/4` and `get_trades/2` return the **canonical** symbol (`"BTC-USD"`)
 whatever spelling you passed, as `get_order_book/2` and `get_price/2` always did.
+
+**`get_trades/2` (BREAKING, tick R).** `:limit` is at most 500 (the vendor: "at most 500
+records"); more is `{:error, {:invalid_option, :limit, value}}`. With `:since` or
+`:since_tid`, the venue answers the most recent `limit` trades after the cursor, so a reply
+of exactly `limit` rows (50 when you gave none) may have dropped older ones and is
+`{:error, :history_truncated}`: narrow the cursor or raise the limit (UNMEASURED beyond the
+vendor's text). A print priced at zero or less refuses the reply
+(`{:error, {:non_positive_price, :price, value}}`); on the stream it is not delivered and a
+`:data_quality` notice says so, and a book ticker's last trade `c` of zero or less is no
+`Quote`.
 
 ### A refusal carries the venue's sentence, not only its category
 
@@ -735,8 +767,8 @@ from the parent entry; the transaction itself carries none.
 `limit_transfers:`) are the venue's own field names and units unchanged, not translated —
 see `Private.get_transfers/2`'s moduledoc. The venue pages it at 10 by default and 50 at
 most, with no cursor, so with no `limit_transfers:` this asks for 50 and a full page is
-`{:error, {:history_truncated, 50}}` — narrow with `timestamp:`, or pass `limit_transfers:`
-to take one page on purpose. `list_custody_fees/1` follows the same rule with `limit:`.
+`{:error, :history_truncated}` (exactly that, no payload; BREAKING, it carried the page size)
+— narrow with `timestamp:`, or pass `limit_transfers:` to take one page on purpose. `list_custody_fees/1` follows the same rule with `limit:`.
 
 `get_transactions/1` is the other. `POST /v1/transactions` names its window parameter
 `timestamp_nanos` and takes **nanoseconds**, not the millisecond unit every other
@@ -1093,8 +1125,10 @@ Keep what came back, not what you sent.
 
 `list_accounts/1` **caps at 500 and does not paginate.** A larger group comes back truncated
 with nothing to say it was; there is no cursor to follow. With no `:limit`, a page that full is
-`{:error, {:history_truncated, 500}}` rather than a list that reads as complete; pass `:limit`
-to take one page on purpose.
+`{:error, :history_truncated}` rather than a list that reads as complete; pass `:limit`
+to take one page on purpose. Every history read that can fill its page answers this one
+shape (`get_orders/2`, `get_trade_history/2`, `get_transfers/2`, `list_custody_fees/1`,
+`get_staking_history/2`, `funding_payment_report/2`, `list_clearing_trades/2`).
 
 `get_roles/1` answers with three booleans rather than one role, because `Fund Manager` and
 `Trader` combine and `Auditor` combines with nothing.
@@ -1359,12 +1393,19 @@ by accident, and it is equally usable for a proxy.
 ## A depth sequence gap raises one notice, and it will not repeat
 
 When a `depthUpdate` frame skips ahead of the last applied update, the socket raises a
-single `:degraded` notice (`details.reason: "depth sequence gap"`, with the `symbol`) and
-then **advances** its per-symbol sequence past the gap. The next frame therefore shows no
-gap, and no second notice follows. **Act on that first notice**: discard your local book for
-that symbol and resubscribe (or refetch with `get_order_book/2`). Waiting for the notice to
-repeat leaves you applying diffs to a book that is wrong from the gap onward, with every
-price real.
+single `:degraded` notice (`details.reason: "depth sequence gap"`, with the `symbol`).
+**Act on that notice**: discard your local book for that symbol. Waiting for a repeat leaves
+you applying diffs to a book that is wrong from the gap onward, with every price real.
+
+**The socket resubscribes the symbol itself (BREAKING, tick R).** When it knows which depth
+channel (`:depth` or `:depth_fast`) the symbol was subscribed on (recorded by
+`Socket.subscribe/3`), it unsubscribes and subscribes it again, does NOT deliver the gapped
+frame, and drops every further diff for that symbol, without more notices, until the venue
+has answered the resubscribe. The next frame is then the venue's fresh snapshot (on a
+connection started with `:depth`/`:depth_fast` in `:channels`, a full `OrderBook`; otherwise
+diffs resume from the new sequence). Where the channel is not known, the notice is all you
+get and the gapped frame is delivered as before. A stale or duplicate frame (`u` at or before
+the last applied) is dropped silently, never applied.
 
 A `depthUpdate` whose `u` is missing or not an integer is the exception: its sequence cannot
 be stated, so the socket does **not** advance past it. It raises `"undecodable depth update"`

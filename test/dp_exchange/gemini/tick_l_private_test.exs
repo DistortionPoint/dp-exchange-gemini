@@ -530,19 +530,38 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
     end
 
     test "quotes a small body whole" do
-      small = status_plug(405, "nope")
+      small = status_plug(502, "nope")
 
-      assert {:error, {:exchange_error, :gemini, "HTTP 405: \"nope\""}} = erroring_post(small)
-      assert {:error, {:exchange_error, :gemini, "HTTP 405: \"nope\""}} = erroring_get(small)
+      # A 5xx is worded by Core (0.3.82: "Server error (502): ..."), not by `status_error/2`,
+      # since no 4xx but a 429 reaches that function any more.
+      assert {:error, {:exchange_error, :gemini, "Server error (502): nope"}} =
+               erroring_post(small)
+
+      assert {:error, {:exchange_error, :gemini, "Server error (502): nope"}} =
+               erroring_get(small)
     end
 
-    test "quotes an error page bounded, on a POST and on a signed GET" do
-      page = status_plug(413, String.duplicate("x", 100_000))
+    test "a 5xx stays a plain error on a POST and on a signed GET" do
+      page = status_plug(502, "gateway down")
 
       for result <- [erroring_post(page), erroring_get(page)] do
         assert {:error, {:exchange_error, :gemini, message}} = result
-        assert String.starts_with?(message, "HTTP 413: ")
-        assert String.length(message) < 2_200
+        assert message =~ "502"
+      end
+    end
+
+    test "any 4xx but a 429 is a refusal, bounded, on a POST and on a signed GET (DV6)" do
+      for status <- [405, 409, 413, 415, 422] do
+        small = status_plug(status, "nope")
+        assert {:refused, {:unknown_reason, "nope"}} = erroring_post(small)
+        assert {:refused, {:unknown_reason, "nope"}} = erroring_get(small)
+      end
+
+      page = status_plug(413, String.duplicate("x", 100_000))
+
+      for result <- [erroring_post(page), erroring_get(page)] do
+        assert {:refused, {:unknown_reason, text}} = result
+        assert String.length(text) < 2_200
       end
     end
   end

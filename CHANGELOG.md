@@ -20,6 +20,64 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (tick R market-data conventions, family rules MD1-MD9 and DV1, DV6, DV7)
+
+- **BREAKING: REST `Quote.venue_time` and `TopOfBook.venue_time` are always `nil` (MD7).**
+  They were the HTTP `Date` response header, which is when the reply was served and not when
+  the last trade happened or the quote was true. `/v1/pubticker` states neither (its only
+  `timestamp` stamps the 24-hour volume window). `observed_at` states freshness. The `Date`
+  parser was removed from `Rest`. `Fake` agrees.
+- **BREAKING: `get_historical_prices/4` no longer returns the bar still forming (MD1).** A bar
+  is in progress while `opened_at + width > now`; it is dropped unless `opts[:include_partial]`
+  is `true` (then the last bar is returned as sent and may change on the next call). A
+  non-boolean `:include_partial` is `{:error, {:invalid_option, :include_partial, value}}`.
+- **BREAKING: the candle range is `:start` inclusive, `:end` exclusive (MD2).** The end filter
+  was inclusive on both ends. An absent `:end` is now.
+- **BREAKING: candle `opts[:limit]` is `{:error, {:unsupported_option, :limit}}` (MD4).**
+  `/v2/candles` has no such parameter and the value was silently ignored.
+- **BREAKING: a candle whose `opened_at` is not aligned to its width refuses the whole reply,
+  `{:error, {:unaligned_candle, time}}`, and two candles with one timestamp refuse it
+  `{:error, {:duplicate_candle, opened_at}}` (MD3).** The vendor does not say whether a bar's
+  timestamp is its open or its close, and its own example (`candles.json`) repeats a
+  timestamp and sits on a half hour rather than an hour. **UNMEASURED against the live
+  venue**: both checks fail closed on what is unstated; a live run may show the venue is
+  aligned and unique, or that it stamps closes. `1w` and `1M` have no modelled width and are
+  not alignment-checked. The vendor example is now asserted to be refused.
+- **BREAKING: `get_trades/2` `:limit` above 500 is `{:error, {:invalid_option, :limit, v}}`
+  (MD4),** the vendor's "at most 500 records". With `:since` or `:since_tid`, a reply of
+  exactly `limit` rows (50 when none is given) is `{:error, :history_truncated}`: the venue
+  answers the most recent `limit` after the cursor, so older ones may be missing. UNMEASURED
+  beyond the vendor's text.
+- **BREAKING: a traded price of zero or less refuses the item or reply (MD6):** `Quote`
+  (`last`), `Trade` (REST and stream), candle open/high/low/close,
+  `{:error, {:non_positive_price, field, value}}`. On the stream a non-positive trade is not
+  delivered (a `:data_quality` notice says so) and a book ticker's `c` of zero or less is no
+  `Quote`. A bid or ask of `0` is no resting order (`nil`, size `nil` on the stream); a
+  negative or unreadable one refuses (REST `:unexpected_response_shape`, stream a
+  `:data_quality` notice).
+- **BREAKING: a depth sequence gap now resubscribes the symbol (MD9).** The socket records the
+  channel (`:depth` or `:depth_fast`) each symbol was subscribed on (`depth_streams`); on a
+  gap it raises the one `:degraded` notice, does not deliver the gapped frame, sends the
+  unsubscribe and then the subscribe, and drops every diff for the symbol until the venue
+  answers the subscribe, when the symbol's sequence and anchor are cleared so the next frame
+  is the fresh snapshot. Where the channel is unknown (no `Socket.subscribe/3`) it keeps the
+  old behaviour. A stale or duplicate frame (`u` at or before the last applied) is dropped
+  (`WsDecode.stale_depth?/2`); it already was, now with a test.
+- **BREAKING: history truncation is exactly `{:error, :history_truncated}` (DV7),** no payload.
+  It was `{:error, {:history_truncated, page_size}}` from `get_orders/2`, `get_trade_history/2`,
+  `get_transfers/2`, `list_custody_fees/1`, `get_staking_history/2`,
+  `funding_payment_report/2`, `list_accounts/1` and `list_clearing_trades/2`.
+- **BREAKING: every private 4xx but a 429 is `{:refused, reason}` (DV6),** on POST and on
+  signed GET. A 405, 409, 413, 415 or 422 answered to a placement used to be a bare
+  `{:error, {:exchange_error, :gemini, "HTTP 4xx: ..."}}`, which reads as "nothing was
+  placed" and neither refused nor unconfirmed. A 429 and a 5xx are unchanged. A 4xx answered
+  to a retried withdrawal was already unconfirmed and still is.
+- **Confirmed, no change (DV1):** an order request key the builder does not read is refused
+  `{:unsupported_order_field, key}` by key, so a `nil` value is refused too; now tested.
+- `Fake` follows all of the above through the same `Rest` functions
+  (`validate_candle_opts/1`, `select_candles/4`, `check_trade_window/2`): candle bars sit on
+  their width boundary, and `venue_time` is `nil` on the quote and top of book.
+
 ## [0.2.124] - 2026-10-12
 
 ### Fixed (tick R regression review)

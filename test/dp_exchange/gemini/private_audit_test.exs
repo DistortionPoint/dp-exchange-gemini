@@ -299,7 +299,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
           Map.merge(@fill, %{"tid" => n, "break" => if(n == 1, do: "full", else: "")})
         end
 
-      assert {:error, {:history_truncated, 500}} =
+      assert {:error, :history_truncated} =
                Private.get_trade_history(@credentials,
                  plug: responding(rows),
                  retry_attempts: 0

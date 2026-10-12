@@ -54,24 +54,32 @@ defmodule DpExchange.Gemini.Rest do
   rather than `{:error, {:range_unavailable, …}}` — a real gap from the other seven widths,
   disclosed here rather than hidden behind a fabricated window size.
 
-  ## Neither ticker carries a quote time, so `:venue_time` comes from the `Date` header
+  ## Neither ticker carries a quote time, so `:venue_time` is always `nil`
 
   `/v1/pubticker` returns a `timestamp`, but it is **inside the `volume` object** — it
   stamps the 24-hour volume window, updates about once a minute, and is not when the bid
-  and ask were true. `/v2/ticker` carries no timestamp at all. Using either as the quote
-  time would be a substitution of exactly the kind this family exists to stop, and the
-  host adapter does something worse: `parse_timestamp(nil)` returns `DateTime.utc_now()`,
-  so a quote with no venue time gets the *client's* clock and looks perfectly fresh.
+  and ask were true or the last trade happened. `/v2/ticker` carries no timestamp at all.
+  Using either as the quote time would be a substitution of exactly the kind this family
+  exists to stop.
 
-  This package uses the HTTP `Date` **response header** — the venue's own statement of
-  when it served the answer, which bounds the quote's age and is not our clock. When that
-  header is absent or unreadable, `venue_time` is `nil`: the traded price is still real, and
-  `observed_at` states freshness. Nothing is ever substituted into `venue_time`.
+  **The HTTP `Date` response header is not used either** (family rule MD7, tick R). It is
+  when the reply was served, not when the last trade happened or the quote was true, so it
+  is a different event's time. `Quote.venue_time` and `TopOfBook.venue_time` are `nil` from
+  REST; `observed_at` states freshness. A consumer needs a `nil` branch for this venue.
 
-  **`Quote.venue_time` can be `nil` here.** This moduledoc said "never `nil`" until it was
-  checked against `header_time_or_nil/1` on 2026-10-10. That stopped being true in 0.2.30,
-  when `get_price/2` stopped discarding a real traded price over a missing `Date` header. A
-  consumer needs a `nil` branch for this venue's quotes.
+  ## Candle conventions (tick R)
+
+    * The bar still forming (`opened_at + width > now`) is dropped unless the caller passes
+      `include_partial: true`; with it the last bar is returned as the venue sent it and may
+      still change.
+    * `:start` is inclusive and `:end` exclusive, on `opened_at`; an absent `:end` is now.
+    * `opened_at` must be aligned to the bar width. The venue does not state whether its
+      timestamp is a bar's open or close, so a bar not aligned (`Timeframe.aligned?/2`)
+      refuses the whole reply `{:error, {:unaligned_candle, time}}`, and two bars with the
+      same timestamp in one reply refuse it `{:error, {:duplicate_candle, time}}`. Both
+      checks are UNMEASURED against the live venue: they fail closed on what the vendor
+      does not state (and its own example repeats a timestamp).
+    * An open, high, low or close <= 0 refuses the reply.
   """
 
   alias DpExchange.Core.{Config, HttpClient, Timeframe}
@@ -182,17 +190,17 @@ defmodule DpExchange.Gemini.Rest do
 
   @doc """
   The last traded price for one symbol, as a `Quote`. Bid and ask are `get_top_of_book/2`.
-  `venue_time` is the venue's `Date` response header, or `nil` — see the module doc for why
-  not from the payload.
+  `venue_time` is always `nil` — the venue states no trade time; see the module doc. A `last`
+  of zero or less is not a price and refuses the reply.
   """
   @spec get_price(String.t(), keyword()) ::
           {:ok, Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, opts) do
     with :ok <- validate_symbol(symbol),
          native = SymbolFormat.to_exchange_symbol(symbol),
-         {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
+         {:ok, body} <- get_body("/v1/pubticker/#{segment(native)}", opts),
          {:ok, last} <- quoted_price(body),
-         {:ok, price} <- required_decimal(last, :price) do
+         {:ok, price} <- required_price(last, :price) do
       # The ticker's `volume` is "the 24 hour volume on the exchange", measured up to its
       # own `timestamp` (`Ticker` in docs/reference/gemini/openapi/rest.yaml), so a rolling
       # 24-hour total. No interval's volume can be derived from it — dp-exchange-core issue
@@ -205,17 +213,11 @@ defmodule DpExchange.Gemini.Rest do
          price: price,
          volume: volume,
          volume_window: volume && :rolling_24h,
-         # Read, not required, through the same `header_time_or_nil/1` that
-         # `get_top_of_book/2` has always used on this identical payload.
-         # `Core.Types.Quote` enforces `[:symbol, :price, :observed_at, :provider]`, so an
-         # absent or unreadable `Date` header was discarding a real guarded traded price
-         # over an optional field — and the two calls reading the SAME `/v1/pubticker`
-         # response disagreed about whether it was usable.
-         #
-         # The thing that must not happen is unchanged: an unstated venue time is `nil`
-         # here, never this package's clock, and `volume.timestamp` — which stamps the
-         # 24-hour window, not the quote — is still never reached for.
-         venue_time: header_time_or_nil(headers),
+         # Always `nil` (family rule MD7): the venue states no time for the last trade.
+         # The HTTP `Date` header is when the reply was served, not when the trade
+         # happened, and `volume.timestamp` stamps the 24-hour window, not the quote.
+         # Neither is substituted; `observed_at` states freshness.
+         venue_time: nil,
          observed_at: DateTime.utc_now(),
          provider: :gemini
        }}
@@ -231,15 +233,16 @@ defmodule DpExchange.Gemini.Rest do
   longer has fields for.
 
   The payload carries no sizes, so `bid_size` and `ask_size` stay `nil` — not published,
-  and not zero. `venue_time` comes from the `Date` header for the same reason
-  `get_price/2`'s timestamp does; `observed_at` is when this package read it.
+  and not zero. `venue_time` is `nil` (the venue states no quote time; the `Date` header is
+  not it); `observed_at` is when this package read it. A side priced `0` is no resting order
+  on that side (`nil`); a negative or unreadable side refuses the reply.
   """
   @spec get_top_of_book(String.t(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, opts) do
     with :ok <- validate_symbol(symbol),
          native = SymbolFormat.to_exchange_symbol(symbol),
-         {:ok, body, headers} <- get_with_headers("/v1/pubticker/#{segment(native)}", opts),
+         {:ok, body} <- get_body("/v1/pubticker/#{segment(native)}", opts),
          {:ok, body} <- object(body),
          :ok <- ticker_states_a_side(body),
          # A side the venue stated and this package cannot read is refused, not `nil`:
@@ -253,7 +256,9 @@ defmodule DpExchange.Gemini.Rest do
          ask: ask,
          bid_size: nil,
          ask_size: nil,
-         venue_time: header_time_or_nil(headers),
+         # `nil`: the ticker states no time for the quote (family rule MD7). The `Date`
+         # header is when the reply was served, which is a different event.
+         venue_time: nil,
          observed_at: DateTime.utc_now(),
          provider: :gemini
        }}
@@ -270,19 +275,21 @@ defmodule DpExchange.Gemini.Rest do
       else: {:error, :unexpected_response_shape}
   end
 
+  # A price of zero means no resting order on that side (family rule MD6): `nil`. A negative
+  # one, or one this package cannot read, refuses the reply.
   defp stated_price(empty) when empty in [nil, ""], do: {:ok, nil}
 
   defp stated_price(value) do
     case decimal(value) do
-      nil -> {:error, :unexpected_response_shape}
-      price -> {:ok, price}
-    end
-  end
+      nil ->
+        {:error, :unexpected_response_shape}
 
-  defp header_time_or_nil(headers) do
-    case venue_time(headers) do
-      {:ok, timestamp} -> timestamp
-      _no_usable_header -> nil
+      price ->
+        case Decimal.compare(price, 0) do
+          :gt -> {:ok, price}
+          :eq -> {:ok, nil}
+          :lt -> {:error, :unexpected_response_shape}
+        end
     end
   end
 
@@ -299,10 +306,16 @@ defmodule DpExchange.Gemini.Rest do
   @doc """
   Candles for a symbol and canonical timeframe, filtered to `range`.
 
-  `range` accepts `:start` and `:end` as `DateTime`s. Both are optional; with neither, the
-  venue's whole fixed window is returned.
+  `range` accepts `:start` (inclusive) and `:end` (exclusive) as `DateTime`s, on `opened_at`.
+  Both are optional; with neither, the venue's whole fixed window up to now is returned. The
+  bar still forming is not returned unless `opts[:include_partial]` is `true`.
 
   Refuses rather than truncating:
+
+    * a non-nil `opts[:limit]` → `{:error, {:unsupported_option, :limit}}`
+    * a bar not aligned to its width → `{:error, {:unaligned_candle, time}}` (unmeasured)
+    * two bars with one timestamp → `{:error, {:duplicate_candle, opened_at}}` (unmeasured)
+    * an open, high, low or close <= 0 → `{:error, {:non_positive_price, field, value}}`
 
     * an unknown width → `{:error, {:unsupported_timeframe, width}}`
     * a `:start` older than the window can reach → `{:error, {:range_unavailable, …}}`
@@ -310,7 +323,9 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_historical_prices(String.t(), String.t(), keyword(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, opts) do
-    with :ok <- validate_symbol(symbol), do: fetch_candles(symbol, timeframe, range, opts)
+    with :ok <- validate_symbol(symbol),
+         :ok <- validate_candle_opts(opts),
+         do: fetch_candles(symbol, timeframe, range, opts)
   end
 
   defp fetch_candles(symbol, timeframe, range, opts) do
@@ -323,13 +338,31 @@ defmodule DpExchange.Gemini.Rest do
     with {:ok, path, time_frame} <- candles_path(native, timeframe),
          :ok <- range_within_window(timeframe, range),
          {:ok, body} <- get_body("#{path}/#{segment(native)}/#{time_frame}", opts),
-         {:ok, rows} <- list(body) do
-      with {:ok, candles} <- rows_to_candles(rows, canonical, timeframe) do
-        {:ok,
-         candles
-         |> Enum.filter(&within?(&1, range))
-         |> Enum.sort_by(& &1.opened_at, DateTime)}
-      end
+         {:ok, rows} <- list(body),
+         {:ok, candles} <- rows_to_candles(rows, canonical, timeframe) do
+      {:ok, select_candles(candles, timeframe, range, opts)}
+    end
+  end
+
+  @doc """
+  Whether `opts` holds options `get_historical_prices/4` can honour, checked without sending
+  anything.
+
+  `/v2/candles` takes no `limit` (it serves a fixed window), so a non-nil `:limit` is
+  `{:error, {:unsupported_option, :limit}}` rather than accepted and ignored. `:include_partial`
+  must be a boolean (`{:error, {:invalid_option, :include_partial, value}}`); `true` keeps the
+  bar still forming, which may change on the next call. Exposed so `DpExchange.Gemini.Fake`
+  refuses with this function.
+  """
+  @spec validate_candle_opts(keyword()) ::
+          :ok | {:error, {:unsupported_option, :limit} | {:invalid_option, atom(), term()}}
+  def validate_candle_opts(opts) do
+    partial = Keyword.get(opts, :include_partial, false)
+
+    cond do
+      Keyword.get(opts, :limit) != nil -> {:error, {:unsupported_option, :limit}}
+      not is_boolean(partial) -> {:error, {:invalid_option, :include_partial, partial}}
+      true -> :ok
     end
   end
 
@@ -728,7 +761,18 @@ defmodule DpExchange.Gemini.Rest do
 
   `opts[:since]` narrows the window — the venue takes it as `timestamp`, with `since_tid`
   as the alternative and **`since_tid` wins where both are given**, which is the venue's own
-  precedence rather than one chosen here. `opts[:limit]` is the venue's `limit_trades`.
+  precedence rather than one chosen here. `opts[:limit]` is the venue's `limit_trades`, at
+  most 500 (the vendor: "Each request will show at most 500 records"); more is
+  `{:error, {:invalid_option, :limit, value}}`.
+
+  **A cursor read that fills its limit may have a hole.** With `:since` or `:since_tid` the
+  venue returns the most recent `limit` trades after the cursor, not the oldest. A reply of
+  exactly `limit` rows (the venue's default of 50 when none is given) cannot be told from a
+  window that dropped the older rows, so it is `{:error, :history_truncated}`: narrow the
+  cursor or raise the limit. UNMEASURED against the live venue beyond the vendor's text.
+
+  Every print's price must be greater than zero; one that is not refuses the reply
+  (`{:error, {:non_positive_price, :price, value}}`).
 
   **This endpoint reaches seven calendar days**, and 90 days with a timestamp; the venue
   states both. A caller asking for more gets what the venue serves, which is why the window
@@ -742,12 +786,17 @@ defmodule DpExchange.Gemini.Rest do
          do: fetch_trades(symbol, opts)
   end
 
+  # `limit_trades`: at most 500 per request, and 50 when none is sent (rest.yaml, List Trades).
+  @trades_limit_max 500
+  @trades_limit_default 50
+
   @doc """
   Whether `opts[:since]`, `opts[:since_tid]` and `opts[:limit]` are values `get_trades/2` can
   send, checked without sending anything.
 
   `:since` is a `DateTime` or a non-negative integer (the venue takes seconds or
-  milliseconds), `:since_tid` a non-negative integer and `:limit` a positive integer; absent
+  milliseconds), `:since_tid` a non-negative integer and `:limit` a positive integer of at
+  most 500 (the vendor's per-request maximum); absent
   or `nil` is fine for all three. Anything else is `{:error, {:invalid_option, key, value}}`.
   These used to reach the venue as whatever the caller wrote (`limit: "ten"` became a 400,
   `since: ~D[...]` raised in `URI.encode_query/1`). A `limit` of `0` is refused because the
@@ -755,11 +804,12 @@ defmodule DpExchange.Gemini.Rest do
   `DpExchange.Gemini.Fake` refuses exactly as this does.
   """
   @spec validate_trade_opts(keyword()) :: :ok | {:error, {:invalid_option, atom(), term()}}
+
   def validate_trade_opts(opts) do
     checks = [
       since: &(is_nil(&1) or is_struct(&1, DateTime) or non_negative?(&1)),
       since_tid: &(is_nil(&1) or non_negative?(&1)),
-      limit: &(is_nil(&1) or (is_integer(&1) and &1 > 0))
+      limit: &(is_nil(&1) or (is_integer(&1) and &1 > 0 and &1 <= @trades_limit_max))
     ]
 
     case Enum.find(checks, fn {key, ok?} -> not ok?.(Keyword.get(opts, key)) end) do
@@ -769,6 +819,18 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp non_negative?(value), do: is_integer(value) and value >= 0
+
+  @doc false
+  # A cursor read (`:since` or `:since_tid`) that fills its limit may have dropped the older
+  # rows, since the venue answers the MOST RECENT `limit` after the cursor. `count` is the
+  # rows the venue answered. Shared with `DpExchange.Gemini.Fake`.
+  @spec check_trade_window(non_neg_integer(), keyword()) :: :ok | {:error, :history_truncated}
+  def check_trade_window(count, opts) do
+    cursor? = Keyword.get(opts, :since) != nil or Keyword.get(opts, :since_tid) != nil
+    limit = Keyword.get(opts, :limit) || @trades_limit_default
+
+    if cursor? and count >= limit, do: {:error, :history_truncated}, else: :ok
+  end
 
   defp fetch_trades(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
@@ -789,7 +851,8 @@ defmodule DpExchange.Gemini.Rest do
     # either.
     with {:ok, rows} <-
            get_body("/v1/trades/#{segment(native)}", Keyword.put(opts, :params, params)),
-         {:ok, rows} <- list(rows) do
+         {:ok, rows} <- list(rows),
+         :ok <- check_trade_window(length(rows), opts) do
       rows
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
         case to_trade(row, canonical) do
@@ -846,7 +909,7 @@ defmodule DpExchange.Gemini.Rest do
 
   defp to_trade(row, symbol) do
     with {:ok, timestamp} <- trade_time(row),
-         {:ok, price} <- required_decimal(Map.get(row, "price"), :price),
+         {:ok, price} <- required_price(Map.get(row, "price"), :price),
          {:ok, quantity} <- required_decimal(Map.get(row, "amount"), :quantity) do
       {:ok,
        %Trade{
@@ -1491,57 +1554,6 @@ defmodule DpExchange.Gemini.Rest do
       else: drop_partial_codepoint(binary_part(text, 0, byte_size(text) - 1), left - 1)
   end
 
-  # The venue's own clock, from the response it served. Absent, this returns an error and
-  # callers that can tolerate it (`header_time_or_nil/1`) turn that into `nil`.
-  # Req hands headers back as a map of lowercase name to a LIST of values; a raw client
-  # hands back a list of two-tuples with the venue's own casing. Both shapes appear here,
-  # and reading only one of them is how a header goes silently missing.
-  defp venue_time(headers) do
-    headers
-    |> Enum.find_value(fn {name, value} ->
-      if String.downcase(to_string(name)) == "date", do: value
-    end)
-    |> first_value()
-    |> parse_http_date()
-  end
-
-  defp first_value([value | _rest]), do: value
-  defp first_value(value), do: value
-
-  # RFC 1123, which is what an HTTP `Date` header is: "Fri, 28 Aug 2026 17:00:01 GMT".
-  # Parsed here rather than taking a date dependency for one fixed format — and parsed
-  # strictly: anything that does not match returns `:missing_venue_timestamp`, because a
-  # header we cannot read is indistinguishable from one that was not sent.
-  defp parse_http_date(value) when is_binary(value) do
-    # The zone is required to be the literal `GMT`, as RFC 7231's IMF-fixdate requires. It
-    # used to be matched and discarded, so a header in any other zone was read as UTC and
-    # could be hours off: a plausible time with the wrong meaning.
-    with [_day, d, mon, y, time, "GMT"] <- String.split(value, [" ", ", "], trim: true),
-         {day, ""} <- Integer.parse(d),
-         {year, ""} <- Integer.parse(y),
-         {:ok, month} <- month_number(mon),
-         [h, m, s] <- String.split(time, ":"),
-         {hour, ""} <- Integer.parse(h),
-         {minute, ""} <- Integer.parse(m),
-         {second, ""} <- Integer.parse(s),
-         {:ok, naive} <- NaiveDateTime.new(year, month, day, hour, minute, second) do
-      {:ok, DateTime.from_naive!(naive, "Etc/UTC")}
-    else
-      _other -> {:error, :missing_venue_timestamp}
-    end
-  end
-
-  defp parse_http_date(_other), do: {:error, :missing_venue_timestamp}
-
-  @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
-
-  defp month_number(name) do
-    case Enum.find_index(@months, &(&1 == name)) do
-      nil -> :error
-      index -> {:ok, index + 1}
-    end
-  end
-
   # This used to derive the book's own time from the newest level's `timestamp` — see this
   # function's callers' @doc for why that was reading a field the vendor's own schema marks
   # a meaningless dummy value. What is left of that function is the shape check it also
@@ -1675,10 +1687,11 @@ defmodule DpExchange.Gemini.Rest do
   # state a volume has not stated one.
   defp row_to_candle([time_ms, open, high, low, close, volume], symbol, timeframe) do
     with {:ok, opened_at} <- candle_time(time_ms),
-         {:ok, open} <- required_decimal(open, :open),
-         {:ok, high} <- required_decimal(high, :high),
-         {:ok, low} <- required_decimal(low, :low),
-         {:ok, close} <- required_decimal(close, :close) do
+         {:ok, open} <- required_price(open, :open),
+         {:ok, high} <- required_price(high, :high),
+         {:ok, low} <- required_price(low, :low),
+         {:ok, close} <- required_price(close, :close),
+         :ok <- aligned_candle(opened_at, time_ms, timeframe) do
       {:ok,
        %Candle{
          symbol: symbol,
@@ -1702,18 +1715,39 @@ defmodule DpExchange.Gemini.Rest do
   # One unreadable row refuses the whole series rather than leaving a gap in it. A candle
   # list with a bar silently missing reads as "the venue published nothing for that minute",
   # which a consumer will treat as a real gap in the market rather than as a decode failure.
+  #
+  # Two bars with the same `opened_at` in one reply refuse it too (family rule MD3): the
+  # vendor's own example repeats a timestamp, and which of the two is the bar is not
+  # something this package can know. UNMEASURED against the live venue.
   defp rows_to_candles(rows, symbol, timeframe) do
     rows
-    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-      case row_to_candle(row, symbol, timeframe) do
-        {:ok, candle} -> {:cont, {:ok, [candle | acc]}}
+    |> Enum.reduce_while({:ok, [], MapSet.new()}, fn row, {:ok, acc, seen} ->
+      with {:ok, candle} <- row_to_candle(row, symbol, timeframe),
+           :ok <- unseen_candle(candle, seen) do
+        {:cont, {:ok, [candle | acc], MapSet.put(seen, candle.opened_at)}}
+      else
         error -> {:halt, error}
       end
     end)
     |> case do
-      {:ok, candles} -> {:ok, Enum.reverse(candles)}
+      {:ok, candles, _seen} -> {:ok, Enum.reverse(candles)}
       error -> error
     end
+  end
+
+  defp unseen_candle(candle, seen) do
+    if MapSet.member?(seen, candle.opened_at),
+      do: {:error, {:duplicate_candle, candle.opened_at}},
+      else: :ok
+  end
+
+  # A bar's time is not provably its open time (the vendor does not say), so one that is not
+  # on a width boundary is refused with the venue's value as given. `Timeframe.aligned?/2`
+  # answers `true` for the widths it has no rule for (`1w`, `1M`), which stay unchecked.
+  defp aligned_candle(opened_at, time, timeframe) do
+    if Timeframe.aligned?(opened_at, timeframe),
+      do: :ok,
+      else: {:error, {:unaligned_candle, time}}
   end
 
   defp candle_time(value) when is_integer(value), do: from_unix_ms(value)
@@ -1749,20 +1783,51 @@ defmodule DpExchange.Gemini.Rest do
     end
   end
 
-  # The one filter `get_historical_prices/4` applies, exposed so `DpExchange.Gemini.Fake`
-  # keeps exactly the rows it would: both bounds inclusive, on `opened_at`.
+  # The one selection `get_historical_prices/4` applies, exposed so `DpExchange.Gemini.Fake`
+  # keeps exactly the rows it would: the range (`within?/2`), then the bar still forming is
+  # dropped unless `opts[:include_partial]` is `true`, then oldest first by `opened_at`.
   @doc false
-  @spec within?(Candle.t(), keyword()) :: boolean()
-  def within?(candle, range) do
+  @spec select_candles([Candle.t()], String.t(), keyword(), keyword()) :: [Candle.t()]
+  def select_candles(candles, timeframe, range, opts) do
+    now = DateTime.utc_now()
+    partial? = Keyword.get(opts, :include_partial, false) == true
+
+    candles
+    |> Enum.filter(&keep_candle?(&1, timeframe, range, now, partial?))
+    |> Enum.sort_by(& &1.opened_at, DateTime)
+  end
+
+  defp keep_candle?(candle, timeframe, range, now, partial?),
+    do: within?(candle, range, now) and (partial? or not in_progress?(candle, timeframe, now))
+
+  # `:start` inclusive, `:end` exclusive, on `opened_at`; an absent `:end` is now.
+  defp within?(candle, range, now) do
     after_start?(candle, Keyword.get(range, :start)) and
-      before_end?(candle, Keyword.get(range, :end))
+      before_end?(candle, Keyword.get(range, :end) || now)
   end
 
   defp after_start?(_candle, nil), do: true
   defp after_start?(candle, start), do: DateTime.compare(candle.opened_at, start) != :lt
 
-  defp before_end?(_candle, nil), do: true
-  defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) != :gt
+  defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) == :lt
+
+  # A bar is in progress while `opened_at + width > now`. `1w` is seven days; `1M` is the
+  # days of the month it opened in (neither has a `Timeframe.seconds/1` width).
+  defp in_progress?(candle, timeframe, now) do
+    DateTime.compare(DateTime.add(candle.opened_at, bar_seconds(candle, timeframe)), now) == :gt
+  end
+
+  defp bar_seconds(candle, timeframe) do
+    case Timeframe.seconds(timeframe) do
+      {:ok, width} -> width
+      :error -> unmodelled_width(candle, timeframe)
+    end
+  end
+
+  defp unmodelled_width(_candle, "1w"), do: 7 * 86_400
+
+  defp unmodelled_width(candle, "1M"),
+    do: Date.days_in_month(DateTime.to_date(candle.opened_at)) * 86_400
 
   # `/v1/pubticker` reports volume keyed by currency code, so the base asset's key has to
   # be recovered from the symbol rather than assumed to be first.
@@ -1839,6 +1904,17 @@ defmodule DpExchange.Gemini.Rest do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
+    end
+  end
+
+  # A traded price (a quote's `last`, a trade's price, a candle's open/high/low/close) of zero
+  # or less is not a price (family rule MD6): it refuses the item or reply rather than being
+  # passed through as a plausible value.
+  defp required_price(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.compare(parsed, 0) == :gt,
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_price, field, value}}
     end
   end
 

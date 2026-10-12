@@ -299,6 +299,61 @@ defmodule DpExchange.Gemini.TradesTest do
       assert query =~ "since_tid=0"
       assert query =~ "timestamp="
     end
+
+    test "a limit above the vendor's 500 is refused before any request (MD4)" do
+      exploding = fn _conn -> raise "must not request" end
+
+      assert {:error, {:invalid_option, :limit, 501}} =
+               Rest.get_trades("BTC-USD", limit: 501, plug: exploding, retry_attempts: 0)
+
+      assert {:ok, []} =
+               Rest.get_trades("BTC-USD", limit: 500, plug: responding([]), retry_attempts: 0)
+    end
+
+    test "a cursor read that fills its limit is history_truncated, not a short window (MD4)" do
+      rows = for tid <- 1..2, do: trade(%{"tid" => tid})
+
+      assert {:error, :history_truncated} =
+               Rest.get_trades("BTC-USD",
+                 since: ~U[2026-08-28 17:00:01Z],
+                 limit: 2,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      # Fewer rows than the limit is the whole window; no cursor is a plain latest-N read.
+      assert {:ok, [_one]} =
+               Rest.get_trades("BTC-USD",
+                 since: ~U[2026-08-28 17:00:01Z],
+                 limit: 3,
+                 plug: responding([hd(rows)]),
+                 retry_attempts: 0
+               )
+
+      assert {:ok, [_one, _two]} =
+               Rest.get_trades("BTC-USD", limit: 2, plug: responding(rows), retry_attempts: 0)
+    end
+
+    test "the venue's default of 50 is the limit when a cursor read names none (MD4)" do
+      rows = for tid <- 1..50, do: trade(%{"tid" => tid})
+
+      assert {:error, :history_truncated} =
+               Rest.get_trades("BTC-USD",
+                 since_tid: 0,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a print priced at zero or less refuses the reply (MD6)" do
+      for price <- ["0", "-3.5"] do
+        assert {:error, {:non_positive_price, :price, ^price}} =
+                 Rest.get_trades("BTC-USD",
+                   plug: responding([trade(%{"price" => price})]),
+                   retry_attempts: 0
+                 )
+      end
+    end
   end
 
   # `get_fx_rate/3` moved to `DpExchange.Gemini.Private` — measured against the vendor's
@@ -368,7 +423,8 @@ defmodule DpExchange.Gemini.TradesTest do
       plug = fn conn ->
         conn
         |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
-        |> Req.Test.json(@bars)
+        # A 5m boundary: 1_787_935_800 is a multiple of 300.
+        |> Req.Test.json([[1_787_935_800_000, 1.0, 2.0, 0.5, 1.5, 3.0]])
       end
 
       assert {:ok, [_candle]} =

@@ -60,7 +60,7 @@ defmodule DpExchange.Gemini.WsDecode do
   @spec to_trade(map(), String.t()) :: {:ok, Trade.t()} | {:error, term()}
   def to_trade(%{"p" => price, "q" => quantity} = frame, symbol) do
     with {:ok, timestamp} <- nanosecond_time(frame["E"]),
-         {:ok, price} <- required_decimal(price, :price),
+         {:ok, price} <- required_price(price, :price),
          {:ok, quantity} <- required_decimal(quantity, :quantity) do
       {:ok,
        %Trade{
@@ -108,9 +108,8 @@ defmodule DpExchange.Gemini.WsDecode do
   away a real bid and a real ask.
 
   It is also the answer this package's own REST arm already gives: `Rest.get_top_of_book/2`
-  reads the time through `header_time_or_nil/1` and emits `nil` when the header is absent or
-  unreadable, rather than refusing. Same venue, same type, two answers — and the transport
-  was deciding which.
+  states `venue_time: nil` (the venue gives that reply no time), rather than refusing. Same
+  venue, same type, two answers — and the transport was deciding which.
 
   **`Trade` and `OrderBookDelta` keep requiring `E`, and that is not an inconsistency**:
   both enforce `:timestamp` in `@enforce_keys` and type it non-nullable, so a print or a
@@ -130,8 +129,8 @@ defmodule DpExchange.Gemini.WsDecode do
   @spec to_top_of_book(map(), String.t(), DateTime.t()) ::
           {:ok, TopOfBook.t()} | {:error, :unexpected_frame_shape}
   def to_top_of_book(frame, symbol, observed_at) do
-    with {:ok, bid} <- stated_decimal(frame["b"]),
-         {:ok, ask} <- stated_decimal(frame["a"]),
+    with {:ok, bid} <- stated_price(frame["b"]),
+         {:ok, ask} <- stated_price(frame["a"]),
          {:ok, bid_size} <- stated_decimal(frame["B"]),
          {:ok, ask_size} <- stated_decimal(frame["A"]) do
       {:ok,
@@ -139,8 +138,9 @@ defmodule DpExchange.Gemini.WsDecode do
          symbol: symbol,
          bid: bid,
          ask: ask,
-         bid_size: bid_size,
-         ask_size: ask_size,
+         # A side priced 0 is no resting order (MD6): its size goes with it.
+         bid_size: if(bid, do: bid_size),
+         ask_size: if(ask, do: ask_size),
          venue_time: venue_time_or_nil(frame["E"]),
          observed_at: observed_at,
          provider: :gemini
@@ -158,9 +158,21 @@ defmodule DpExchange.Gemini.WsDecode do
     end
   end
 
+  # A price of zero means no resting order on that side (`nil`); a negative or unreadable one
+  # refuses the frame (family rule MD6).
+  defp stated_price(value) do
+    with {:ok, parsed} <- stated_decimal(value) do
+      case parsed && Decimal.compare(parsed, 0) do
+        nil -> {:ok, nil}
+        :gt -> {:ok, parsed}
+        :eq -> {:ok, nil}
+        :lt -> {:error, :unexpected_frame_shape}
+      end
+    end
+  end
+
   # Absent and present-but-unreadable answer the same way here, deliberately: both mean this
-  # package cannot state the venue's time, and `nil` says that. The same split
-  # `Rest.header_time_or_nil/1` makes on the REST arm of this type.
+  # package cannot state the venue's time, and `nil` says that.
   defp venue_time_or_nil(raw) do
     case nanosecond_time(raw) do
       {:ok, at} -> at
@@ -232,6 +244,9 @@ defmodule DpExchange.Gemini.WsDecode do
   gone and the local book is already wrong.
 
   `nil` for `last_applied` means nothing has been applied yet, which is never a gap.
+
+  A stale or duplicate frame (`u <= last_applied`) is not a gap either; `stale_depth?/2` says
+  so, and the socket drops such a frame before it asks whether there is a gap.
   """
   @spec depth_gap?(map(), integer() | nil) :: boolean()
   def depth_gap?(_frame, nil), do: false
@@ -244,6 +259,18 @@ defmodule DpExchange.Gemini.WsDecode do
   # `ArithmeticError` here), cannot be checked, and an unverifiable frame is treated as a
   # gap: continuing would apply it blind.
   def depth_gap?(_frame, _last_applied), do: true
+
+  @doc """
+  Whether a depth frame ending at `u` is a replay: `u` is at or before the last applied
+  update id. Applied, it would re-apply old changes and move the sequence backwards, so
+  the socket drops it (family rule MD9). Anything unreadable is not a replay; the caller
+  refuses an unsequenced frame separately.
+  """
+  @spec stale_depth?(term(), term()) :: boolean()
+  def stale_depth?(u, last_applied) when is_integer(u) and is_integer(last_applied),
+    do: u <= last_applied
+
+  def stale_depth?(_u, _last_applied), do: false
 
   @doc """
   An anchor `OrderBook` from the FIRST `{symbol}@depth`/`@depthFast` frame after
@@ -483,6 +510,27 @@ defmodule DpExchange.Gemini.WsDecode do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
+    end
+  end
+
+  # A traded price of zero or less is not a price (family rule MD6).
+  defp required_price(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.compare(parsed, 0) == :gt,
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_price, field, value}}
+    end
+  end
+
+  @doc """
+  The traded price in `value` (the book ticker's last-trade `c`), or `:error` when it is not
+  a readable number greater than zero (family rule MD6).
+  """
+  @spec traded_price(term()) :: {:ok, Decimal.t()} | :error
+  def traded_price(value) do
+    case required_price(value, :price) do
+      {:ok, price} -> {:ok, price}
+      {:error, _reason} -> :error
     end
   end
 

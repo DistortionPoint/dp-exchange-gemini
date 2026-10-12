@@ -3,7 +3,7 @@ defmodule DpExchange.Gemini.FakeTest do
 
   alias DpExchange.Core.Types
   alias DpExchange.Core.Types.{OrderBook, Quote}
-  alias DpExchange.Gemini.Fake
+  alias DpExchange.Gemini.{Fake, Rest}
 
   @credentials %{api_key: "k", api_secret: "s"}
 
@@ -79,14 +79,15 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "a range the bar falls outside of is an empty list, as Rest's own filter would give" do
-      # The fake's bar opens at 2026-08-28 12:00:00Z. A range ending before it keeps nothing.
+      # The fake's daily bar opens at 2026-08-28 00:00:00Z, on its width boundary. `:end` is
+      # exclusive: a range ending AT the bar's open keeps nothing, one second later keeps it.
       assert {:ok, []} =
-               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 11:59:59Z])
+               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 00:00:00Z])
 
       assert {:ok, [bar]} =
-               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 12:00:00Z])
+               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 00:00:01Z])
 
-      assert bar.opened_at == ~U[2026-08-28 12:00:00Z]
+      assert bar.opened_at == ~U[2026-08-28 00:00:00Z]
 
       # A `start` after the bar moves it to the first boundary at or after `start`, and a range
       # that ends before that boundary keeps nothing, exactly as `Rest.within?/2` decides.
@@ -103,7 +104,13 @@ defmodule DpExchange.Gemini.FakeTest do
                )
 
       for bar <- [bar, moved] do
-        assert DpExchange.Gemini.Rest.within?(bar, start: bar.opened_at, end: bar.opened_at)
+        range = [start: bar.opened_at, end: DateTime.add(bar.opened_at, 1, :second)]
+        assert [^bar] = Rest.select_candles([bar], "1m", range, include_partial: true)
+
+        assert [] =
+                 Rest.select_candles([bar], "1m", [start: bar.opened_at, end: bar.opened_at],
+                   include_partial: true
+                 )
       end
     end
 
@@ -181,11 +188,8 @@ defmodule DpExchange.Gemini.FakeTest do
       # The real venue's `bookTicker` `c` carries no trade time (websocket.yaml:1254-1256),
       # so `Socket.deliver_last_trade/3` sends `venue_time: nil` unconditionally on the
       # stream — a different fact from `get_price/2`'s REST `Quote`, whose `venue_time` is
-      # the venue's `Date` header (the fake always supplies one). Reusing `get_price/2`'s struct
-      # unmodified on the stream would answer `venue_time: @at` here and `nil` against the
-      # real venue — "differently capable", which this fake must never be.
-      assert {:ok, %Quote{venue_time: rest_time}} = Fake.get_price("BTC-USD")
-      assert rest_time != nil
+      # also `nil` (the venue states no trade time; the `Date` header is not one).
+      assert {:ok, %Quote{venue_time: nil}} = Fake.get_price("BTC-USD")
 
       :ok = Fake.subscribe(["BTC-USD"], to: self())
       assert_receive {:dp_exchange, :gemini, %Quote{venue_time: nil}}
@@ -453,6 +457,31 @@ defmodule DpExchange.Gemini.FakeTest do
       assert Types.Candle.coherent?(bar)
       assert bar.provider == :gemini
     end
+
+    test "the bar still forming is dropped unless include_partial: true, as the real call" do
+      # A weekly bar opened an hour ago is forming for the next six days, so this cannot
+      # race a bar boundary. `1w` has no `Timeframe.seconds/1` width: the fake opens it at
+      # `start` itself.
+      range = [start: DateTime.add(DateTime.utc_now(), -3_600, :second)]
+
+      assert {:ok, []} = Fake.get_historical_prices("BTC-USD", "1w", range)
+
+      assert {:ok, []} =
+               Fake.get_historical_prices("BTC-USD", "1w", range, include_partial: false)
+
+      assert {:ok, [_forming]} =
+               Fake.get_historical_prices("BTC-USD", "1w", range, include_partial: true)
+
+      assert {:error, {:invalid_option, :include_partial, "yes"}} =
+               Fake.get_historical_prices("BTC-USD", "1w", range, include_partial: "yes")
+    end
+
+    test "a candle limit is refused by the fake exactly as the real call refuses it" do
+      real = Rest.get_historical_prices("BTC-USD", "1m", [], limit: 5, retry_attempts: 0)
+
+      assert real == {:error, {:unsupported_option, :limit}}
+      assert Fake.get_historical_prices("BTC-USD", "1m", [], limit: 5) == real
+    end
   end
 
   describe "bulk cancel" do
@@ -703,7 +732,14 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "an option the real call cannot send is refused by the real check, before the symbol" do
-      for {key, value} <- [limit: 0, limit: "10", since_tid: -1, since_tid: "1", since: "now"] do
+      for {key, value} <- [
+            limit: 0,
+            limit: 501,
+            limit: "10",
+            since_tid: -1,
+            since_tid: "1",
+            since: "now"
+          ] do
         opts = [{key, value}]
         expected = {:error, {:invalid_option, key, value}}
 
@@ -711,6 +747,12 @@ defmodule DpExchange.Gemini.FakeTest do
         assert Fake.get_trades("NOPE-USD", opts) == expected
         assert DpExchange.Gemini.Rest.get_trades("BTC-USD", opts) == expected
       end
+    end
+
+    test "a cursor read that fills its limit is history_truncated, as the real call (MD4)" do
+      assert {:error, :history_truncated} = Fake.get_trades("BTC-USD", since_tid: 0, limit: 1)
+      assert {:ok, [_only]} = Fake.get_trades("BTC-USD", since_tid: 0, limit: 2)
+      assert {:ok, [_only]} = Fake.get_trades("BTC-USD", limit: 1)
     end
 
     test "an unlisted symbol is refused, not answered with someone else's tape" do

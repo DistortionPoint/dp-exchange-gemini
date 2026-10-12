@@ -135,7 +135,8 @@ defmodule DpExchange.Gemini.Fake do
            volume: Decimal.new("183.72"),
            # As the real `get_price/2`: the ticker's 24-hour volume.
            volume_window: :rolling_24h,
-           venue_time: @at,
+           # `nil`, as the real REST quote: the venue states no trade time (MD7).
+           venue_time: nil,
            observed_at: @at,
            provider: :gemini
          }}
@@ -166,7 +167,8 @@ defmodule DpExchange.Gemini.Fake do
            ask: Decimal.add(Decimal.new(price), Decimal.new("0.69")),
            bid_size: nil,
            ask_size: nil,
-           venue_time: @at,
+           # `nil`, as the real REST top of book: no quote time is stated (MD7).
+           venue_time: nil,
            observed_at: @at,
            provider: :gemini
          }}
@@ -177,13 +179,16 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @impl true
-  def get_historical_prices(symbol, timeframe, range \\ [], _opts \\ []) do
-    with :ok <- Rest.validate_symbol(symbol) do
-      fake_candles(canonical(symbol), timeframe, range)
+  def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
+    # The real call's own order: the symbol, then the options it cannot honour (`:limit`,
+    # a non-boolean `:include_partial`), then the width and the range.
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- Rest.validate_candle_opts(opts) do
+      fake_candles(canonical(symbol), timeframe, range, opts)
     end
   end
 
-  defp fake_candles(symbol, timeframe, range) do
+  defp fake_candles(symbol, timeframe, range, opts) do
     with_injection(symbol, fn ->
       # **The width and the range are checked by the real function, and before the symbol.**
       # `Rest.get_historical_prices/4` refuses an unsupported width (`2h`, `4h` and `12h` are
@@ -196,10 +201,11 @@ defmodule DpExchange.Gemini.Fake do
       with :ok <- perpetual_width(symbol, timeframe),
            :ok <- Rest.validate_history(timeframe, range) do
         if symbol in @symbols do
-          # Filtered by `range` with the real call's own `Rest.within?/2`: a range the bar
-          # falls outside of is `{:ok, []}` there and here.
+          # Selected with the real call's own `Rest.select_candles/4`: a range the bar
+          # falls outside of (`:end` exclusive), or a bar still forming without
+          # `include_partial: true`, is `{:ok, []}` there and here.
           bar = candle_for(timeframe, symbol, range)
-          {:ok, Enum.filter([bar], &Rest.within?(&1, range))}
+          {:ok, Rest.select_candles([bar], timeframe, range, opts)}
         else
           # Measured live 2026-09-06: `/v2/candles/{symbol}/{width}` refuses an unknown
           # symbol with a plain-text 400, `Supplied value '#{symbol}' is not a valid
@@ -214,13 +220,13 @@ defmodule DpExchange.Gemini.Fake do
   # The one bar this fake has, opened at its fixed clock. A `:start` after that clock moves
   # the bar to the first bar boundary at or after `:start`, so a range the venue window admits
   # (for the narrow widths that only reaches the present) still holds a bar to return.
-  # `Rest.within?/2` then decides whether the range keeps it, as it does for real rows.
+  # `Rest.select_candles/4` then decides whether the range keeps it, as it does for real rows.
   defp candle_for(timeframe, symbol, range) do
     bar = candle(symbol, timeframe)
 
     case Keyword.get(range, :start) do
       %DateTime{} = start ->
-        if DateTime.compare(@at, start) == :lt,
+        if DateTime.compare(bar.opened_at, start) == :lt,
           do: %{bar | opened_at: bar_at_or_after(start, timeframe)},
           else: bar
 
@@ -339,7 +345,10 @@ defmodule DpExchange.Gemini.Fake do
           do: tape(symbol),
           else: Enum.reject(tape(symbol), & &1.broken)
 
-      {:ok, trades |> after_cursor(opts) |> most_recent(Keyword.get(opts, :limit))}
+      returned = trades |> after_cursor(opts) |> most_recent(Keyword.get(opts, :limit))
+
+      # As the real call: a cursor read that fills its limit may have a hole.
+      with :ok <- Rest.check_trade_window(length(returned), opts), do: {:ok, returned}
     else
       # This used to answer unconditionally for ANY symbol — never refusing at all,
       # which is more capable than `Rest.get_trades/2` rather than less. Measured live
@@ -1169,9 +1178,8 @@ defmodule DpExchange.Gemini.Fake do
 
   defp subscribed_top_of_book, do: Process.get(@top_of_book_key, MapSet.new())
 
-  # `get_price/2`'s `Quote` is the REST shape — `venue_time` is the venue's `Date` header
-  # when it sends a readable one, else `nil` (see `usage-rules.md`'s "Quote.venue_time is the
-  # venue's HTTP Date"); the fake always answers with the header present. The STREAMED
+  # `get_price/2`'s `Quote` is the REST shape — `venue_time` is `nil` (the venue states no
+  # trade time; the HTTP `Date` header is not one). The streamed
   # `Quote` is a different fact from a different transport: it comes off a `bookTicker`
   # frame's `c`, which the vendor's own AsyncAPI documents no trade time for at all (websocket.yaml:1254-1256), so
   # `DpExchange.Gemini.Socket` delivers it with `venue_time: nil` unconditionally — see
@@ -1215,7 +1223,8 @@ defmodule DpExchange.Gemini.Fake do
     %Types.Candle{
       symbol: symbol,
       timeframe: timeframe,
-      opened_at: @at,
+      # On a width boundary, as the real call requires of every bar (`:unaligned_candle`).
+      opened_at: Timeframe.boundary(@at, timeframe),
       open: price,
       high: price,
       low: price,

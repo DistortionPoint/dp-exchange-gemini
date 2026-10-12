@@ -355,8 +355,8 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
       # that minute", which a consumer treats as a real gap in the market rather than as a
       # decode failure.
       body = [
-        [1_757_000_000_000, "1", "2", "1", "1.5", "10"],
-        [1_757_000_060_000, "1", "2", "1", "", "10"]
+        [1_757_000_040_000, "1", "2", "1", "1.5", "10"],
+        [1_757_000_100_000, "1", "2", "1", "", "10"]
       ]
 
       assert {:error, {:invalid_decimal, :close, ""}} =
@@ -367,7 +367,7 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
     end
 
     test "an ordinary row still decodes" do
-      body = [[1_757_000_000_000, "1", "2", "0.5", "1.5", "10"]]
+      body = [[1_757_000_040_000, "1", "2", "0.5", "1.5", "10"]]
 
       assert {:ok, [candle]} =
                Rest.get_historical_prices("BTC-USD", "1m", [],
@@ -375,7 +375,7 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
                  retry_attempts: 0
                )
 
-      assert candle.opened_at == DateTime.from_unix!(1_757_000_000_000, :millisecond)
+      assert candle.opened_at == DateTime.from_unix!(1_757_000_040_000, :millisecond)
       assert Decimal.equal?(candle.open, Decimal.new("1"))
       assert Decimal.equal?(candle.close, Decimal.new("1.5"))
       assert Decimal.equal?(candle.volume, Decimal.new("10"))

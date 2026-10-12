@@ -855,7 +855,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       # told from the whole history, so it is refused rather than answered as complete.
       rows = for n <- 1..50, do: %{"eid" => n, "type" => "Deposit"}
 
-      assert {:error, {:history_truncated, 50}} =
+      assert {:error, :history_truncated} =
                Private.get_transfers(@credentials,
                  plug: capturing(rows, self()),
                  retry_attempts: 0

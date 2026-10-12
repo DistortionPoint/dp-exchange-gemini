@@ -145,8 +145,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert Decimal.equal?(quote_struct.volume, Decimal.new("2210.505328803"))
       assert quote_struct.symbol == "BTC-USD"
       assert quote_struct.provider == :gemini
-      # Never the payload's volume.timestamp (24h-window stamp) — the Date header.
-      assert quote_struct.venue_time == ~U[2026-08-28 17:00:01Z]
+      # Neither the payload's volume.timestamp (24h-window stamp) nor the Date header (MD7).
+      assert quote_struct.venue_time == nil
     end
   end
 
@@ -162,7 +162,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       # The payload carries no sizes.
       assert top.bid_size == nil
       assert top.ask_size == nil
-      assert top.venue_time == ~U[2026-08-28 17:00:01Z]
+      assert top.venue_time == nil
     end
   end
 
@@ -358,16 +358,33 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
     test "the vendor's own 2-bar spot example decodes [time, o, h, l, c, v] in that order" do
       body = fixture!("rest/public/candles.json")
 
-      assert {:ok, candles} =
+      # Both bars in the vendor's own example carry the same timestamp (1559755800000), and
+      # that instant is on a half-hour but not an hour. Read as it stands, the example is a
+      # reply this package refuses (MD3, both UNMEASURED against the live venue): a
+      # repeated time, and an unaligned one for `1h`.
+      assert {:error, {:duplicate_candle, _at}} =
+               Rest.get_historical_prices("BTC-USD", "30m", [],
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:unaligned_candle, 1_559_755_800_000}} =
                Rest.get_historical_prices("BTC-USD", "1h", [],
                  plug: responding(body),
                  retry_attempts: 0
                )
 
+      # With the second bar moved one width on, the field order decodes as documented.
+      [first_row, [_time | second_rest]] = body
+      body = [first_row, [1_559_757_600_000 | second_rest]]
+
+      assert {:ok, candles} =
+               Rest.get_historical_prices("BTC-USD", "30m", [],
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
       assert length(candles) == 2
-      # Both bars in the vendor's own example carry the same opened_at (1559755800000);
-      # `get_historical_prices/4`'s sort by opened_at is stable, so the vendor's own row
-      # order survives — asserted directly rather than re-sorted by another field.
       [first, second] = candles
 
       assert first.opened_at == DateTime.from_unix!(1_559_755_800_000, :millisecond)
@@ -379,7 +396,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert first.symbol == "BTC-USD"
       assert first.provider == :gemini
 
-      assert second.opened_at == DateTime.from_unix!(1_559_755_800_000, :millisecond)
+      assert second.opened_at == DateTime.from_unix!(1_559_757_600_000, :millisecond)
       assert Decimal.equal?(second.high, Decimal.from_float(7829.46))
       assert Decimal.equal?(second.close, Decimal.from_float(7817.28))
       assert Decimal.equal?(second.volume, Decimal.from_float(43.4228281059))

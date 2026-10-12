@@ -109,7 +109,15 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
 
     test "a key the builder does not read is refused, not dropped" do
       # `post_only: true` used to place a plain exchange limit order.
-      for {key, value} <- [post_only: true, account: "sub", margin_order: true, extra: 1] do
+      # A nil value is refused too (DV1): the key is the claim, not the value.
+      for {key, value} <- [
+            post_only: true,
+            account: "sub",
+            margin_order: true,
+            extra: 1,
+            post_only: nil,
+            extra: nil
+          ] do
         request = Map.put(@request, key, value)
         expected = {:error, {:unsupported_order_field, key}}
 
@@ -307,10 +315,11 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
       assert {:refused, :invalid_symbol} =
                place(@request, answering(400, ~s({"result":"error","reason":"InvalidSymbol"})))
 
-      assert {:error, {:exchange_error, :gemini, message}} =
-               place(@request, answering(422, ~s({"reason":"x"})))
-
-      assert message =~ "HTTP 422"
+      # Any other 4xx answered to the one attempt is a refusal too (DV6): 405, 409, 415, 422.
+      for status <- [405, 409, 415, 422] do
+        assert {:refused, {:unknown_reason, "x"}} =
+                 place(@request, answering(status, ~s({"reason":"x"})))
+      end
 
       assert {:error, {:missing_credentials, :gemini}} =
                Private.place_order(%{}, @request, opts(exploding()))

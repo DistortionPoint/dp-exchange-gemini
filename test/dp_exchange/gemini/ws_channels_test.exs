@@ -186,8 +186,7 @@ defmodule DpExchange.Gemini.WsChannelsTest do
     end
 
     test "an unreadable venue timestamp is nil rather than the whole book being dropped" do
-      # The same split `Rest.header_time_or_nil/1` already makes on this venue's REST arm:
-      # a time this package cannot read is a time it does not state, and says so.
+      # A time this package cannot read is a time it does not state, and says so.
       assert {:ok, top} =
                WsDecode.to_top_of_book(Map.put(@captured, "E", "soon"), "BTC-USD", @observed)
 

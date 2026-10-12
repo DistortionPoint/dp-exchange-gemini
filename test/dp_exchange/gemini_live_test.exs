@@ -124,13 +124,12 @@ defmodule DpExchange.GeminiLiveTest do
       refute "retry-after" in names
     end
 
-    test "a Date header IS published, which is the only venue clock a quote can use" do
-      # If this stops being true, `get_price/2` starts failing closed rather than
-      # returning quotes with our clock on them — which is the intended behaviour, but a
-      # consumer would want to know why.
+    test "the REST quote states no trade time, so venue_time is nil (MD7)" do
+      # The `Date` header is published but is when the reply was served, not when the last
+      # trade happened; it is not used. If the ticker ever carries a trade time, revisit.
       assert {:ok, %Types.Quote{} = quote_struct} = Gemini.get_price("BTC-USD", limiter: nil)
 
-      assert DateTime.diff(DateTime.utc_now(), quote_struct.venue_time, :second) < 120
+      assert quote_struct.venue_time == nil
     end
   end
 

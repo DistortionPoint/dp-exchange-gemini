@@ -182,7 +182,7 @@ defmodule DpExchange.Gemini.AdminTest do
       # larger one, and the reply does not say which.
       full = for n <- 1..500, do: %{"account" => "acct-#{n}"}
 
-      assert {:error, {:history_truncated, 500}} =
+      assert {:error, :history_truncated} =
                Private.list_accounts(@credentials, plug: responding(full), retry_attempts: 0)
 
       # Taking one page on purpose is allowed, and 499 rows is provably complete.

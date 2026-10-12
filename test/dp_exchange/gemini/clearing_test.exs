@@ -326,7 +326,7 @@ defmodule DpExchange.Gemini.ClearingTest do
       me = self()
       rows = for n <- 1..300, do: %{"clearingId" => "c-#{n}"}
 
-      assert {:error, {:history_truncated, 300}} =
+      assert {:error, :history_truncated} =
                Private.list_clearing_trades(@credentials,
                  plug: capturing(%{"results" => rows}, me),
                  retry_attempts: 0

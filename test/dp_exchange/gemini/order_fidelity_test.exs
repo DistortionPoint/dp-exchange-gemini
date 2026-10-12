@@ -82,7 +82,7 @@ defmodule DpExchange.Gemini.OrderFidelityTest do
   test "a full history page with no :limit is refused as possibly truncated" do
     rows = for n <- 1..500, do: %{@order | "order_id" => Integer.to_string(n)}
 
-    assert {:error, {:history_truncated, 500}} =
+    assert {:error, :history_truncated} =
              Private.get_orders(@credentials,
                history: true,
                plug: responding(rows),
