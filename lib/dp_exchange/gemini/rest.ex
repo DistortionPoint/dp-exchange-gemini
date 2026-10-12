@@ -49,7 +49,7 @@ defmodule DpExchange.Gemini.Rest do
   exactly the kind of guess this family refuses — `1w` and `1M` are simply not in
   `@window_bars`, and `range_within_window/2`'s existing fallback for an unmapped width
   applies: no pre-flight refusal, and the real rows returned are still filtered against
-  `range` client-side by `within?/2` on their own real `opened_at`, same as every width. A
+  `range` client-side by `within?/4` on their own real `opened_at`, same as every width. A
   `:start` older than the venue's actual window on one of these two returns an empty list
   rather than `{:error, {:range_unavailable, …}}` — a real gap from the other seven widths,
   disclosed here rather than hidden behind a fabricated window size.
@@ -72,7 +72,9 @@ defmodule DpExchange.Gemini.Rest do
     * The bar still forming (`opened_at + width > now`) is dropped unless the caller passes
       `include_partial: true`; with it the last bar is returned as the venue sent it and may
       still change.
-    * `:start` is inclusive and `:end` exclusive, on `opened_at`; an absent `:end` is now.
+    * `:start` is inclusive and `:end` exclusive, on `opened_at`; an absent `:end` is now,
+      except with `include_partial: true`, which applies no upper bound (a bar just opened
+      must not vanish because this clock runs behind the venue's).
     * `opened_at` must be aligned to the bar width. The venue does not state whether its
       timestamp is a bar's open or close, so a bar not aligned (`Timeframe.aligned?/2`)
       refuses the whole reply `{:error, {:unaligned_candle, time}}`, and two bars with the
@@ -308,7 +310,8 @@ defmodule DpExchange.Gemini.Rest do
 
   `range` accepts `:start` (inclusive) and `:end` (exclusive) as `DateTime`s, on `opened_at`.
   Both are optional; with neither, the venue's whole fixed window up to now is returned. The
-  bar still forming is not returned unless `opts[:include_partial]` is `true`.
+  bar still forming is not returned unless `opts[:include_partial]` is `true`, and with it an
+  absent `:end` applies no upper bound at all (an explicit `:end` is still exclusive).
 
   Refuses rather than truncating:
 
@@ -316,7 +319,6 @@ defmodule DpExchange.Gemini.Rest do
     * a bar not aligned to its width → `{:error, {:unaligned_candle, time}}` (unmeasured)
     * two bars with one timestamp → `{:error, {:duplicate_candle, opened_at}}` (unmeasured)
     * an open, high, low or close <= 0 → `{:error, {:non_positive_price, field, value}}`
-
     * an unknown width → `{:error, {:unsupported_timeframe, width}}`
     * a `:start` older than the window can reach → `{:error, {:range_unavailable, …}}`
   """
@@ -1783,7 +1785,7 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   # The one selection `get_historical_prices/4` applies, exposed so `DpExchange.Gemini.Fake`
-  # keeps exactly the rows it would: the range (`within?/2`), then the bar still forming is
+  # keeps exactly the rows it would: the range (`within?/4`), then the bar still forming is
   # dropped unless `opts[:include_partial]` is `true`, then oldest first by `opened_at`.
   @doc false
   @spec select_candles([Candle.t()], String.t(), keyword(), keyword()) :: [Candle.t()]

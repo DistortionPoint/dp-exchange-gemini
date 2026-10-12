@@ -1,4 +1,15 @@
 
+# Using `dp_exchange_gemini`
+
+> **EXPERIMENTAL.** Not run in production. Pin three-part. Maturity is per endpoint —
+> read `capabilities/0`, not this banner.
+
+Everything general is in
+[`dp_exchange_core`'s usage rules](https://hexdocs.pm/dp_exchange_core/usage-rules.html).
+This file is only what is **specific to Gemini**.
+
+## Times on quotes and books: what is `nil`, and what is sorted
+
 **REST `Quote.venue_time` and `TopOfBook.venue_time` are always `nil` (BREAKING, tick R).**
 They used to be the HTTP `Date` response header. That is when the reply was served, not when
 the last trade happened or the quote was true, so it was a different event's time (family
@@ -60,21 +71,12 @@ Two consequences:
   passed through in the venue's own order, because its entries are changes to apply in
   sequence and re-ordering them would invent an order the venue never sent. The struct name
   tells you which one you are holding.
-# Using `dp_exchange_gemini`
-
-> **EXPERIMENTAL.** Not run in production. Pin three-part. Maturity is per endpoint —
-> read `capabilities/0`, not this banner.
-
-Everything general is in
-[`dp_exchange_core`'s usage rules](https://hexdocs.pm/dp_exchange_core/usage-rules.html).
-This file is only what is **specific to Gemini**.
-
-
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
-`Core.Types.TopOfBook` has always had. Requires `dp_exchange_core ~> 0.2.1`.
+`Core.Types.TopOfBook` has always had. `dp_exchange_core 0.2.1` introduced the fields; this
+package now requires `~> 0.3.65`.
 
 ```elixir
 # before
@@ -125,8 +127,8 @@ Running two — two credentials, two scopes — needs distinct names:
 
 ## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
 
-Two things this package's socket does that the `websockex` library it is built on does not.
-Both come from a private, patched fork of websockex 0.5.1's process loop,
+Three things this package's socket does that the `websockex` library it is built on does not.
+All come from a private, patched fork of websockex 0.5.1's process loop,
 ``DpExchange.Gemini.Vendor.WebSockex``, carried from `dp_exchange_webull` on 2026-09-27.
 
 - **The opening handshake has a deadline**: `socket_connect_timeout` plus
@@ -160,7 +162,7 @@ the `:websocket_url` proxy seam, does no TLS handshake and does not read the tru
 mean "not given" and keep verification; a list that does not mention `:verify` has
 `verify: :verify_peer` added beneath your keys (your `:cacerts`/`:cacertfile` replaces the OS
 trust store); only an explicit `verify: :verify_none` turns it off. The option is forwarded
-by `Feed`, which `Feed` forwards to every socket it dials (it
+to every socket `Feed` dials (it
 did not before; the option was dropped). `Feed` shows that option as `:redacted` in a crash
 report and in `:sys.get_status/1`, because a `:cacerts` list, a `:key` or a `:password` lives
 there; `:sys.get_state/1` still returns it.
@@ -315,16 +317,8 @@ that carries a last trade, does not — see the correction below the `venue_time
 the top of this file: the vendor documents no trade time for it, so it is `nil`
 unconditionally, on this transport as much as any other.
 
-The streamed last-trade `Quote` is `nil` every time, because the vendor documents no trade
-time for it.
-
-`get_order_book/2`'s `venue_time` is always `nil` (see the top of this file). On the
-**stream**, a partial-depth
-snapshot (`@depth5`/`@depth10`/`@depth20`) carries `venue_time: nil`, because the vendor's
-own AsyncAPI requires only `[lastUpdateId, bids, asks]` for `OrderBookSnapshot` where
-`BookTicker` requires an `E`. Deltas and `bookTicker`'s own `TopOfBook` do carry a real
-nanosecond event time; the `Quote` a `bookTicker` frame's last trade produces does not — see
-above.
+`get_order_book/2`'s `venue_time` and the stream's partial-depth snapshot are covered at the
+top of this file.
 
 ## Numbers keep every digit, on public reads as well as private ones
 
@@ -566,8 +560,8 @@ never obtains, stores, refreshes, or infers one, and it has no default scheme.
 **Some writes are sent once and are not retried, on purpose.** `Core.HttpClient` retries a
 timeout or a 5xx three times by default, which is safe only where the venue can tell the
 second attempt from the first. Orders, conversions and staking are sent once;
-`add_payment_method/3` and `create_account/3` are too, because a duplicate bank account or
-subaccount is an artifact you would have to clean up by hand. `withdraw/6` **is** retried,
+`add_payment_method/2` and `create_account/1` are too, because a duplicate bank account or
+subaccount is an artifact you would have to clean up by hand. `withdraw/5` **is** retried,
 because it always sends a `clientTransferId` — generated if you give none — and the venue
 answers a repeat with the original transfer. An accepted withdrawal is always `{:ok, _}` with an
 id: the venue's `withdrawalId` where it sends a readable one, otherwise the `clientTransferId`
@@ -741,7 +735,7 @@ perpetuals surface has its own endpoints (`get_positions/1`, `get_contract_stats
 
 ## `:since` narrows a window as a `DateTime`, everywhere it appears — except the two staking reads
 
-`get_orders/2` (with `history: true`), `get_trade_history/2`, `list_custody_fees/1` and
+`get_orders/2` (with `history: true`), `get_trade_history/2`, `list_custody_fees/2` and
 `list_accounts/1` accept `since: ~U[...]` and convert it to the venue's own unit
 (milliseconds) before it goes on the wire — pass a `DateTime`, not a raw integer.
 `get_trade_history/2`'s `:limit` and `:since` used to reach the venue as `to_string(value)`
@@ -749,7 +743,7 @@ instead — a `DateTime` became a string like `"2026-08-28 17:00:01Z"`, a shape
 `/v1/mytrades`'s `timestamp` field does not parse, so the filter silently failed to narrow
 anything. Fixed to match every other `:since`-accepting call in this module.
 
-**`get_staking_history/2` and `get_staking_rewards/1` are the exception, not another
+**`get_staking_history/1` and `get_staking_rewards/1` are the exception, not another
 member of the rule above.** This section used to list them alongside the millisecond
 converters; measured against the vendor's own OpenAPI spec (2026-09-29), both endpoints
 document `since`/`until` as ISO datetime with timezone (`rest.yaml:6729,6733` and `:6896`;
@@ -760,7 +754,7 @@ it in the request schema's `required` fields (`rest.yaml:6885`) — and this pac
 its absence locally as `{:error, {:missing_option, :since}}` rather than send the request
 without it.
 
-`get_staking_history/2`'s reply is nested, not a flat list of rows: an array of
+`get_staking_history/1`'s reply is nested, not a flat list of rows: an array of
 `{providerId, transactions: [...]}` (`rest.yaml:6770-6794`), one entry per provider the
 account has staked with. `provider_id` on each `StakingTransaction` this call returns comes
 from the parent entry; the transaction itself carries none.
@@ -770,9 +764,9 @@ from the parent entry; the transaction itself carries none.
 see `Private.get_transfers/2`'s moduledoc. The venue pages it at 10 by default and 50 at
 most, with no cursor, so with no `limit_transfers:` this asks for 50 and a full page is
 `{:error, :history_truncated}` (exactly that, no payload; BREAKING, it carried the page size)
-— narrow with `timestamp:`, or pass `limit_transfers:` to take one page on purpose. `list_custody_fees/1` follows the same rule with `limit:`.
+— narrow with `timestamp:`, or pass `limit_transfers:` to take one page on purpose. `list_custody_fees/2` follows the same rule with `limit:`.
 
-`get_transactions/1` is the other. `POST /v1/transactions` names its window parameter
+`get_transactions/2` is the other. `POST /v1/transactions` names its window parameter
 `timestamp_nanos` and takes **nanoseconds**, not the millisecond unit every other
 `:since`-accepting call above converts to. Without `opts[:limit]` this call also follows
 the venue's own `continuationToken` across pages itself, at the documented maximum page of
@@ -784,7 +778,7 @@ page of at most that many rows.
 **Every one of these reads checks its paging and window options before anything is signed.**
 `:limit` (`:limit_transfers` on `get_transfers/2`) is a whole number from 1 to the vendor's
 maximum for that endpoint — 500 for closed orders, trade history, accounts and staking
-history, 50 for transfers and custody fees, 300 for clearing trades and `get_transactions/1` —
+history, 50 for transfers and custody fees, 300 for clearing trades and `get_transactions/2` —
 and a window bound is a `DateTime`, a non-negative integer or a string of digits (the staking
 windows: a `DateTime` or an ISO 8601 string). Anything else — `limit: 0`, `limit: "ten"`,
 `since: ~D[2026-01-01]` — is `{:error, {:invalid_option, key, value}}`. A larger limit is
@@ -1129,8 +1123,8 @@ Keep what came back, not what you sent.
 with nothing to say it was; there is no cursor to follow. With no `:limit`, a page that full is
 `{:error, :history_truncated}` rather than a list that reads as complete; pass `:limit`
 to take one page on purpose. Every history read that can fill its page answers this one
-shape (`get_orders/2`, `get_trade_history/2`, `get_transfers/2`, `list_custody_fees/1`,
-`get_staking_history/2`, `funding_payment_report/2`, `list_clearing_trades/2`).
+shape (`get_orders/2`, `get_trade_history/2`, `get_transfers/2`, `list_custody_fees/2`,
+`get_staking_history/1`, `funding_payment_report/1`, `list_clearing_trades/1`).
 
 `get_roles/1` answers with three booleans rather than one role, because `Fund Manager` and
 `Trader` combine and `Auditor` combines with nothing.
@@ -1202,11 +1196,11 @@ have **received and acted on** the request before the connection broke. A retrie
 second order, and you see one call and one answer either way.
 
 So order-creating and order-changing calls here are sent once, and so are
-`transfer_internal/5`, `create_clearing_order/3` and `create_broker_clearing_order/3`.
+`transfer_internal/4`, `create_clearing_order/2` and `create_broker_clearing_order/2`.
 Every attempt is signed with a fresh nonce, so a retry is a new request under API-key auth
 as well as under OAuth (which has no nonce): it takes effect again, or is refused because the
 first already did. Before 0.2.54 those three were retried.
-`commit_conversion/2`, `confirm_clearing_order/4`, `cancel_clearing_order/3`,
+`commit_conversion/2`, `confirm_clearing_order/3`, `cancel_clearing_order/2`,
 `rename_account/3` and `revoke_access_token/1` are sent once too: a repeat of any of them is
 answered as a refusal ("quote spent", "already confirmed", "no such account", 401) for
 something that worked. A transport failure comes back
@@ -1221,8 +1215,8 @@ idempotency key the venue honours.
 ## A write that may have been acted on: `{:error, {:write_unconfirmed, key, reason}}`
 
 Applies to every state-changing call that is not an order: `withdraw/5`, `transfer_internal/4`,
-`convert/4`, `commit_conversion/2`, `stake/3`, `unstake/3`, `create_clearing_order/3`,
-`create_broker_clearing_order/3`, `confirm_clearing_order/4`, `cancel_clearing_order/3`,
+`convert/4`, `commit_conversion/2`, `stake/3`, `unstake/3`, `create_clearing_order/2`,
+`create_broker_clearing_order/2`, `confirm_clearing_order/3`, `cancel_clearing_order/2`,
 `add_payment_method/2`, `request_approved_address/4`, `remove_approved_address/3`,
 `cancel_all_orders/2` and `revoke_access_token/1`.
 
@@ -1237,7 +1231,7 @@ handle to reconcile with:
 | `withdraw/5` | the `clientTransferId` sent, **generated ones included**; re-send with `client_transfer_id: key` and the venue deduplicates |
 | `transfer_internal/4` | the `clientTransferId` sent (generated or yours); the venue does not promise to deduplicate it, so look the transfer up rather than re-sending |
 | `commit_conversion/2` | the quote id |
-| `confirm_clearing_order/4`, `cancel_clearing_order/3` | the clearing id; read it with `get_clearing_order/3` and trust `is_confirmed` |
+| `confirm_clearing_order/3`, `cancel_clearing_order/2` | the clearing id; read it with `get_clearing_order/2` and trust `is_confirmed` |
 | `stake/3`, `unstake/3` | the `transactionId` when the reply carried one, else `nil` |
 | every other call above | `nil` (the venue gives it no key): look at the account first |
 
@@ -1399,16 +1393,28 @@ single `:degraded` notice (`details.reason: "depth sequence gap"`, with the `sym
 **Act on that notice**: discard your local book for that symbol. Waiting for a repeat leaves
 you applying diffs to a book that is wrong from the gap onward, with every price real.
 
-**The socket resubscribes the symbol itself (BREAKING, tick R).** When it knows which depth
-channel(s) (`:depth` / `:depth_fast`, tracked per `{symbol, channel}`) the symbol was
-subscribed on (recorded by `Socket.subscribe/3`), it unsubscribes, waits for the venue's
-answer to that unsubscribe, subscribes again, and takes the **first frame after the subscribe
-as the fresh snapshot**, whether it arrives before or after the subscribe's own answer. It
-does NOT deliver the gapped frame and drops every other frame for that symbol, without more
-notices, until that snapshot (on a connection started with `:depth`/`:depth_fast` in
-`:channels`, a full `OrderBook`; otherwise diffs resume from the new sequence). So the
-snapshot is also your signal that the book is whole again. Where the channel is not known,
-the notice is all you get and the gapped frame is delivered as before.
+**A symbol is on one diff channel at a time.** `Socket.subscribe/3` refuses `:depth` for a
+symbol that is on `:depth_fast`, and the reverse, with `{:error, {:conflicting_depth_channel,
+symbol}}`: the two streams' frames carry nothing that tells them apart. Unsubscribe first to
+switch.
+
+**On a connection started with `:depth`/`:depth_fast` in `:channels` (the `snapshot`
+parameter), the socket resubscribes the symbol itself (BREAKING, tick R).** It knows which
+channel the symbol is on (recorded by `Socket.subscribe/3`), unsubscribes, waits for the
+venue's answer to that unsubscribe, subscribes again, and takes the **first frame after the
+subscribe as the fresh snapshot** (a full `OrderBook`), whether it arrives before or after the
+subscribe's own answer. It does NOT deliver the gapped frame and drops every other frame for
+that symbol, without more notices, until that snapshot. So the snapshot is also your signal
+that the book is whole again. Where no channel is recorded (a bare socket state), the notice
+is all you get and the gapped frame is delivered as before.
+
+**On a connection started without that parameter, a gap stops the symbol instead.** The
+parameter is per connection (it cannot be asked for per subscribe), so a resubscribe there
+brings diffs only and no book can be rebuilt from it. The socket raises a `:coverage_change`
+notice (`details.delivering: false`, `details.reason: "depth book cannot be rebuilt on a
+connection without the snapshot parameter"`) and drops every frame for that symbol until you
+subscribe it again, when you rebuild from `get_order_book/2` or move to a connection started
+with the depth channels in `:channels`. Unsubscribing or a reconnect clears the stop.
 
 - **At most one resync per `{symbol, channel}` per 5 seconds.** A gap inside that window waits
   out the rest of it; the symbol delivers nothing meanwhile.
@@ -1422,8 +1428,14 @@ the notice is all you get and the gapped frame is delivered as before.
   last applied) is a counter restart: `"depth sequence restart"`, resynced like a gap. A
   duplicate or a frame only just behind (`u` at or before the last applied, within a span)
   is dropped silently, never applied.
-- **UNMEASURED:** that the venue answers an unsubscribe (id 3) and writes no frame of the old
-  subscription after that answer. If it does not answer, only the retries recover the book.
+- **Answers are matched by id.** Every subscribe and unsubscribe this socket sends carries
+  an id of its own and its answer is matched by that id, so a late answer of one request is
+  never taken for another's.
+- **UNMEASURED:** that the venue answers an unsubscribe and writes no frame of the old
+  subscription after that answer, and that it echoes an integer id other than 1 and 2 (the
+  spec says it echoes the client's id). If it does not answer the unsubscribe, only the
+  retries recover the book; if it did not echo the subscribe's id, the 15s unanswered-subscribe
+  deadline would close the connection, loudly.
 
 A `depthUpdate` whose `u` is missing or not an integer is the exception: its sequence cannot
 be stated, so the socket does **not** advance past it. It raises `"undecodable depth update"`

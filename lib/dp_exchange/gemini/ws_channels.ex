@@ -59,7 +59,7 @@ defmodule DpExchange.Gemini.WsChannels do
     # as absent from the venue.
     #
     # Nothing reaches this from the facade: `capabilities/0` declares
-    # `streamable: [:quotes, :top_of_book]`, and no other module in `lib/` names this
+    # `streamable: [:quotes, :top_of_book, :trades]`, and no other module in `lib/` names this
     # channel. So the honest state is a labelled row, not a silent one and not a deletion.
     {:settlements_account, "settlements@account", true},
     {:request_for_quote, "requestForQuote", false},

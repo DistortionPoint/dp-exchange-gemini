@@ -251,17 +251,19 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert :sys.get_state(socket_pid).depth_streams ==
              MapSet.new([{"BTC-USD", :depth}, {"ETH-USD", :depth_fast}])
 
-    # The same symbol on the other diff channel is a second key, not an overwrite.
-    assert :ok = Socket.subscribe(socket_pid, ["BTC-USD"], :depth_fast)
+    # The same symbol on the other diff channel is refused: their frames cannot be told apart.
+    assert Socket.subscribe(socket_pid, ["BTC-USD"], :depth_fast) ==
+             {:error, {:conflicting_depth_channel, "BTC-USD"}}
 
     assert :sys.get_state(socket_pid).depth_streams ==
-             MapSet.new([
-               {"BTC-USD", :depth},
-               {"BTC-USD", :depth_fast},
-               {"ETH-USD", :depth_fast}
-             ])
+             MapSet.new([{"BTC-USD", :depth}, {"ETH-USD", :depth_fast}])
 
     assert :ok = Socket.unsubscribe(socket_pid, ["BTC-USD"], :depth)
+
+    assert :sys.get_state(socket_pid).depth_streams == MapSet.new([{"ETH-USD", :depth_fast}])
+
+    # Freed, the symbol may take the other channel.
+    assert :ok = Socket.subscribe(socket_pid, ["BTC-USD"], :depth_fast)
 
     assert :sys.get_state(socket_pid).depth_streams ==
              MapSet.new([{"BTC-USD", :depth_fast}, {"ETH-USD", :depth_fast}])

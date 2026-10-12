@@ -15,7 +15,9 @@ defmodule DpExchange.Gemini.Socket do
 
       {"method":"subscribe","params":["btcusd@bookTicker","ethusd@bookTicker"],"id":1}
 
-  and the venue acknowledges with `{"id":1,"status":200}`.
+  and the venue acknowledges with `{"id":1,"status":200}`, echoing the client-chosen id
+  (`CorrelationId` in the spec). Every request this socket sends carries an id of its own
+  (`1` above is only an example), and an answer is matched to its request by that id.
 
   This socket always carries **`@bookTicker`**. That single stream carries best bid, best
   ask and — where the book has traded — the last trade price, in one message per change.
@@ -40,10 +42,12 @@ defmodule DpExchange.Gemini.Socket do
   moduledoc of the file that is not ported records why it existed — a mid computed from a
   single delta rather than the maintained book, which is the incident that created it.
 
-  A caller wanting depth calls `get_order_book/2`, a REST snapshot that carries no venue time
-  (its per-level `timestamp` is a documented dummy value, rest.yaml:8065) and no `u`, so it cannot anchor a
-  `@depth`/`@depthFast` diff stream: the vendor's own sequence check (`WsDecode.depth_gap?/2`)
-  compares one `u` against the next frame's `U`, and a REST call has neither.
+  A caller wanting a depth snapshot calls `get_order_book/2`, a REST snapshot that carries no
+  venue time (its per-level `timestamp` is a documented dummy value, rest.yaml:8065) and no
+  `u`, so it cannot anchor a `@depth`/`@depthFast` diff stream: the vendor's own sequence
+  check (`WsDecode.depth_gap?/2`) compares one `u` against the next frame's `U`, and a REST
+  call has neither. The diff streams are available through `subscribe/3` (below); they are
+  not carried by default, and `Feed` never subscribes them.
 
   ## A depth diff stream needs its own anchor
 
@@ -65,7 +69,12 @@ defmodule DpExchange.Gemini.Socket do
   A connection started WITHOUT `:depth`/`:depth_fast` in `:channels` never sets the
   parameter, and every `depthUpdate` on it is delivered as a diff — the behaviour this socket
   had before the parameter existed, and still the right one for a connection the venue was
-  never told to anchor.
+  never told to anchor. Such a connection cannot REBUILD a book after a gap, which is why a
+  gap on it stops the symbol instead of resynchronising it (next section).
+
+  **A symbol is on one diff channel at a time.** `@depth` and `@depth@100ms` frames cannot be
+  told apart, so `subscribe/3` refuses `:depth` for a symbol on `:depth_fast` (and the
+  reverse) with `{:error, {:conflicting_depth_channel, symbol}}`. Unsubscribe first to switch.
 
   ## A partial-depth snapshot cannot name its own symbol
 
@@ -88,8 +97,19 @@ defmodule DpExchange.Gemini.Socket do
   first notice is the instruction to discard that symbol's book. A replay (`u` at or just
   behind the last applied) is dropped without one.
 
-  This socket then resynchronises the symbol itself, per `{symbol, channel}` (`depth_streams`,
-  recorded by `subscribe/3`): unsubscribe, wait for that answer, subscribe, and take the first
+  **On a connection started without the `snapshot` parameter, a gap stops the symbol.** The
+  parameter is per connection (websocket.yaml:1264), so a resubscribe there brings diffs
+  only and no book can be rebuilt from it. The symbol is marked stopped, announced by a
+  `:coverage_change` notice (`details.delivering: false`, reason "depth book cannot be rebuilt
+  on a connection without the snapshot parameter"), and every frame for it is dropped until
+  the caller subscribes it again and rebuilds its book (`get_order_book/2`, or a connection
+  started with `:depth`/`:depth_fast` in `:channels`). Unsubscribing, or a reconnect, also
+  clears the mark. A frame fed to a state that records no depth subscription is delivered, as
+  before, after the notice.
+
+  On a `snapshot` connection this socket resynchronises the symbol itself, per
+  `{symbol, channel}` (`depth_streams`, recorded by `subscribe/3`): unsubscribe, wait for
+  that unsubscribe's answer (matched by its own id), subscribe, and take the first
   frame after it as the snapshot. Every frame for the symbol is dropped meanwhile, so the
   consumer receives nothing for it until the snapshot, which is the signal that the book is
   whole again. At most one resync per key per 5s; a gap inside that window waits out the rest
@@ -136,11 +156,11 @@ defmodule DpExchange.Gemini.Socket do
   detection would not have restored data that night, but the package reported a healthy
   link the whole time, which is the half-dead feed this family ranks worst.
 
-  The venue answers every subscribe request with `{"id":1,"status":200}`
+  The venue answers every subscribe request with `{"id":<the request's id>,"status":200}`
   (`GenericSuccessResponse` in `docs/reference/gemini/asyncapi/websocket.yaml`). Measured
-  2026-10-02 against both `ws.gemini.com` and `ws.sandbox.gemini.com`: a first subscribe, the
-  same streams again, and a mix of subscribed and new streams were each answered within about
-  550ms. A repeat is answered too, which matters because `Feed` resubscribes every 60s to
+  2026-10-02, with every request then sent as `id: 1`, against both `ws.gemini.com` and
+  `ws.sandbox.gemini.com`: a first subscribe, the same streams again, and a mix of
+  subscribed and new streams were each answered within about 550ms. A repeat is answered too, which matters because `Feed` resubscribes every 60s to
   streams already subscribed. So `subscribe/3` tells this process a request is out, and if
   `@ack_timeout_ms` passes with that request still unanswered, it raises a `:degraded` notice
   (`details.reason: :subscribe_unanswered`) and closes, taking the same reconnect path as a
@@ -151,11 +171,16 @@ defmodule DpExchange.Gemini.Socket do
   **Each request has its own deadline, armed when it is announced.** One deadline used to
   cover every request outstanding when it was armed, so a request sent 14s after it was armed
   could be closed 1s after it was sent, long before the venue had been given the window the
-  first one was. Answers carry only the request kind (`id: 1`), not which request they answer,
-  so they are matched in order: an answer retires the OLDEST outstanding request, and a
-  request whose frame never went out retires the NEWEST (it was announced last, by the caller
-  that is now withdrawing it). `ack_requests` holds `{ref, timer}` oldest first; `ack_deadline`
-  is the oldest one's ref and `unanswered_subscribes` the count.
+  first one was. **Requests are matched to answers by id, not by order.** Answers used to
+  carry only the request kind (`id: 1`), so they were retired oldest first, and a request
+  announced before another but sent after it (a resync's subscribe landing between a caller's
+  announce and its frame) retired the wrong one. Every subscribe and unsubscribe now has a
+  unique id, the announce names it (`{:awaiting_ack, id}`), the deadline names it, an answer
+  retires exactly that request and a request whose frame never went out is withdrawn by its
+  id (`{:ack_withdrawn, id}`). `ack_requests` holds `{id, timer}` oldest first;
+  `ack_deadline` is the oldest one's id and `unanswered_subscribes` the count. UNMEASURED:
+  that the live venue echoes an integer id other than 1 and 2; if it did not, no subscribe
+  would be answered and this very deadline would close the connection, loudly.
   """
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
@@ -413,19 +438,23 @@ defmodule DpExchange.Gemini.Socket do
     if depth_snapshot?(opts), do: [snapshot: -1], else: []
   end
 
-  # Request ids. Every request was `id: 1`, so an `unsubscribe` answer was counted as a
-  # subscribe's and could clear the ack deadline while a real subscribe was still unanswered.
-  # Only answers to `@subscribe_id` are counted against it now — see `note_answer/2`.
-  @subscribe_id 1
-  @unsubscribe_id 2
-  # The unsubscribe a depth resync sends itself. Its own id, so its answer is the barrier the
-  # resync waits for and a caller's unsubscribe answer (id 2) is never taken for it.
-  @resync_unsubscribe_id 3
+  # **Request ids.** Every request was `id: 1`, so an `unsubscribe` answer was counted as a
+  # subscribe's and could clear the ack deadline while a real subscribe was still unanswered;
+  # then ids 1 and 2 told the KINDS apart but not the requests, so answers were matched in
+  # announce order, and an announce that raced its frame (a resync subscribe sent between a
+  # caller's announce and send) retired the wrong request. Now EVERY subscribe and unsubscribe
+  # carries an id of its own (`next_request_id/0`; the spec, websocket.yaml `CorrelationId`:
+  # "Client-chosen id, echoed on the matching response") and its answer is matched by that id
+  # in `note_answer/2`. UNMEASURED against the live venue: that it echoes an integer id other
+  # than 1 and 2. If it did not, no subscribe would ever be answered and `@ack_timeout_ms`
+  # would close the connection, loudly, rather than anything being guessed.
+  defp next_request_id, do: System.unique_integer([:monotonic, :positive])
 
   # A depth resync (family rule MD9): at most one per `{symbol, channel}` in this window, and
   # a resync that failed waits twice as long each time, to the cap.
   @resync_min_gap_ms 5_000
   @resync_max_backoff_ms 60_000
+  @until_resync "until a resync completes"
 
   @doc """
   Subscribes the connection to `channel` for each symbol.
@@ -446,23 +475,30 @@ defmodule DpExchange.Gemini.Socket do
   authenticates its connection, so a private channel can only ever fail at the venue, and
   telling a caller before the round trip is the whole reason that function exists.
 
+  **A symbol is on one diff channel at a time**: `:depth` for a symbol that is on
+  `:depth_fast` (or the reverse) is refused with `{:error, {:conflicting_depth_channel,
+  symbol}}`, because their frames cannot be told apart. A second distinct symbol on a
+  partial-depth channel is refused with `{:error, {:partial_depth_symbol_conflict, symbol}}`
+  (see the moduledoc's "A partial-depth snapshot cannot name its own symbol").
+
   Returns an error rather than exiting when the socket will not accept the frame — a caller
   can retry a batch, but it cannot recover from a linked exit it did not expect. **Which
   error says what to do about it**: `{:error, :send_timeout}` is a socket that did not
   acknowledge in time and is worth retrying, since the frame may well have landed and
   subscribes are idempotent here; `{:error, {:send_exit, reason}}` is a socket that is gone,
-  which no number of retries reaches. See `send_rpc/3` for why flattening the two was wrong.
+  which no number of retries reaches. See `send_rpc/4` for why flattening the two was wrong.
   """
   @spec subscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
   def subscribe(socket, symbols, channel \\ :book_ticker) do
     with :ok <- validate_channel(symbols, channel),
+         {:ok, fresh_depth} <- claim_depth_channel(socket, symbols, channel),
          {:ok, claimed?} <- claim_partial_depth(socket, symbols, channel) do
       streams = streams(symbols, channel)
-      await_ack(socket, streams)
+      id = next_request_id()
+      await_ack(socket, streams, id)
 
-      case send_rpc(socket, "subscribe", streams) do
+      case send_rpc(socket, "subscribe", streams, id) do
         :ok ->
-          remember_depth_streams(socket, symbols, channel)
           :ok
 
         # The frame did not go out, so no answer is coming. Left counted, the ack deadline
@@ -470,33 +506,94 @@ defmodule DpExchange.Gemini.Socket do
         # A claim THIS call took is given back too: left, it refused a different symbol on
         # a channel nothing was subscribed to. A claim that was already held stays.
         error ->
-          withdraw_ack(socket, streams)
+          withdraw_ack(socket, streams, id)
+          release_depth_channel(socket, fresh_depth)
           if claimed?, do: release_partial_depth(socket, symbols, channel)
           error
       end
     end
   end
 
-  # Which diff channel each symbol was subscribed on, so a sequence gap can resubscribe the
-  # right stream (the frame does not say which one it came from). Forgotten by `unsubscribe/3`.
-  defp remember_depth_streams(socket, symbols, channel) when channel in [:depth, :depth_fast] do
-    subscribed = MapSet.new(canonical_symbols(symbols), &{&1, channel})
+  # **A symbol is on ONE diff channel at a time.** `@depth` and `@depth@100ms` frames carry
+  # the same `e`, `s`, `U` and `u` and nothing that says which stream they came from, so with
+  # both live the sequence check judges one stream's frames against the other's and a resync
+  # cannot tell whose snapshot the first frame is. A second depth channel for a symbol that is
+  # on the other is refused, before any frame is sent, with
+  # `{:error, {:conflicting_depth_channel, symbol}}`; unsubscribe the first to switch.
+  #
+  # Which diff channel each symbol is on is also what lets a sequence gap resubscribe the
+  # right stream, so it is recorded here, in ONE `:sys.replace_state/3` with the check (two
+  # concurrent subscribes on the two channels cannot both pass). Forgotten by `unsubscribe/3`,
+  # and by a reconnect. Subscribing a symbol again also lifts its `depth_stopped` mark (see
+  # `declare_gap/5`) and forgets its sequence, so the first frame of the new subscription is
+  # judged against nothing. Returns the keys THIS call added, for `release_depth_channel/2`.
+  defp claim_depth_channel(socket, symbols, channel) when channel in [:depth, :depth_fast] do
+    other = if channel == :depth, do: :depth_fast, else: :depth
+    canonical = canonical_symbols(symbols)
+    caller = self()
+    token = make_ref()
 
-    sys_replace_state(socket, fn state ->
-      Map.update(state, :depth_streams, subscribed, &MapSet.union(&1, subscribed))
-    end)
+    claim = fn state ->
+      streams = depth_streams(state)
+
+      case Enum.find(canonical, &MapSet.member?(streams, {&1, other})) do
+        nil ->
+          fresh =
+            for symbol <- canonical,
+                not MapSet.member?(streams, {symbol, channel}),
+                do: {symbol, channel}
+
+          send(caller, {token, {:ok, fresh}})
+          claim_depth_keys(state, streams, canonical, channel)
+
+        symbol ->
+          send(caller, {token, {:error, {:conflicting_depth_channel, symbol}}})
+          state
+      end
+    end
+
+    case sys_replace_state_returning(socket, claim) do
+      {:ok, _state} ->
+        receive do
+          {^token, result} -> result
+        after
+          0 -> {:ok, []}
+        end
+
+      :error ->
+        {:ok, []}
+    end
   end
 
-  defp remember_depth_streams(_socket, _symbols, _channel), do: :ok
+  defp claim_depth_channel(_socket, _symbols, _channel), do: {:ok, []}
+
+  defp claim_depth_keys(state, streams, canonical, channel) do
+    stopped = Map.get(state, :depth_stopped, MapSet.new())
+    lifted = Enum.filter(canonical, &MapSet.member?(stopped, &1))
+
+    state
+    |> Map.put(:depth_streams, MapSet.union(streams, MapSet.new(canonical, &{&1, channel})))
+    |> Map.put(:depth_stopped, MapSet.difference(stopped, MapSet.new(lifted)))
+    |> Map.update(:last_depth_update, %{}, &Map.drop(&1, lifted))
+    |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(lifted)))
+  end
+
+  defp release_depth_channel(_socket, []), do: :ok
+
+  defp release_depth_channel(socket, keys) do
+    sys_replace_state(socket, fn state ->
+      Map.update(state, :depth_streams, MapSet.new(), &MapSet.difference(&1, MapSet.new(keys)))
+    end)
+  end
 
   defp canonical_symbols(symbols),
     do: Enum.map(symbols, &SymbolFormat.to_canonical_symbol(SymbolFormat.to_exchange_symbol(&1)))
 
-  defp withdraw_ack(_socket, []), do: :ok
+  defp withdraw_ack(_socket, [], _id), do: :ok
 
-  defp withdraw_ack(socket, _streams) do
+  defp withdraw_ack(socket, _streams, id) do
     case GenServer.whereis(socket) do
-      pid when is_pid(pid) -> send(pid, :ack_withdrawn)
+      pid when is_pid(pid) -> send(pid, {:ack_withdrawn, id})
       _not_running -> :ok
     end
   end
@@ -504,12 +601,12 @@ defmodule DpExchange.Gemini.Socket do
   # Sent BEFORE the frame, from the same process, so this socket always hears that a request
   # is out before it can hear the answer. An empty address list sends nothing and so expects
   # nothing. A socket that cannot be found is not told: `send/2` to an unregistered name
-  # raises, and `send_rpc/3` already turns that same missing socket into a reported error.
-  defp await_ack(_socket, []), do: :ok
+  # raises, and `send_rpc/4` already turns that same missing socket into a reported error.
+  defp await_ack(_socket, [], _id), do: :ok
 
-  defp await_ack(socket, _streams) do
+  defp await_ack(socket, _streams, id) do
     case GenServer.whereis(socket) do
-      pid when is_pid(pid) -> send(pid, :awaiting_ack)
+      pid when is_pid(pid) -> send(pid, {:awaiting_ack, id})
       _not_running -> :ok
     end
   end
@@ -525,7 +622,7 @@ defmodule DpExchange.Gemini.Socket do
   @spec unsubscribe(pid(), [String.t()], atom()) :: :ok | {:error, term()}
   def unsubscribe(socket, symbols, channel \\ :book_ticker) do
     with :ok <- validate_channel(symbols, channel),
-         :ok <- send_rpc(socket, "unsubscribe", streams(symbols, channel)) do
+         :ok <- send_rpc(socket, "unsubscribe", streams(symbols, channel), next_request_id()) do
       # Only after the frame went out. Reset first, a send that failed left the stream still
       # flowing while the socket treated its next diff as the absolute anchor, and dropped
       # the partial-depth claim that attributes its frames.
@@ -552,6 +649,7 @@ defmodule DpExchange.Gemini.Socket do
       |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(canonical)))
       |> Map.update(:last_depth_update, %{}, &Map.drop(&1, canonical))
       |> Map.update(:depth_streams, MapSet.new(), &MapSet.difference(&1, MapSet.new(keys)))
+      |> Map.update(:depth_stopped, MapSet.new(), &MapSet.difference(&1, MapSet.new(canonical)))
       |> Map.update(:depth_resync, %{}, &Map.drop(&1, keys))
       |> Map.update(:depth_retry, %{}, &Map.drop(&1, keys))
       |> Map.update(:depth_resync_at, %{}, &Map.drop(&1, keys))
@@ -653,7 +751,7 @@ defmodule DpExchange.Gemini.Socket do
           else: {:error, {:partial_depth_symbol_conflict, hd(partial_depth_symbols(state))}}
 
       # A socket this package cannot introspect — not a real process, or one that has
-      # already exited. `send_rpc/3` still reports a dead socket on its own; this guard is a
+      # already exited. `send_rpc/4` still reports a dead socket on its own; this guard is a
       # best-effort refusal of an AMBIGUOUS frame later, not the boundary that decides
       # whether the frame goes out at all.
       :error ->
@@ -747,13 +845,10 @@ defmodule DpExchange.Gemini.Socket do
         do: address
   end
 
-  defp request_id("subscribe"), do: @subscribe_id
-  defp request_id("unsubscribe"), do: @unsubscribe_id
+  defp send_rpc(_socket, _method, [], _id), do: :ok
 
-  defp send_rpc(_socket, _method, []), do: :ok
-
-  defp send_rpc(socket, method, params) do
-    frame = Jason.encode!(%{"method" => method, "params" => params, "id" => request_id(method)})
+  defp send_rpc(socket, method, params, id) do
+    frame = Jason.encode!(%{"method" => method, "params" => params, "id" => id})
     VendoredWebSockex.send_frame(socket, {:text, frame})
   catch
     # BOUNDARY: `WebSockex.send_frame/2` is `:gen.call` with a 5s default, and on timeout it
@@ -856,6 +951,12 @@ defmodule DpExchange.Gemini.Socket do
        # * `depth_resync` — a gap resubscribe in flight on the old connection. The new one
        #   starts with no subscriptions and its own fresh snapshots.
        depth_resync: %{},
+       # * `depth_streams`, `depth_stopped` — the depth channels this connection carries and
+       #   the symbols stopped for want of a rebuildable book. The new connection carries
+       #   none, and a stale `depth_streams` would refuse the other channel
+       #   (`:conflicting_depth_channel`) on a connection that has nothing subscribed.
+       depth_streams: MapSet.new(),
+       depth_stopped: MapSet.new(),
        depth_retry: %{},
        depth_resync_at: %{},
        depth_resync_failures: %{},
@@ -902,9 +1003,8 @@ defmodule DpExchange.Gemini.Socket do
   # See the moduledoc's "A connection that answers pings but not subscribes is not serving".
   # Each announced request arms a deadline of its own, so a request is never closed on the
   # strength of a clock that started before it was sent.
-  def handle_info(:awaiting_ack, state) do
-    {_deadline, state} = add_ack_request(state)
-    {:ok, state}
+  def handle_info({:awaiting_ack, id}, state) do
+    {:ok, add_ack_request(state, id)}
   end
 
   # **The depth resync (family rule MD9), one `{symbol, channel}` at a time.** A gap or a
@@ -914,10 +1014,12 @@ defmodule DpExchange.Gemini.Socket do
   # the last one:
   #
   #   1. `{:pending, ref}`         waiting out the delay.
-  #   2. `{:unsubscribing, ref, seq}`  the unsubscribe (id 3) is out; waiting for ITS answer.
+  #   2. `{:unsubscribing, ref, id}`   the unsubscribe (its own unique id) is out; waiting for
+  #                                ITS answer.
   #   3. `{:subscribing, ref}`     that answer came, so the old subscription's frames are
   #                                behind us; the subscribe is about to go out.
-  #   4. `{:awaiting, ref, deadline}`  the subscribe is out. The FIRST frame for the symbol now
+  #   4. `{:awaiting, ref, id}`    the subscribe (its own unique id, also the key of its ack
+  #                                deadline) is out. The FIRST frame for the symbol now
   #                                is the fresh snapshot (the vendor: "the FIRST frame after
   #                                subscribing is the snapshot"), whether it comes before or
   #                                after the subscribe's own answer, so nothing depends on
@@ -938,15 +1040,15 @@ defmodule DpExchange.Gemini.Socket do
 
       true ->
         {symbol, channel} = key
-        seq = System.unique_integer([:monotonic, :positive])
+        id = next_request_id()
         Process.send_after(self(), {:resync_timeout, key, ref}, @ack_timeout_ms)
 
         state =
           state
-          |> put_resync(Map.put(resync, key, {:unsubscribing, ref, seq}))
+          |> put_resync(Map.put(resync, key, {:unsubscribing, ref, id}))
           |> Map.update(:depth_resync_at, %{key => now_ms()}, &Map.put(&1, key, now_ms()))
 
-        frame = rpc_frame("unsubscribe", @resync_unsubscribe_id, symbol, channel)
+        frame = rpc_frame("unsubscribe", id, symbol, channel)
         {:reply, {:text, frame}, state}
     end
   end
@@ -955,7 +1057,7 @@ defmodule DpExchange.Gemini.Socket do
   # unsubscribe is idempotent), later, and say so.
   def handle_info({:resync_timeout, key, ref}, state) do
     case Map.get(depth_resync(state), key) do
-      {:unsubscribing, ^ref, _seq} ->
+      {:unsubscribing, ^ref, _id} ->
         {:ok, resync_failed(state, key, "depth resync unsubscribe unanswered")}
 
       _moved_on ->
@@ -980,7 +1082,8 @@ defmodule DpExchange.Gemini.Socket do
 
   # A resubscribe the venue REFUSED was dropped from `depth_streams` (`refused_resync/3`) and
   # is tried again after a backoff. Skipped if the caller subscribed it again meanwhile (the
-  # key is back in `depth_streams`) or unsubscribed it (`depth_retry` was forgotten).
+  # key is back in `depth_streams`, or the symbol is now on the OTHER diff channel, which
+  # `subscribe/3` would refuse) or unsubscribed it (`depth_retry` was forgotten).
   def handle_info({:retry_depth, key, ref}, state) do
     retry = Map.get(state, :depth_retry, %{})
 
@@ -988,7 +1091,7 @@ defmodule DpExchange.Gemini.Socket do
       Map.get(retry, key) != ref ->
         {:ok, state}
 
-      MapSet.member?(depth_streams(state), key) ->
+      MapSet.member?(depth_streams(state), key) or sibling_depth_stream?(state, key) ->
         {:ok, Map.put(state, :depth_retry, Map.delete(retry, key))}
 
       true ->
@@ -1002,15 +1105,16 @@ defmodule DpExchange.Gemini.Socket do
     end
   end
 
-  # The announced request's frame never went out. It was announced last, so it is the newest.
-  def handle_info(:ack_withdrawn, state) do
-    case Enum.reverse(ack_requests(state)) do
-      [] ->
+  # The announced request's frame never went out: that request, by its id, is no longer owed
+  # an answer. One already answered, withdrawn or forgotten by a reconnect is not found.
+  def handle_info({:ack_withdrawn, id}, state) do
+    case List.keytake(ack_requests(state), id, 0) do
+      nil ->
         {:ok, state}
 
-      [{_deadline, timer} | older] ->
+      {{_id, timer}, rest} ->
         Process.cancel_timer(timer)
-        {:ok, put_ack_requests(state, Enum.reverse(older))}
+        {:ok, put_ack_requests(state, rest)}
     end
   end
 
@@ -1041,13 +1145,19 @@ defmodule DpExchange.Gemini.Socket do
   def handle_info(_message, state), do: {:ok, state}
 
   defp subscribe_for_resync(state, {symbol, channel} = key, ref) do
-    {deadline, state} = add_ack_request(state)
-    state = put_resync(state, Map.put(depth_resync(state), key, {:awaiting, ref, deadline}))
-    {:reply, {:text, rpc_frame("subscribe", @subscribe_id, symbol, channel)}, state}
+    id = next_request_id()
+    state = add_ack_request(state, id)
+    state = put_resync(state, Map.put(depth_resync(state), key, {:awaiting, ref, id}))
+    {:reply, {:text, rpc_frame("subscribe", id, symbol, channel)}, state}
   end
 
   defp depth_resync(state), do: Map.get(state, :depth_resync, %{})
   defp depth_streams(state), do: Map.get(state, :depth_streams, MapSet.new())
+
+  defp sibling_depth_stream?(state, {symbol, channel}) do
+    other = if channel == :depth, do: :depth_fast, else: :depth
+    MapSet.member?(depth_streams(state), {symbol, other})
+  end
 
   # A resync that did not complete: counted, announced, and started over after a longer wait.
   defp resync_failed(state, key, reason) do
@@ -1090,11 +1200,13 @@ defmodule DpExchange.Gemini.Socket do
     do: min(@resync_min_gap_ms * Bitwise.bsl(1, min(failures - 1, 10)), @resync_max_backoff_ms)
 
   defp notify_not_delivering(state, {symbol, channel}, reason, extra \\ %{}) do
+    until = Map.get(extra, :until, @until_resync)
+
     notify(
       state,
       Notice.new(:coverage_change, :gemini,
         severity: :warning,
-        message: "#{reason} — #{symbol} is not delivering until a resync completes",
+        message: "#{reason} — #{symbol} is not delivering #{until}",
         details:
           Map.merge(extra, %{reason: reason, symbol: symbol, channel: channel, delivering: false})
       )
@@ -1105,10 +1217,11 @@ defmodule DpExchange.Gemini.Socket do
 
   defp ack_requests(state), do: Map.get(state, :ack_requests, [])
 
-  defp add_ack_request(state) do
-    deadline = make_ref()
-    timer = Process.send_after(self(), {:ack_deadline, deadline}, @ack_timeout_ms)
-    {deadline, put_ack_requests(state, ack_requests(state) ++ [{deadline, timer}])}
+  # A request owed an answer, keyed by the id its frame carries; that id is also what its
+  # deadline message names, so the two cannot be confused with another request's.
+  defp add_ack_request(state, id) do
+    timer = Process.send_after(self(), {:ack_deadline, id}, @ack_timeout_ms)
+    put_ack_requests(state, ack_requests(state) ++ [{id, timer}])
   end
 
   # `ack_deadline` and `unanswered_subscribes` are derived from `ack_requests` on every
@@ -1128,41 +1241,42 @@ defmodule DpExchange.Gemini.Socket do
     Enum.each(ack_requests(state), fn {_deadline, timer} -> Process.cancel_timer(timer) end)
   end
 
-  # Any answer counts, a refusal included: the question is whether the connection is being
-  # served, and a non-200 is already reported on its own by `handle_message/2`. It retires the
-  # oldest outstanding request: the venue's answers do not say which request they answer.
-  defp note_answer(%{"id" => @subscribe_id, "status" => status}, state) do
-    case ack_requests(state) do
-      [] ->
-        state
-
-      [{deadline, timer} | newer] ->
+  # **An answer is matched to its request by the id it echoes**, never by order. Any answer
+  # counts, a refusal included: the question is whether the connection is being served, and a
+  # non-200 is already reported on its own by `handle_message/2`. An id that is not
+  # outstanding (answered, withdrawn, timed out, forgotten by a reconnect, or a caller's
+  # unsubscribe, which is not tracked) changes nothing.
+  defp note_answer(%{"id" => id} = message, state) when is_integer(id) do
+    case List.keytake(ack_requests(state), id, 0) do
+      {{_id, timer}, rest} ->
         Process.cancel_timer(timer)
-        state |> put_ack_requests(newer) |> resync_subscribe_answered(deadline, status)
-    end
-  end
+        state |> put_ack_requests(rest) |> resync_subscribe_answered(id, message["status"])
 
-  # The answer to a resync's own unsubscribe (id 3): the old subscription is over, so the
-  # oldest key still waiting on one moves on to its subscribe. Any status counts; a refused
-  # unsubscribe of a stream that is gone changes nothing the resync needs.
-  defp note_answer(%{"id" => @resync_unsubscribe_id}, state) do
-    waiting =
-      for {key, {:unsubscribing, ref, seq}} <- depth_resync(state), do: {seq, key, ref}
-
-    case Enum.min(waiting, fn -> nil end) do
       nil ->
-        state
-
-      {_seq, key, ref} ->
-        send(self(), {:resubscribe_depth, key, ref})
-        put_resync(state, Map.put(depth_resync(state), key, {:subscribing, ref}))
+        resync_unsubscribe_answered(state, id)
     end
   end
 
   defp note_answer(_message, state), do: state
 
+  # The answer to a resync's own unsubscribe: the old subscription is over, so exactly the key
+  # that sent THAT id moves on to its subscribe. Any status counts; a refused unsubscribe of a
+  # stream that is gone changes nothing the resync needs.
+  defp resync_unsubscribe_answered(state, id) do
+    waiting = for {key, {:unsubscribing, ref, ^id}} <- depth_resync(state), do: {key, ref}
+
+    case waiting do
+      [] ->
+        state
+
+      [{key, ref} | _none_other] ->
+        send(self(), {:resubscribe_depth, key, ref})
+        put_resync(state, Map.put(depth_resync(state), key, {:subscribing, ref}))
+    end
+  end
+
   # The venue has answered the subscribe a resync sent. Accepted, there is nothing to do: the
-  # key stays `:awaiting` until the first frame, which `begin_snapshot/2` takes. REFUSED, the
+  # key stays `:awaiting` until the first frame, which `take_snapshot/2` takes. REFUSED, the
   # symbol has no depth subscription at all, so it is taken out of `depth_streams` rather than
   # left listed while unsubscribed, announced as not delivering, and retried after a backoff.
   defp resync_subscribe_answered(state, deadline, status) do
@@ -1486,6 +1600,9 @@ defmodule DpExchange.Gemini.Socket do
     applied = Map.get(last_by_symbol, symbol)
 
     cond do
+      MapSet.member?(Map.get(state, :depth_stopped, MapSet.new()), symbol) ->
+        {:ok, state}
+
       symbol_resync(state, symbol) != [] ->
         resyncing_frame(message, symbol, state)
 
@@ -1496,7 +1613,6 @@ defmodule DpExchange.Gemini.Socket do
         {:ok, state}
 
       is_integer(message["u"]) ->
-        applied = Map.get(last_by_symbol, symbol)
         apply_depth_update(message, symbol, state, last_by_symbol, applied)
 
       true ->
@@ -1555,8 +1671,34 @@ defmodule DpExchange.Gemini.Socket do
         deliver_depth_frame(message, symbol, state, last_by_symbol)
 
       keys ->
-        {:ok, Enum.reduce(keys, state, &schedule_resync(&2, &1))}
+        if Map.get(state, :depth_snapshot?, false),
+          do: {:ok, Enum.reduce(keys, state, &schedule_resync(&2, &1))},
+          else: {:ok, stop_unrebuildable(state, symbol, keys)}
     end
+  end
+
+  # **A connection without the `snapshot` parameter cannot rebuild a book by resubscribing.**
+  # The parameter is a CONNECTION parameter, set at the upgrade (websocket.yaml:1264, "With the
+  # `snapshot` connection parameter set"); it cannot be asked for per subscribe. Without it a
+  # resubscribe brings diffs only, no frame in the stream carries absolute levels, so a resync
+  # would end with the symbol "delivering" diffs onto a book nobody holds. Fail closed
+  # instead: the symbol is marked `depth_stopped`, announced as not delivering with the
+  # reason, and every frame for it is dropped until the caller subscribes it again (which
+  # lifts the mark, `claim_depth_channel/3`), when it must rebuild from `get_order_book/2` or
+  # from a connection started with `:depth`/`:depth_fast` in `:channels`.
+  defp stop_unrebuildable(state, symbol, keys) do
+    stopped = Map.get(state, :depth_stopped, MapSet.new())
+
+    keys
+    |> Enum.reduce(state, fn key, acc ->
+      notify_not_delivering(
+        acc,
+        key,
+        "depth book cannot be rebuilt on a connection without the snapshot parameter",
+        %{until: "until the caller subscribes it again and rebuilds the book"}
+      )
+    end)
+    |> Map.put(:depth_stopped, MapSet.put(stopped, symbol))
   end
 
   defp symbol_resync(state, symbol),

@@ -360,10 +360,13 @@ defmodule DpExchange.Gemini.SocketTest do
     # See the moduledoc's "A connection that answers pings but not subscribes is not
     # serving". 2026-10-02: after a `1012 "Server shutting down"` the reconnected socket
     # answered pings for three minutes while delivering nothing.
-    @ack %{"id" => 1, "status" => 200}
+    # Every request carries an id of its own, and its answer is matched by that id.
+    @first_id 41
+    @second_id 42
+    @ack %{"id" => @first_id, "status" => 200}
 
-    defp awaiting(state) do
-      {:ok, state} = Socket.handle_info(:awaiting_ack, state)
+    defp awaiting(state, id \\ @first_id) do
+      {:ok, state} = Socket.handle_info({:awaiting_ack, id}, state)
       state
     end
 
@@ -396,18 +399,38 @@ defmodule DpExchange.Gemini.SocketTest do
       armed = awaiting(state())
 
       {:ok, answered} =
-        Socket.handle_frame({:text, Jason.encode!(%{"id" => 1, "status" => 400})}, armed)
+        Socket.handle_frame(
+          {:text, Jason.encode!(%{"id" => @first_id, "status" => 400})},
+          armed
+        )
 
       assert answered.ack_deadline == nil
       assert_received {:dp_exchange, :gemini, %Notice{kind: :refusal}}
+    end
+
+    test "an answer retires the request whose id it echoes, whatever order they come in" do
+      # Answers used to be matched oldest first. A request announced first but answered
+      # second must not lose its deadline to the other one's answer.
+      first = awaiting(state(), @first_id)
+      second = awaiting(first, @second_id)
+
+      second_ack = %{"id" => @second_id, "status" => 200}
+      {:ok, half} = Socket.handle_frame({:text, Jason.encode!(second_ack)}, second)
+
+      assert [{@first_id, _timer}] = half.ack_requests
+      assert half.ack_deadline == @first_id
+      assert half.unanswered_subscribes == 1
+
+      {:ok, done} = Socket.handle_frame({:text, Jason.encode!(@ack)}, half)
+      assert done.ack_requests == []
     end
 
     test "each request has its own deadline, so an answer to the first does not leave the " <>
            "second on the first's clock" do
       # One deadline used to cover every request outstanding when it was armed. A request sent
       # 14s into it was closed 1s after it was sent.
-      first = awaiting(state())
-      second = awaiting(first)
+      first = awaiting(state(), @first_id)
+      second = awaiting(first, @second_id)
       first_deadline = first.ack_deadline
       assert second.ack_deadline == first_deadline
 
@@ -431,18 +454,25 @@ defmodule DpExchange.Gemini.SocketTest do
                        %Notice{details: %{reason: :subscribe_unanswered, unanswered: 1}}}
     end
 
-    test "a request whose frame never went out retires the newest, not the oldest" do
-      first = awaiting(state())
-      second = awaiting(first)
+    test "a request whose frame never went out is withdrawn by its id, not by position" do
+      first = awaiting(state(), @first_id)
+      second = awaiting(first, @second_id)
       first_deadline = first.ack_deadline
       [_oldest, {second_deadline, _second_timer}] = second.ack_requests
 
-      {:ok, withdrawn} = Socket.handle_info(:ack_withdrawn, second)
+      {:ok, withdrawn} = Socket.handle_info({:ack_withdrawn, @second_id}, second)
 
       assert withdrawn.unanswered_subscribes == 1
       assert withdrawn.ack_deadline == first_deadline
       assert {:ok, ^withdrawn} = Socket.handle_info({:ack_deadline, second_deadline}, withdrawn)
       assert {:close, _state} = Socket.handle_info({:ack_deadline, first_deadline}, withdrawn)
+
+      # The OLDER one withdrawn leaves the newer: an interleaved send can fail out of order.
+      {:ok, older_gone} = Socket.handle_info({:ack_withdrawn, @first_id}, second)
+      assert [{@second_id, _timer}] = older_gone.ack_requests
+
+      # An id nobody is waiting on is not found, and nothing else is withdrawn.
+      assert {:ok, ^second} = Socket.handle_info({:ack_withdrawn, 999}, second)
     end
 
     test "an answer with nothing outstanding changes nothing" do
@@ -800,18 +830,18 @@ defmodule DpExchange.Gemini.SocketTest do
     end
 
     test "a subscribe whose frame never went out withdraws its ack expectation" do
-      {:ok, armed} = Socket.handle_info(:awaiting_ack, state())
-      assert {:ok, withdrawn} = Socket.handle_info(:ack_withdrawn, armed)
+      {:ok, armed} = Socket.handle_info({:awaiting_ack, 7}, state())
+      assert {:ok, withdrawn} = Socket.handle_info({:ack_withdrawn, 7}, armed)
 
       assert withdrawn.unanswered_subscribes == 0
       assert withdrawn.ack_deadline == nil
     end
 
-    test "an unsubscribe's answer does not count as a subscribe's" do
-      {:ok, armed} = Socket.handle_info(:awaiting_ack, state())
+    test "an answer to an id nobody is waiting on (an unsubscribe's) is not a subscribe's" do
+      {:ok, armed} = Socket.handle_info({:awaiting_ack, 7}, state())
 
       {:ok, after_unsubscribe_ack} =
-        Socket.handle_frame({:text, Jason.encode!(%{"id" => 2, "status" => 200})}, armed)
+        Socket.handle_frame({:text, Jason.encode!(%{"id" => 8, "status" => 200})}, armed)
 
       assert after_unsubscribe_ack.unanswered_subscribes == 1
       assert after_unsubscribe_ack.ack_deadline == armed.ack_deadline

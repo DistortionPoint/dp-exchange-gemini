@@ -136,8 +136,8 @@ defmodule DpExchange.Gemini do
   # and never enters this package; credential *use* — signing, session refresh, token
   # rotation — is venue strategy and belongs here.
   #
-  # Only two things are genuinely unsupported, and neither is about authentication:
-  # The venue serves none of these. **That is a claim about Gemini, not about how far this
+  # Two lists are unsupported, and neither is about authentication. First: the venue serves
+  # none of these. **That is a claim about Gemini, not about how far this
   # package got** — and the two are worth telling apart, because both answer a caller
   # identically and only the second can ever change.
   @venue_does_not_serve [
@@ -383,7 +383,10 @@ defmodule DpExchange.Gemini do
           "this repo holds no credentials, and their inclusion here rests on the " <>
           "vendor's own OpenAPI paths and response shapes recorded in " <>
           "docs/reference/gemini/endpoint-inventory.md — read from documentation, not " <>
-          "probed live, and said so rather than implied otherwise."
+          "probed live, and said so rather than implied otherwise. The socket matches each " <>
+          "subscribe/unsubscribe answer to its request by a client-chosen id, which the " <>
+          "AsyncAPI document says the venue echoes; an integer id other than 1 and 2 was " <>
+          "NOT probed live."
     )
   end
 

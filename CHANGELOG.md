@@ -20,6 +20,55 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (tick T review of the depth resync state machine)
+
+- **A depth resync's unsubscribe answer is matched by id, not by "the oldest key waiting".**
+  Every resync unsubscribe carries its own unique integer id (spec: client-chosen, echoed). The
+  old shared id 3 let the LATE answer of a resync that had timed out, or whose symbol the caller
+  had unsubscribed, release ANOTHER symbol's resync before its own unsubscribe was answered, so
+  an old-subscription frame could be taken for the fresh snapshot. An answer no key waits on is
+  ignored.
+- Tests that pinned a whole socket state after `handle_frame/2` (which stamps `last_heard_at`
+  with a millisecond clock) now compare `depth_resync`, so a clock tick between two frames
+  cannot fail them.
+- **Subscribe and unsubscribe answers are matched by id, never by announce order (BREAKING for
+  anyone sending `{:awaiting_ack}`/`:ack_withdrawn` to a `Socket`, which is internal).** Every
+  subscribe and unsubscribe frame carries its own unique integer id; the announce
+  (`{:awaiting_ack, id}`), the deadline (`{:ack_deadline, id}`) and the withdrawal
+  (`{:ack_withdrawn, id}`) name it, and an answer retires exactly the request whose id it
+  echoes. Before, answers (all `id: 1`) retired the oldest request, so a resync subscribe sent
+  between a caller's announce and its frame could retire the caller's deadline and hide the
+  resync's own refusal. UNMEASURED against the live venue: that it echoes an integer id other
+  than 1 and 2 (the spec says it echoes the client's id). If it did not, no subscribe would be
+  answered and the 15s unanswered-subscribe deadline would close the connection, loudly. The
+  `capabilities/0` `measured_against` text says so.
+
+### Changed (tick T, depth)
+
+- **A symbol is on one diff channel at a time.** `Socket.subscribe/3` refuses `:depth` for a
+  symbol on `:depth_fast` and the reverse with `{:error, {:conflicting_depth_channel,
+  symbol}}`, before any frame is sent; the check and the record are one atomic step. Their
+  frames cannot be told apart, so a sequence check and a resync could not tell which stream a
+  frame belonged to. `depth_streams` is also cleared on a reconnect, which carries none.
+- **A gap on a connection without the `snapshot` parameter stops the symbol.** The parameter
+  is a per-connection one (websocket.yaml:1264), so a resubscribe there brings diffs only and
+  no book can be rebuilt. The socket now marks the symbol stopped (`depth_stopped`), raises a
+  `:coverage_change` notice (`delivering: false`, "depth book cannot be rebuilt on a connection
+  without the snapshot parameter") and drops its frames until the caller subscribes it again,
+  unsubscribes, or the connection reconnects. Before, it resubscribed and delivered diffs
+  onto a book nobody held.
+- Documentation sweep (README, `usage-rules.md`, moduledocs): `usage-rules.md` opened with
+  sections that preceded its own title and now sits under it; function arities name the
+  facade's (`withdraw/5`, `transfer_internal/4`, `add_payment_method/2`, `create_account/1`,
+  `confirm_clearing_order/3`, `cancel_clearing_order/2`, `create_clearing_order/2`,
+  `create_broker_clearing_order/2`, `get_clearing_order/2`, `list_clearing_trades/1`,
+  `get_staking_history/1`, `funding_payment_report/1`, `list_custody_fees/2`,
+  `get_transactions/2`) instead of a mix with `Private`'s; the websocket section says three
+  things (it listed three); a garbled `ssl_options` sentence and duplicated `venue_time`
+  paragraphs were cut; the core requirement is `~> 0.3.65`, not `0.2.1`; the candle docs
+  state that `include_partial: true` applies no upper bound on an absent `:end`; the depth
+  section describes the snapshot and non-snapshot behaviour and the id matching.
+
 ## [0.2.126] - 2026-10-12
 
 ### Fixed (tick S review of the tick R changes)

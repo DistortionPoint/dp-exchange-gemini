@@ -53,8 +53,9 @@ defmodule DpExchange.Gemini.Feed do
   WebSockex reconnects a dropped socket on its own — `Socket.handle_disconnect/2` returns
   `{:reconnect, state}` — and a bare reconnect leaves it connected and subscribed to
   **nothing**, silently: a socket that is up and receiving nothing is not itself an error.
-  `Socket`'s own state carries no memory of what was subscribed (`%{subscriber:,
-  request_id:}`), so there was nothing to resend even if it tried, and this module's
+  `Socket`'s own state carried no memory of what was subscribed (`%{subscriber:,
+  request_id:}` then; it still holds no `wanted` set, and a reconnect clears even the depth
+  channels it records), so there was nothing to resend even if it tried, and this module's
   `wanted` MapSet — written on every `subscribe/3` — was never read by anything. The
   sequence a consumer would actually see is `:link_down` then `:link_up`, which reads as
   "recovered", followed by silence until someone notices a quiet chart. This is the same
