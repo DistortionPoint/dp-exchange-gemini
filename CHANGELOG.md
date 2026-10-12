@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.127] - 2026-10-12
+
 ### Fixed (tick T review of the depth resync state machine)
 
 - **A depth resync's unsubscribe answer is matched by id, not by "the oldest key waiting".**
