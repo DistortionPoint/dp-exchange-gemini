@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.123] - 2026-10-12
+
 ### Changed (BREAKING) - non-order writes (tick Q)
 
 - **BREAKING: a write that may have been acted on is `{:error, {:write_unconfirmed, key_or_nil,
