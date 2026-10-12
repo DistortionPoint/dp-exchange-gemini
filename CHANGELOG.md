@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.122] - 2026-10-12
+
 ### Changed (BREAKING) - trading conventions (tick P)
 
 - **BREAKING: `place_order/3` that may have reached the venue is `{:error, {:order_unconfirmed,
