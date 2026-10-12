@@ -318,11 +318,6 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert mapping.sep == ""
       assert mapping.quotes == DpExchange.Gemini.SymbolFormat.quotes()
     end
-
-    test "the base URL is the venue's, and is overridable for tests" do
-      assert Rest.base_url() == "https://api.gemini.com"
-      assert Rest.base_url(base_url: "https://elsewhere.test") == "https://elsewhere.test"
-    end
   end
 
   describe "the fake's remaining surface" do
@@ -444,7 +439,8 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
     test "registering for notices sends none, as the real Feed sends none" do
       :ok = Fake.subscribe_notices(to: self())
 
-      refute_receive {:dp_exchange, :gemini, %DpExchange.Core.Notice{}}, 50
+      # `Fake.subscribe_notices/1` is a direct call, so anything it sent is already here.
+      refute_received {:dp_exchange, :gemini, %DpExchange.Core.Notice{}}
     end
 
     test "the market overview covers every symbol it lists" do

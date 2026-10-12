@@ -268,8 +268,9 @@ defmodule DpExchange.Gemini.Fake do
     with :ok <- Rest.validate_symbol(symbol),
          :ok <- Rest.validate_book_opts(opts) do
       symbol = canonical(symbol)
-      # The depth is checked by the real call's own function, before the symbol: the venue is
-      # never asked, so it never gets to refuse the symbol.
+      # The depth was checked above by the real call's own `Rest.validate_book_opts/1`, after
+      # the symbol's shape and before the symbol is looked up: the venue is never asked, so it
+      # never gets to refuse the symbol.
       depth = Config.opt(opts, :depth, nil)
       with_injection(symbol, fn -> fake_order_book(symbol, depth) end)
     end
@@ -535,7 +536,7 @@ defmodule DpExchange.Gemini.Fake do
     end)
   end
 
-  # `Rest.list_instruments/1`'s shape: every listed symbol open, honouring `symbols:`, and
+  # `Rest.list_instruments/1`'s shape: every listed symbol `:tradable`, honouring `symbols:`, and
   # an unlisted one failing the whole call with the venue's own `InvalidSymbol` refusal
   # inside, as the real call does.
   @impl true
@@ -655,8 +656,9 @@ defmodule DpExchange.Gemini.Fake do
       #
       # Each placement is a NEW order with its own numeric id, kept in the calling process
       # (as the subscriptions are), so `get_order/3`, `cancel_order/3` and `get_orders/2`
-      # answer for what was placed and `{:refused, :not_found}` for what was not, which is
-      # what the real venue's 404 becomes. The venue is not known to dedupe on
+      # answer for what was placed (and for the one closed order the history read always
+      # holds) and `{:refused, :not_found}` for what was not, which is what the real venue's
+      # 404 becomes. The venue is not known to dedupe on
       # `client_order_id` (nothing here measured it), so a reused one is a second order.
       with :ok <- Private.validate_order(request, opts),
            :ok <- authenticated(credentials, opts),
@@ -692,8 +694,9 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def place_orders(_credentials, _requests, _opts), do: Venue.not_supported()
 
-  # Both refused, matching the real venue. A fake that answered where the real one
-  # refuses lets a consumer's suite go green against behaviour that cannot happen.
+  # These four are refused (`{:error, :not_supported}`), matching the facade. A fake that
+  # answered where the real package refuses lets a consumer's suite go green against
+  # behaviour that cannot happen.
   @impl true
   def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
 
@@ -740,8 +743,9 @@ defmodule DpExchange.Gemini.Fake do
       # fake says so rather than answering the same empty list to both.
       #
       # **The history read filters by what it is given**, as the venue does: `:symbol`, `:since`
-      # and `:limit` narrow the one closed order this fake holds, and are refused as
-      # `Private.validate_history_opts/2` refuses them. This returned the same order whatever
+      # and `:limit` narrow the closed orders this fake holds (the one fixed order plus any
+      # placed here and since cancelled), and are refused as `Private.validate_history_opts/2`
+      # refuses them. This returned the same order whatever
       # the symbol asked for, so a consumer's test of "orders for ETH-USD" saw a BTC-USD fill.
       # What the venue's `timestamp` means for orders is unmeasured (its own recipe
       # contradicts itself); the fake reads it as "on or after".
@@ -838,8 +842,8 @@ defmodule DpExchange.Gemini.Fake do
   # (`:refused`, which the real adapter reserves for the venue's own 401/403 body, never
   # for a call this package refused to even sign and send) and the wrong *shape*
   # (`:missing_credentials` alone, dropping which scheme was missing it). Found in the
-  # 2026-09-06 real/fake parity sweep — every one of `auth_test.exs`'s cases now has a
-  # pinned equivalent against this fake in `fake_parity_test.exs`.
+  # 2026-09-06 real/fake parity sweep — `fake_parity_test.exs` pins this fake's answers
+  # against the real path's for these cases.
   defp authenticated(credentials, opts) do
     with :ok <- authenticated_group(credentials, opts),
          do: account_named(credentials, opts)
@@ -879,7 +883,9 @@ defmodule DpExchange.Gemini.Fake do
   # **A blank or non-string credential is refused here as `Auth.headers/5` refuses it**
   # (`{:missing_credentials, :gemini}`). The `:api_key` clause accepted any value for the pair,
   # `nil` and `""` included, so a consumer's tier-1 test passed with an unset `.env` variable
-  # (`GEMINI_SECRET=` is `""`) that the real call refuses before it signs.
+  # (`GEMINI_SECRET=` is `""`) that the real call refuses before it signs. A value with
+  # surrounding whitespace is `{:invalid_credentials, :gemini}`, as there: never trimmed and
+  # accepted.
   defp authenticated_venue_faithful(:api_key, %{api_key: key, api_secret: secret})
        when is_binary(key) and is_binary(secret) do
     cond do
@@ -1183,6 +1189,7 @@ defmodule DpExchange.Gemini.Fake do
 
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
+
   @impl true
   def market_status(_opts) do
     with_injection(fn -> {:ok, :open} end)
@@ -1197,8 +1204,8 @@ defmodule DpExchange.Gemini.Fake do
   # `get_price/2`'s `Quote` is the REST shape — `venue_time` is `nil` (the venue states no
   # trade time; the HTTP `Date` header is not one). The streamed
   # `Quote` is a different fact from a different transport: it comes off a `bookTicker`
-  # frame's `c`, which the vendor's own AsyncAPI documents no trade time for at all (websocket.yaml:1254-1256), so
-  # `DpExchange.Gemini.Socket` delivers it with `venue_time: nil` unconditionally — see
+  # frame's `c`, which the vendor's own AsyncAPI documents no trade time for at all
+  # (websocket.yaml:1254-1256), so `DpExchange.Gemini.Socket` delivers it with `venue_time: nil` unconditionally — see
   # `Socket.deliver_last_trade/3`. Reusing `get_price/2`'s struct unmodified here answered
   # `venue_time: @at` on the stream, which is not "less capable than the real adapter", the
   # only kind of divergence this fake is allowed — it is a DIFFERENT capability: a
@@ -1255,8 +1262,9 @@ defmodule DpExchange.Gemini.Fake do
   # `get_price("BTCUSD")` and `get_price("BTC-USD")` are one request there and one answer
   # under `BTC-USD`. This looked the caller's spelling up verbatim, so only the exact
   # canonical one was found and the others were refused as unlisted, with a venue refusal the
-  # venue never sent. A value that is not a string is left for the lookup to refuse, as the
-  # real functions refuse it by raising.
+  # venue never sent. A value that is not a string never gets here from a public function:
+  # `Rest.validate_symbol/1` has already refused it as `{:invalid_symbol, value}`, as the real
+  # functions do; this clause only keeps the helper total.
   defp canonical(symbol) when is_binary(symbol) do
     symbol |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()
   end
@@ -1285,16 +1293,18 @@ defmodule DpExchange.Gemini.Fake do
   defp optional_decimal(nil), do: nil
   defp optional_decimal(value), do: decimal(value)
 
-  # --- Declared but not yet implemented -----------------------------------
+  # --- Derivatives, staking, conversion, money movement and administration -----
   #
-  # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
-  # `{:error, :not_supported}` and are declared `:unsupported` in `capabilities/0`, so a
-  # consumer routing on the declaration is told the truth.
+  # Core 0.1.16 widened the facade to the surface the venues actually publish. What this
+  # section answers, it answers from memory with the real function's refusals in the real
+  # order. The callbacks at its end that Gemini does not serve (options, watchlists,
+  # financials, news, ...) answer `{:error, :not_supported}` and are declared `:unsupported`
+  # in `capabilities/0`, so a consumer routing on the declaration is told the truth.
   #
-  # **`:unsupported` here is a statement about this package, not about the venue.** That
-  # distinction is the one Phase 1 had to correct after a package spent a year asserting a
-  # venue had no streaming API when it had fifteen services. Where the venue genuinely does
-  # not offer something, the comment beside it says so.
+  # **`:unsupported` is a statement about the declaration, and it is not always about the
+  # venue.** That distinction is the one Phase 1 had to correct after a package spent a year
+  # asserting a venue had no streaming API when it had fifteen services. See
+  # `DpExchange.Gemini`'s `@venue_does_not_serve` for which of these the venue itself lacks.
 
   @impl true
   def get_positions(opts \\ []) do
@@ -1333,8 +1343,8 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(symbol, fn ->
       # Funding is a property of a perpetual, and `Rest.get_funding/2` sends the symbol as
       # given. A name that is not a perpetual is the venue's "no data" 404 — measured 2026-09-06
-      # for `nonexistentsymbolxyz` (empty body, so a bare `:refused`); what it says for a real
-      # SPOT symbol was never probed, and this does not claim to know.
+      # for `nonexistentsymbolxyz` (empty body, so `{:refused, :refused}`); what it says for a
+      # real SPOT symbol was never probed, and this does not claim to know.
       if perpetual_symbol?(symbol) do
         # Settled and estimated differ, and by a lot — a fake that made them equal would let a
         # consumer read either as the other and still pass.
@@ -1548,7 +1558,7 @@ defmodule DpExchange.Gemini.Fake do
            venue_type: nil,
            asset: String.upcase(asset),
            # A `Decimal`, as the real decode makes it from the venue's reply, whatever shape
-           # the caller held the amount in (a string or an integer came back unchanged).
+           # the caller held the amount in (a string, an integer or a `Decimal`).
            amount: Decimal.new(wire_amount),
            amount_paid_so_far: nil,
            amount_remaining: nil,
@@ -1575,7 +1585,7 @@ defmodule DpExchange.Gemini.Fake do
            type: :unstake,
            # `nil` — `StakingWithdrawal` (`rest.yaml:9663-9692`) carries no `transactionType`
            # either. `venue_time` is `requestInitiated`, the one field this reply DOES carry
-           # that `StakingDeposit` does not — `stake/4`'s fake stays `nil` for the reason
+           # that `StakingDeposit` does not — `stake/3`'s fake stays `nil` for the reason
            # given there.
            venue_type: nil,
            asset: String.upcase(asset),
@@ -1816,8 +1826,9 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def withdraw(asset, network, amount, address, opts \\ []) do
     with_injection(fn ->
-      # The memo rule first, then the credential: `Private.withdraw/6` refuses a required
-      # memo that is missing "here, where nothing has moved", before it signs anything.
+      # The request first (memo rule, destination, amount, transfer id), then the credential:
+      # `Private.withdraw/6` refuses a required memo that is missing "here, where nothing has
+      # moved", before it signs anything.
       #
       # The memo rule is the real function's: a blank memo does not satisfy `memo_required`,
       # where this tested only for `nil` and accepted `memo: ""`.
@@ -1841,8 +1852,8 @@ defmodule DpExchange.Gemini.Fake do
            # the money has arrived.
            status: :pending,
            asset: asset,
-           # A `Decimal` and a string memo, as the real call returns them whatever shape the
-           # caller held them in.
+           # A `Decimal` amount and a string memo (an integer memo is spelled out, a blank one
+           # is none), as the real call returns them whatever shape the caller held them in.
            amount: Decimal.new(wire_amount),
            network: network,
            address: address,
@@ -1890,8 +1901,9 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def add_payment_method(details, opts \\ []) do
     with_injection(fn ->
-      # The country first, then the credential — `Private.add_payment_method/3` picks the
-      # endpoint, and refuses a country it has none for, before it signs anything.
+      # The details, then the country, then the credential — `Private.add_payment_method/3`
+      # refuses malformed details, picks the endpoint by country and refuses a country it has
+      # none for, all before it signs anything.
       with :ok <- Private.validate_payment_details(details),
            {:ok, _path} <- fake_country(Config.opt(opts, :country, "US")),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
@@ -1909,12 +1921,11 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def transfer_internal(asset, amount, transfer_opts, opts \\ []) do
     with_injection(fn ->
-      # Both ends first, then the credential: `Private.transfer_internal/5` refuses a missing
-      # `:from` or `:to` before it signs anything. The amount is written out in full, as there,
-      # through `decimal/1` — `Decimal.new/1` raised on a float.
+      # `Private.transfer_internal/5` refuses a missing `:from` or `:to` before it signs
+      # anything. The account names are checked by the real function (non-blank strings, and
+      # not the same account), then the asset and amount (the amount written out in full, as
+      # there), then the key, then the credential, as there.
       #
-      # The account names are checked by the real function (non-blank strings, and not the
-      # same account), then the asset and amount, then the key, then the credential, as there.
       # The reply carries the venue's own response fields (`rest.yaml`, "Transfer Between
       # Accounts"): `fromAccount`, `toAccount`, `amount` and a `uuid` unique to the transfer.
       # It no longer echoes the request's `asset`, a field the venue's reply does not have.

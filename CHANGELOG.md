@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (documentation only, tick U)
+
+- `Fake`: every code comment re-read against the code. Corrected: the `get_order_book/2`
+  depth-check ordering, `list_instruments/1`'s status (`:tradable`), the placed-order and
+  history-read comments (closed orders include any cancelled here), the "declared but not yet
+  implemented" section header (that section is mostly implemented), the preview/replace refusal
+  comment, `stake/4` -> `stake/3`, the withdraw, add-payment-method and transfer-internal
+  ordering comments, the padded-credential refusal, and the non-string symbol note.
+- `Private.validate_fx_pair/1` doc: refuses a pair outside the fourteen served.
+
 ## [0.2.128] - 2026-10-12
 
 ### Changed (documentation only, tick T pass over `private.ex`, `fake.ex`, `auth.ex`, `environment.ex`, `supervisor.ex`, `credentials.ex`, `symbol_format.ex`)

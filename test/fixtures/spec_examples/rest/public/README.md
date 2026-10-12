@@ -13,7 +13,7 @@ silently reconciled.
 | `book.json` | `GET /v1/book/{symbol}` | 372 | vendor's own 200 `example` |
 | `trades.json` | `GET /v1/trades/{symbol}` | 471 | **Wrapped.** The schema is `type: array` of `Trade` (rest.yaml:466-469), but the vendor's own `example` at line 471 is written as a single bare object, not an array — a spec-authoring inconsistency in the vendor's own document. Transcribed faithfully as a one-element array (`[<their object>]`) since that is what the declared response shape requires; the object's field values are untouched. |
 | `pricefeed.json` | `GET /v1/pricefeed` | 502 | vendor's own 200 `example`, 4 rows |
-| `symbols.json` | `GET /v1/symbols` | 37 | vendor's own 200 `example`, full 218-symbol list |
+| `symbols.json` | `GET /v1/symbols` | 37 | vendor's own 200 `example`, full 208-symbol list (31 of them perpetual) |
 | `symbols_details_spot.json` | `GET /v1/symbols/details/{symbol}` | 64 (`examples.spot.value`) | named example `spot` |
 | `symbols_details_perpetual.json` | `GET /v1/symbols/details/{symbol}` | 64 (`examples.perpetual.value`) | named example `perpetual` |
 | `staking_rates.json` | `GET /v1/staking/rates` | 6823 | vendor's own 200 `example` — outer key is a provider UUID, inner keys are asset symbols (see `Rest.get_staking_rates/1`'s moduledoc for the historical bug this shape exists to catch) |

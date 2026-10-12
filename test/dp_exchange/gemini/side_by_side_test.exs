@@ -75,7 +75,7 @@ defmodule DpExchange.Gemini.SideBySideTest do
                Supervisor.limiter_name(environment: :sandbox)
     end
 
-    test "each limiter is separately reachable and separately full" do
+    test "each environment's limiter is running and admits a request" do
       {_production, _sandbox} = start_both()
 
       for environment <- Environment.known() do

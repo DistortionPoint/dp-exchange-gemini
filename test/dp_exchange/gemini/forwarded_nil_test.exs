@@ -53,7 +53,7 @@ defmodule DpExchange.Gemini.ForwardedNilTest do
 
   test "an explicit recipient is still honoured" do
     probe = probe()
-    other = spawn(fn -> Process.sleep(:infinity) end)
+    other = spawn_link(fn -> Process.sleep(:infinity) end)
     Feed.subscribe_notices(probe, to: other)
 
     assert_receive {:probed, {:subscribe_notices, ^other}}

@@ -40,7 +40,12 @@ defmodule DpExchange.GeminiTest do
     test "an endpoint declared :unsupported actually returns the atom" do
       # Both directions, because a declaration that disagrees with the behaviour is worse
       # than no declaration — a caller branches on it.
-      for {{name, arity}, :unsupported} <- Gemini.capabilities().endpoints do
+      unsupported = for {endpoint, :unsupported} <- Gemini.capabilities().endpoints, do: endpoint
+
+      # A sweep over an empty list passes whatever the facade does.
+      assert unsupported != []
+
+      for {name, arity} <- unsupported do
         args = unsupported_args(name, arity)
 
         assert apply(Gemini, name, args) == {:error, :not_supported},

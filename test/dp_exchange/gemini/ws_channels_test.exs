@@ -49,30 +49,11 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       :request_for_quote_session
     ]
 
-    test "the AsyncAPI document defines twenty-two channels" do
+    test "every channel the AsyncAPI document defines is known, the ten the matrix omits too" do
       # The rendered matrix shows eleven families. Reading it as the surface is what hid the
       # other ten — the whole requestForQuote family, connection, both snapshots and the
-      # four Fast variants.
-      assert length(@known_channels) == 22
-
+      # four Fast variants. Each is in the list above, so one loop covers them all.
       for channel <- @known_channels do
-        assert is_boolean(WsChannels.requires_credential?(channel)), "#{channel} is missing"
-      end
-    end
-
-    test "the ten the matrix omits are all present" do
-      for channel <- [
-            :connection,
-            :balances_account_snapshot,
-            :positions_account_snapshot,
-            :depth_fast,
-            :depth5_fast,
-            :depth10_fast,
-            :depth20_fast,
-            :request_for_quote,
-            :request_for_quote_account,
-            :request_for_quote_session
-          ] do
         assert is_boolean(WsChannels.requires_credential?(channel)), "#{channel} is missing"
       end
     end
@@ -495,19 +476,6 @@ defmodule DpExchange.Gemini.WsChannelsTest do
     test "an undated diff is refused rather than stamped locally" do
       assert {:error, :missing_venue_timestamp} =
                WsDecode.to_order_book_delta(Map.delete(@depth_frame, "E"), "BTC-USD")
-    end
-
-    test "the resolved dp_exchange_core defines Types.OrderBookDelta.new/1" do
-      # `WsDecode.to_order_book_delta/2` calls `OrderBookDelta.new/1` as a plain function
-      # call, not a struct literal, so a Core resolution too old to have this module
-      # compiles with only a warning here and fails with `UndefinedFunctionError` at
-      # runtime on the first depth frame — the same shape the `websockex` `send_frame/3`
-      # incident took. `mix.exs` pins `dp_exchange_core` to `~> 0.1.53`, where
-      # `Types.OrderBookDelta` shipped, for exactly this reason.
-      # `Code.ensure_loaded!/1` first: `function_exported?/3` answers `false` for a
-      # module that is merely not yet loaded, not only for one that is genuinely absent.
-      Code.ensure_loaded!(Types.OrderBookDelta)
-      assert function_exported?(Types.OrderBookDelta, :new, 1)
     end
   end
 

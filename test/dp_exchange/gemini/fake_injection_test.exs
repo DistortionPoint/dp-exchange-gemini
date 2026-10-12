@@ -78,6 +78,7 @@ defmodule DpExchange.Gemini.FakeInjectionTest do
           {:get_top_of_book, 2, 0, [[]]},
           {:get_order_book, 2, 0, [[]]},
           {:get_trades, 2, 0, [[]]},
+          {:get_historical_prices, 4, 0, ["1m", [], []]},
           {:quantization, 1, 0, []},
           {:get_funding, 2, 0, [[]]},
           {:get_contract_stats, 2, 0, [[]]}

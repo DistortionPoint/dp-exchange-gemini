@@ -163,7 +163,12 @@ defmodule DpExchange.Gemini.AuthTest do
     end
 
     test "the default is the venue's own recommendation" do
-      assert Auth.nonce() == Auth.nonce(:time_based)
+      # Bracketed: the clock is in whole seconds, so two reads can straddle a boundary.
+      before = Auth.nonce(:time_based)
+      default = Auth.nonce()
+      after_ = Auth.nonce(:time_based)
+
+      assert default in before..after_//1
     end
 
     test "the mode reaches the signed payload" do

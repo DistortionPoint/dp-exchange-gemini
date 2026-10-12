@@ -124,6 +124,10 @@ defmodule DpExchange.Gemini.SymbolFormatTest do
         end)
         |> MapSet.new()
 
+      # A comprehension over nothing proves nothing: the snapshot must contain ambiguous
+      # symbols for this check to be able to fail.
+      assert Enum.any?(spot, &match?([_first, _second | _rest], splits(&1)))
+
       wrong =
         for native <- spot,
             [_first, _second | _rest] = candidates <- [splits(native)],
@@ -146,6 +150,8 @@ defmodule DpExchange.Gemini.SymbolFormatTest do
 
     test "every spot symbol round-trips through canonical and back" do
       spot = @snapshot |> File.read!() |> Jason.decode!() |> Enum.reject(&(&1 =~ ~r/perp$/))
+
+      assert spot != []
 
       assert Enum.reject(spot, fn native ->
                canonical = SymbolFormat.to_canonical_symbol(native)

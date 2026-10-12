@@ -174,6 +174,8 @@ defmodule DpExchange.Gemini.RestTest do
                Rest.get_price("BTC-USD", plug: responding(@ticker), retry_attempts: 0)
 
       refute quote_struct.venue_time == volume_time
+      # The stronger statement, which the line above follows from: no trade time is stated.
+      assert quote_struct.venue_time == nil
     end
 
     test "a 400 is a REFUSAL carrying the venue's own reason AND its message" do

@@ -182,7 +182,9 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
       send(feed, {:dp_exchange, :gemini, quote_for("BTC-USD")})
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :gemini, %Notice{kind: :degraded}}, 100
+      # No window needed: the feed sends any notice before it answers the call above, and
+      # signals from one sender arrive in order, so a notice would already be in the mailbox.
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
     end
 
     test "one stalled subscriber does not cost a healthy one its data" do
@@ -628,7 +630,9 @@ defmodule DpExchange.Gemini.FeedTest do
 
       :ok = Feed.subscribe(feed, [], to: self())
 
-      refute_receive {:frame_sent, _frame}, 50
+      # `subscribe/3` is a call: any frame it sent was reported by the stand-in socket before
+      # the call returned, so it is already in the mailbox if it exists.
+      refute_received {:frame_sent, _frame}
     end
   end
 
@@ -655,7 +659,9 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, :resubscribe)
       assert :ok = Feed.subscribe(feed, ["ETH-USD"], to: self())
 
-      refute_receive {:frame_sent, _frame}, 100
+      # Settled, not waited for: the `:resubscribe` and the call above are handled in order.
+      _settled = Feed.coverage(feed)
+      refute_received {:frame_sent, _frame}
 
       socket = :sys.get_state(feed).socket
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
@@ -949,13 +955,18 @@ defmodule DpExchange.Gemini.FeedTest do
         Map.put(state, :crash_run, {1, System.monotonic_time(:millisecond)})
       end)
 
+      killed_at = System.monotonic_time(:millisecond)
       Process.exit(socket, :kill)
 
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 5_000
-      refute_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}, 700
 
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change, severity: :warning}},
                      5_000
+
+      # A LOWER bound on the wait, which load can only lengthen: the redial that produces this
+      # notice is held back about a second (the previous crash was "a moment ago"). A refute
+      # window here failed whenever the test process was slow to reach it.
+      assert System.monotonic_time(:millisecond) - killed_at >= 900
     end
 
     test "the redial delay doubles through a run and is capped" do
@@ -1039,7 +1050,8 @@ defmodule DpExchange.Gemini.FeedTest do
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
 
       assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
-      refute_receive {:frame_sent, _second_frame}, 100
+      # The call has returned, so a second frame would already be in the mailbox.
+      refute_received {:frame_sent, _second_frame}
     end
 
     test "an explicit channels: [:quotes, :top_of_book] is identical to the default" do
@@ -1048,7 +1060,7 @@ defmodule DpExchange.Gemini.FeedTest do
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
 
       assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
-      refute_receive {:frame_sent, _second_frame}, 100
+      refute_received {:frame_sent, _second_frame}
     end
 
     test ":trades in channels: subscribes @trade alongside @bookTicker, for every wanted " <>
@@ -1237,7 +1249,9 @@ defmodule DpExchange.Gemini.FeedTest do
       assert_receive {:frame_sent,
                       %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
 
-      refute_receive {:frame_sent, %{"method" => "subscribe"}}, 100
+      # Settled by a call that queues behind the `:resubscribe`, not by a refute window.
+      _settled = Feed.coverage(feed)
+      refute_received {:frame_sent, %{"method" => "subscribe"}}
     end
 
     test "a symbol wanted again is not unsubscribed by an old retry" do
@@ -1336,7 +1350,8 @@ defmodule DpExchange.Gemini.FeedTest do
       assert_receive {:frame_sent,
                       %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
 
-      refute_receive {:frame_sent, %{"method" => "subscribe"}}, 100
+      _settled = Feed.coverage(feed)
+      refute_received {:frame_sent, %{"method" => "subscribe"}}
     end
 
     test "a failed subscribe leaves a notice subscriber's monitor alone" do

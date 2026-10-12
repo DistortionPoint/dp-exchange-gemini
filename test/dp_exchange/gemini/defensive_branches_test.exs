@@ -267,7 +267,8 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
       :ok = Fake.subscribe(["NOPE-USD"], to: self())
 
       assert Fake.coverage() == %{}
-      refute_receive {:dp_exchange, :gemini, _payload}, 50
+      # `Fake.subscribe/2` pushes inside the call, so a push would already be in the mailbox.
+      refute_received {:dp_exchange, :gemini, _payload}
     end
 
     test "quantization answers for a listed symbol" do

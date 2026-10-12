@@ -249,7 +249,7 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
   end
 
   describe "the fake filters by what it is given" do
-    test "closed orders: symbol, since and limit narrow the one order it holds" do
+    test "closed orders: symbol, since and limit narrow the closed orders it holds" do
       assert {:ok, [order]} = Fake.get_orders(@credentials, history: true, symbol: "btcusd")
       assert order.symbol == "BTC-USD"
 
@@ -626,7 +626,7 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
     end
 
     test "is tagged with the venue, not with the private limiter bucket" do
-      opts = [plug: timing_out(), retry_attempts: 1]
+      opts = [plug: timing_out(), retry_attempts: 1, retry_delay: 1]
 
       for result <- [
             Private.get_balances(@credentials, opts),

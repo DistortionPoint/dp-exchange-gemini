@@ -51,11 +51,13 @@ defmodule DpExchange.Gemini.WriteOnceTest do
 
   defp opts(extra), do: [plug: timing_out(self()), retry_delay: 1] ++ extra
 
+  # The plug runs inside the call under test, retries included, so every request there will
+  # ever be is already in the mailbox when the call returns: no window to wait out.
   defp requests(acc \\ []) do
     receive do
       {:request, path} -> requests([path | acc])
     after
-      100 -> Enum.reverse(acc)
+      0 -> Enum.reverse(acc)
     end
   end
 

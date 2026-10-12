@@ -99,7 +99,8 @@ defmodule DpExchange.Gemini.SocketTest do
       assert {:ok, _state} = deliver(frame)
 
       assert_receive {:dp_exchange, :gemini, %TopOfBook{}}
-      refute_receive {:dp_exchange, :gemini, %Quote{}}
+      # `deliver/1` is a direct call: everything it sends is already in the mailbox.
+      refute_received {:dp_exchange, :gemini, %Quote{}}
     end
 
     test "price is the last trade when the book has traded" do
@@ -122,7 +123,7 @@ defmodule DpExchange.Gemini.SocketTest do
       assert Decimal.equal?(bid, Decimal.new("77845.79000"))
       assert ask
 
-      refute_receive {:dp_exchange, :gemini, %Quote{}}, 50
+      refute_received {:dp_exchange, :gemini, %Quote{}}
     end
 
     test "a frame with NO event time still delivers the book and the last trade" do
@@ -202,7 +203,7 @@ defmodule DpExchange.Gemini.SocketTest do
       assert {:ok, _state} =
                Socket.handle_frame({:text, Jason.encode!(@book_ticker)}, state_after_first)
 
-      refute_receive {:dp_exchange, :gemini, %Quote{}}, 50
+      refute_received {:dp_exchange, :gemini, %Quote{}}
     end
 
     test "a CHANGED last trade price delivers a new Quote" do
@@ -248,7 +249,7 @@ defmodule DpExchange.Gemini.SocketTest do
     test "a successful subscribe ack is not noise" do
       assert {:ok, _state} = deliver(%{"id" => 1, "status" => 200})
 
-      refute_receive {:dp_exchange, :gemini, %Notice{}}, 50
+      refute_received {:dp_exchange, :gemini, %Notice{}}
     end
   end
 
@@ -627,9 +628,11 @@ defmodule DpExchange.Gemini.SocketTest do
           [:dp_exchange, :link, :event]
         ],
         fn event, measurements, metadata, _config ->
-          # Scoped by provider: `:telemetry` handlers are global to the VM, so an unscoped
-          # one also receives every other concurrently-running test's events.
-          if metadata.provider == :gemini do
+          # Scoped to this test: `:telemetry` handlers are global to the VM, but they run in
+          # the EMITTING process, and these tests call the socket callbacks directly. Another
+          # async test's `:gemini` event (same provider, same counts) would otherwise satisfy
+          # an `assert_receive` here while this test's own emit was broken.
+          if self() == test_pid and metadata.provider == :gemini do
             send(test_pid, {:telemetry, event, measurements, metadata})
           end
         end,

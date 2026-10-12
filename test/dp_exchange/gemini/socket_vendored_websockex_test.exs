@@ -136,7 +136,9 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
 
     assert_receive {:client_reply, {:ok, <<138, _rest::binary>>}}, 10_000
-    refute_receive {:dp_exchange, :gemini, %Notice{kind: :link_down}}, 200
+    # No window: a close would have been announced before the client could answer the ping
+    # that produced the pong above, so the notice would already be in the mailbox.
+    refute_received {:dp_exchange, :gemini, %Notice{kind: :link_down}}
     assert Process.alive?(socket_pid)
   end
 

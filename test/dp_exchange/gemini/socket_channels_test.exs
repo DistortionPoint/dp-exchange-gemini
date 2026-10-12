@@ -847,6 +847,11 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     test "non-partial-depth channels never touch the claim", %{socket: socket} do
       assert :ok = Socket.subscribe(socket, ["BTC-USD"], :book_ticker)
       assert :ok = Socket.subscribe(socket, ["ETH-USD"], :trade)
+
+      # Nothing was claimed (or recorded as a depth subscription) by either call.
+      state = :sys.get_state(socket)
+      assert Map.get(state, :partial_depth_claims, MapSet.new()) == MapSet.new()
+      assert Map.get(state, :depth_streams, MapSet.new()) == MapSet.new()
     end
   end
 end

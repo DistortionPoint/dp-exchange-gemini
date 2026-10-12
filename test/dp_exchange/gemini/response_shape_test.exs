@@ -282,9 +282,10 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
             )
           end)
 
-        # Three seconds, not one: the hang this guards took longer than four (measured at the
-        # 4-second kill), and one second timed out under a loaded full suite, 2026-09-29.
-        Task.yield(task, 3_000) || Task.shutdown(task, :brutal_kill)
+        # Ten seconds: the hang this guards ran past four (measured at the 4-second kill), and
+        # one second timed out under a loaded full suite, 2026-09-29. A healthy call answers
+        # at once, so the margin only costs time when the guarded hang is back.
+        Task.yield(task, 10_000) || Task.shutdown(task, :brutal_kill)
       end
 
       for max_age <- [999_999_999_999_999_999_999_999_999, -(10 ** 27), 3_600_001] do

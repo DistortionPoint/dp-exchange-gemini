@@ -38,10 +38,12 @@ defmodule DpExchange.Gemini.FakeTest do
       # A fake that stamps `utc_now/0` cannot be used to test anything about freshness,
       # and is itself the substitution this family refuses.
       {:ok, first} = Fake.get_price("BTC-USD")
-      Process.sleep(5)
       {:ok, second} = Fake.get_price("BTC-USD")
 
-      assert first.venue_time == second.venue_time
+      # `venue_time` is `nil` on the REST quote (the venue states none), so the clock the fake
+      # could stamp is `observed_at`: two reads are the same fixed instant, in the past.
+      assert first.observed_at == second.observed_at
+      assert first.observed_at == ~U[2026-08-28 12:00:00Z]
     end
   end
 
@@ -73,9 +75,14 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "a range inside the window succeeds" do
-      recent = ~U[2026-08-27 00:00:00Z]
+      # Relative to now, not a fixed date: the `1d` window is 364 bars, so a hardcoded start
+      # stops being inside it a year after it was written. The fake moves its bar to the first
+      # boundary at or after `start`, which for a start this recent is still forming, hence
+      # `include_partial: true`.
+      recent = DateTime.add(DateTime.utc_now(), -12 * 3_600, :second)
 
-      assert {:ok, [_candle]} = Fake.get_historical_prices("BTC-USD", "1d", start: recent)
+      assert {:ok, [_candle]} =
+               Fake.get_historical_prices("BTC-USD", "1d", [start: recent], include_partial: true)
     end
 
     test "a range the bar falls outside of is an empty list, as Rest's own filter would give" do
@@ -297,7 +304,8 @@ defmodule DpExchange.Gemini.FakeTest do
       :ok = Fake.subscribe(["BTC-USD"], to: self())
 
       assert_receive {:dp_exchange, :gemini, %Quote{}}
-      refute_receive {:dp_exchange, :gemini, %Trade{}}, 50
+      # `Fake.subscribe/2` pushes inside the call: a Trade would already be in the mailbox.
+      refute_received {:dp_exchange, :gemini, %Trade{}}
     end
 
     test "channels: [:trades] pushes a Trade alongside the streamed Quote" do
@@ -319,7 +327,7 @@ defmodule DpExchange.Gemini.FakeTest do
     test "an unlisted symbol gets no Trade, same as it gets no Quote" do
       :ok = Fake.subscribe(["NOPE-USD"], to: self(), channels: [:trades])
 
-      refute_receive {:dp_exchange, :gemini, _anything}, 50
+      refute_received {:dp_exchange, :gemini, _anything}
     end
 
     test "coverage_by_kind/1 tracks trades coverage independently of quotes coverage" do

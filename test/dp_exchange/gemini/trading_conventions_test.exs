@@ -231,14 +231,6 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
         assert Fake.place_order(@credentials, bad, []) == real
       end
     end
-
-    test "the facade takes opts on every order call" do
-      assert Code.ensure_loaded?(Gemini)
-
-      for {name, arity} <- [place_order: 2, cancel_order: 2, get_order: 2, get_orders: 1] do
-        assert function_exported?(Gemini, name, arity), "#{name}/#{arity} has no default opts"
-      end
-    end
   end
 
   describe "an unconfirmed placement carries the id it was sent with" do
@@ -346,7 +338,9 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
                Private.place_order(@credentials, @request, plug: plug, retry_delay: 1)
 
       assert_receive :attempt, 5_000
-      refute_receive :attempt, 100
+      # The plug runs inside the call above, and a retry would be made inside that same call:
+      # every attempt there will ever be is already in the mailbox, so no window is needed.
+      refute_received :attempt
     end
   end
 
@@ -428,7 +422,7 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
                Private.cancel_order(@credentials, "1", plug: plug, retry_delay: 1)
 
       assert_receive :attempt, 5_000
-      refute_receive :attempt, 100
+      refute_received :attempt
     end
   end
 

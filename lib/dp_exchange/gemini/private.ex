@@ -2493,7 +2493,7 @@ defmodule DpExchange.Gemini.Private do
 
   @doc """
   The venue's spelling of `pair` (`EUR-USD` and `eurusd` are both `EURUSD`), or
-  `{:error, {:unsupported_fx_pair, native}}` for one of the fourteen it does not serve.
+  `{:error, {:unsupported_fx_pair, native}}` for any pair outside the fourteen it serves.
 
   Checked before anything is signed. Exposed so `DpExchange.Gemini.Fake` refuses with this
   function in the same order.
