@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.126] - 2026-10-12
+
 ### Fixed (tick S review of the tick R changes)
 
 - **`get_historical_prices/4` with `include_partial: true` no longer drops a bar that opened
