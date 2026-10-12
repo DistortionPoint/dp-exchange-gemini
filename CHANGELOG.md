@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.130] - 2026-10-12
+
 - **A bookTicker frame with an absent, blank or non-text symbol was dropped in silence.** Trade
   and depth frames with the same defect raise one `:data_quality` notice; this one now does too
   (`"undecodable book ticker"`, the venue's value quoted bounded).
