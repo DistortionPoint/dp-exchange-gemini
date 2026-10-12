@@ -147,15 +147,15 @@ defmodule DpExchange.GeminiDelegationTest do
   end
 
   describe "quantization/1 is optional in the contract and implemented here" do
-    test "it is NOT declared unsupported" do
+    test "it is declared implemented (experimental or proven), never unsupported" do
       # Coinbase declares it unsupported; this venue publishes the numbers, so declaring
       # it unsupported would understate what the package can do.
-      assert Gemini.capabilities().endpoints[{:quantization, 1}] == :experimental
+      assert Gemini.capabilities().endpoints[{:quantization, 1}] in [:experimental, :proven]
     end
   end
 
   describe "streaming reaches the feed through the facade" do
-    test "subscribe, coverage and unsubscribe round-trip", %{opts: opts} do
+    test "update_symbols, coverage and unsubscribe round-trip", %{opts: opts} do
       feed = Process.whereis(opts[:feed])
 
       quote_struct = %Quote{
@@ -239,10 +239,6 @@ defmodule DpExchange.GeminiDelegationTest do
       assert Gemini.coverage(feed: opts[:feed]) == %{"BTC-USD" => :stream}
     end
 
-    test "update_symbols/2 reaches the feed", %{opts: opts} do
-      assert Gemini.update_symbols(["BTC-USD"], feed: opts[:feed]) == :ok
-    end
-
     test "subscribe_notices/1 registers the caller", %{opts: opts} do
       assert Gemini.subscribe_notices(feed: opts[:feed], to: self()) == :ok
 
@@ -251,7 +247,7 @@ defmodule DpExchange.GeminiDelegationTest do
         {:dp_exchange, :gemini, DpExchange.Core.Notice.new(:link_up, :gemini)}
       )
 
-      assert_receive {:dp_exchange, :gemini, %DpExchange.Core.Notice{kind: :link_up}}
+      assert_receive {:dp_exchange, :gemini, %DpExchange.Core.Notice{kind: :link_up}}, 5_000
     end
   end
 

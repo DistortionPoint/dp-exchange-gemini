@@ -1579,6 +1579,25 @@ defmodule DpExchange.Gemini.Socket do
     {:ok, state}
   end
 
+  # A bookTicker-shaped frame (string `b` and `a`) whose `s` is absent, blank or not text names
+  # no symbol to deliver for. Trades and depth frames with the same defect raise one notice;
+  # this one was dropped in silence. The symbol is quoted bounded: it is whatever the venue
+  # sent, and a map there must not reach `Notice.new/3` as structure.
+  defp handle_message(%{"b" => bid, "a" => ask} = message, state)
+       when not is_list(bid) and not is_list(ask) do
+    notify(
+      state,
+      Notice.new(:data_quality, :gemini,
+        details: %{
+          reason: "undecodable book ticker",
+          symbol: inspect(message["s"], limit: 5, printable_limit: 64)
+        }
+      )
+    )
+
+    {:ok, state}
+  end
+
   defp handle_message(_other, state), do: {:ok, state}
 
   # A frame ending at or before what was already applied is a replay, not news. Applied, it

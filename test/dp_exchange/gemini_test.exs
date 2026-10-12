@@ -206,9 +206,13 @@ defmodule DpExchange.GeminiTest do
       _settled = Gemini.coverage(feed: feed)
 
       declared = MapSet.new(Gemini.capabilities().streamable)
-      reported = [feed: feed] |> Gemini.coverage_by_kind() |> Map.keys() |> MapSet.new()
+      by_kind = Gemini.coverage_by_kind(feed: feed)
+      reported = by_kind |> Map.keys() |> MapSet.new()
 
       assert MapSet.subset?(reported, declared)
+      # A subset of nothing passes whatever the facade does: the delivered symbol must be
+      # present under the kind it arrived as.
+      assert by_kind.top_of_book == %{"BTC-USD" => :stream}
     end
 
     test "the union of its symbols across kinds matches coverage/1's keys exactly" do
@@ -254,6 +258,8 @@ defmodule DpExchange.GeminiTest do
         |> Enum.uniq()
         |> Enum.sort()
 
+      # Two empty sides are equal, so pin the symbols that were actually delivered.
+      assert union == ["BTC-USD", "ETH-USD"]
       assert union == [feed: feed] |> Gemini.coverage() |> Map.keys() |> Enum.sort()
     end
   end

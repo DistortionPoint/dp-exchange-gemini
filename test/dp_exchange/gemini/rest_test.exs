@@ -203,14 +203,12 @@ defmodule DpExchange.Gemini.RestTest do
       message = "Nonce '1757000000' has not increased since your last call to /v1/balances"
       body = %{"result" => "error", "reason" => "InvalidNonce", "message" => message}
 
-      assert {:refused, {:invalid_nonce, ^message}} =
-               Rest.get_price("BTC-USD", plug: responding(body, status: 400), retry_attempts: 0)
-
-      # And the comparison the consumer's own diagnostic procedure needs is now reachable:
-      # the nonce is in the text, so a caller can weigh it against 2^64.
+      # The comparison the consumer's own diagnostic procedure needs is reachable: the nonce is
+      # in the text, so a caller can weigh it against 2^64.
       assert {:refused, {:invalid_nonce, text}} =
                Rest.get_price("BTC-USD", plug: responding(body, status: 400), retry_attempts: 0)
 
+      assert text == message
       assert text =~ "1757000000"
     end
 
@@ -426,10 +424,13 @@ defmodule DpExchange.Gemini.RestTest do
       assert first.provider == :gemini
     end
 
-    # A closed minute and the minute still forming, both on a boundary.
+    # A closed day and the day still forming, both on a boundary. A day, not a minute: the
+    # forming bar stays forming for the whole of the test unless it straddles 00:00 UTC, where
+    # a minute bar would turn closed if the test crossed a minute boundary between building the
+    # fixture and the call.
     defp closed_and_forming do
-      current = div(DateTime.to_unix(DateTime.utc_now()), 60) * 60_000
-      closed = current - 60_000
+      current = div(DateTime.to_unix(DateTime.utc_now()), 86_400) * 86_400_000
+      closed = current - 86_400_000
 
       {closed, current,
        [
@@ -442,7 +443,7 @@ defmodule DpExchange.Gemini.RestTest do
       {closed, current, rows} = closed_and_forming()
 
       assert {:ok, [only]} =
-               Rest.get_historical_prices("BTC-USD", "1m", [],
+               Rest.get_historical_prices("BTC-USD", "1d", [],
                  plug: responding(rows),
                  retry_attempts: 0
                )
@@ -450,7 +451,7 @@ defmodule DpExchange.Gemini.RestTest do
       assert DateTime.to_unix(only.opened_at, :millisecond) == closed
 
       assert {:ok, [_closed, forming]} =
-               Rest.get_historical_prices("BTC-USD", "1m", [],
+               Rest.get_historical_prices("BTC-USD", "1d", [],
                  plug: responding(rows),
                  retry_attempts: 0,
                  include_partial: true
@@ -459,7 +460,7 @@ defmodule DpExchange.Gemini.RestTest do
       assert DateTime.to_unix(forming.opened_at, :millisecond) == current
 
       assert {:error, {:invalid_option, :include_partial, "yes"}} =
-               Rest.get_historical_prices("BTC-USD", "1m", [],
+               Rest.get_historical_prices("BTC-USD", "1d", [],
                  plug: responding(rows),
                  retry_attempts: 0,
                  include_partial: "yes"

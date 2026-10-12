@@ -418,6 +418,36 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert WsDecode.depth_gap?(%{"u" => 15}, 10) == true
     end
 
+    test "the first id after the applied one is contiguous, one past that is the gap" do
+      assert WsDecode.depth_gap?(%{"U" => 11, "u" => 11}, 10) == false
+      assert WsDecode.depth_gap?(%{"U" => 12, "u" => 12}, 10) == true
+    end
+
+    test "a frame ending at or before the applied id is a replay; unreadable is not" do
+      assert WsDecode.stale_depth?(10, 10) == true
+      assert WsDecode.stale_depth?(9, 10) == true
+      assert WsDecode.stale_depth?(11, 10) == false
+      assert WsDecode.stale_depth?(nil, 10) == false
+      assert WsDecode.stale_depth?(11, nil) == false
+      assert WsDecode.stale_depth?("11", 10) == false
+    end
+
+    test "a counter that went back further than the frame's own span is a restart" do
+      # Span is u - U + 1 = 5 here: ending 5 behind is a late duplicate, 6 behind is a restart.
+      frame = %{"U" => 11, "u" => 15}
+      assert WsDecode.depth_restart?(frame, 20) == false
+      assert WsDecode.depth_restart?(frame, 21) == true
+      assert WsDecode.depth_restart?(frame, 15) == false
+
+      # With no readable U the span is 1.
+      assert WsDecode.depth_restart?(%{"u" => 15}, 16) == false
+      assert WsDecode.depth_restart?(%{"u" => 15}, 17) == true
+      assert WsDecode.depth_restart?(%{"U" => "x", "u" => 15}, 17) == true
+
+      assert WsDecode.depth_restart?(frame, nil) == false
+      assert WsDecode.depth_restart?(%{"U" => 1}, 20) == false
+    end
+
     test "a zero quantity is returned, not filtered — it is a DELETE" do
       # The vendor: "A quantity of zero removes that price level in differential depth
       # updates." Filtering here would drop the deletion and leave a level nobody quotes
@@ -532,6 +562,9 @@ defmodule DpExchange.Gemini.WsChannelsTest do
 
       assert Enum.map(book.bids, fn {price, _qty} -> Decimal.to_string(price) end) ==
                ["101.50", "100.00"]
+
+      assert Enum.map(book.asks, fn {price, _qty} -> Decimal.to_string(price) end) ==
+               ["103.00"]
     end
 
     test "`u` becomes the sequence, the same value the next diff's `U` is checked against" do

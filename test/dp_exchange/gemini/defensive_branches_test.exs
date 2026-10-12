@@ -222,9 +222,12 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
 
     test "a time_in_force the venue does not serve is refused before any request" do
       # `:gtd` and `:day` are in the contract's vocabulary; Gemini serves neither.
+      exploding = fn _conn -> raise "must not reach the venue" end
+
       for tif <- [:gtd, :day] do
         assert {:error, {:unsupported_order_combination, :limit, ^tif}} =
                  Private.place_order(@credentials, Map.put(@request, :time_in_force, tif),
+                   plug: exploding,
                    retry_attempts: 0
                  )
       end
@@ -278,8 +281,13 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
   end
 
   describe "the facade's own short forms" do
-    test "coverage/0 answers for an unstarted default feed" do
-      assert DpExchange.Gemini.coverage() == %{}
+    test "coverage/1 answers an empty map for a feed that is not running" do
+      # A name no other test can have started: the default feed's name is global to the node,
+      # and an async test that started it would change this answer.
+      absent = :"absent_feed_#{System.unique_integer([:positive])}"
+
+      assert DpExchange.Gemini.coverage(feed: absent) == %{}
+      assert DpExchange.Gemini.coverage_by_kind(feed: absent) == %{}
     end
   end
 

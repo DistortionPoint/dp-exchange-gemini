@@ -51,6 +51,9 @@ defmodule DpExchange.Gemini.AdminTest do
     end
   end
 
+  # Stands in for the venue on a call that must be refused first.
+  defp exploding, do: fn _conn -> raise "must not reach the venue" end
+
   defp capturing(body, test_pid) do
     fn conn ->
       payload =
@@ -148,7 +151,11 @@ defmodule DpExchange.Gemini.AdminTest do
 
     test "neither is refused rather than sent as a call that changes nothing" do
       assert {:error, :nothing_to_rename} =
-               Private.rename_account(@credentials, account: "bot-one")
+               Private.rename_account(@credentials,
+                 account: "bot-one",
+                 plug: exploding(),
+                 retry_attempts: 0
+               )
     end
   end
 
@@ -285,8 +292,10 @@ defmodule DpExchange.Gemini.AdminTest do
       assert {:error, _reason} =
                Private.refresh_access_token("client-1", "old-refresh", plug: plug)
 
-      assert_receive :attempt
-      refute_receive :attempt, 200
+      assert_receive :attempt, 5_000
+      # The plug runs inside the call above, so every attempt there will ever be is already in
+      # the mailbox: no window decides this.
+      refute_received :attempt
     end
 
     test "a confidential client's secret is sent when given" do
@@ -321,7 +330,10 @@ defmodule DpExchange.Gemini.AdminTest do
     test "revoking needs an OAuth token and refuses an API key" do
       # An API-key-signed call would revoke nothing and come back shaped like success.
       assert {:error, :oauth_token_required} =
-               Private.revoke_access_token(@credentials, [])
+               Private.revoke_access_token(@credentials,
+                 plug: exploding(),
+                 retry_attempts: 0
+               )
     end
 
     test "revoking with a token reaches the venue" do
@@ -355,7 +367,9 @@ defmodule DpExchange.Gemini.AdminTest do
     test "the facade delegates each" do
       base = [credentials: @credentials, retry_attempts: 0]
 
-      assert {:error, :name_required} = DpExchange.Gemini.create_account(base)
+      refusing = base ++ [plug: exploding()]
+
+      assert {:error, :name_required} = DpExchange.Gemini.create_account(refusing)
 
       assert {:ok, _account} =
                DpExchange.Gemini.create_account(
@@ -368,7 +382,7 @@ defmodule DpExchange.Gemini.AdminTest do
       assert {:ok, []} = DpExchange.Gemini.list_accounts(base ++ [plug: responding([])])
       assert {:ok, _roles} = DpExchange.Gemini.get_roles(base ++ [plug: responding(%{})])
 
-      assert {:error, :oauth_token_required} = DpExchange.Gemini.revoke_access_token(base)
+      assert {:error, :oauth_token_required} = DpExchange.Gemini.revoke_access_token(refusing)
     end
   end
 end

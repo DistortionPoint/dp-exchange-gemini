@@ -762,21 +762,30 @@ defmodule DpExchange.Gemini.StakingTest do
     test "a stake sends the venue's own parameter names" do
       me = self()
 
-      assert {:ok, _tx} =
+      # The reply is the venue's `StakingDeposit` (rest.yaml:6640-6646): no `transactionType`.
+      # The type comes from which endpoint was called.
+      assert {:ok, tx} =
                Private.stake("eth", Decimal.new("1.5"), @credentials,
                  provider_id: "provider-a",
                  plug:
                    capturing(
                      %{
                        "transactionId" => "stk-6",
-                       "transactionType" => "Deposit",
+                       "providerId" => "provider-a",
                        "currency" => "ETH",
-                       "amount" => "1.5"
+                       "amount" => "1.5",
+                       "rates" => %{"rate" => 540}
                      },
                      me
                    ),
                  retry_attempts: 0
                )
+
+      assert tx.type == :stake
+      assert tx.venue_type == nil
+      assert tx.provider_id == "provider-a"
+      assert tx.asset == "ETH"
+      assert Decimal.equal?(tx.amount, Decimal.new("1.5"))
 
       assert_receive {:payload, payload, "/v1/staking/stake"}
       assert payload["currency"] == "ETH"
@@ -794,7 +803,7 @@ defmodule DpExchange.Gemini.StakingTest do
                    capturing(
                      %{
                        "transactionId" => "stk-7",
-                       "transactionType" => "Deposit",
+                       "providerId" => "provider-a",
                        "currency" => "ETH",
                        "amount" => "0.00000001"
                      },
@@ -808,13 +817,15 @@ defmodule DpExchange.Gemini.StakingTest do
     end
 
     test "an unstake reports what is still unbonding" do
+      # The venue's `StakingWithdrawal` (rest.yaml:7035-7041): `requestInitiated`, no
+      # `transactionType` and no `providerId`.
       body = %{
         "transactionId" => "stk-redeem",
-        "transactionType" => "Redeem",
         "currency" => "ETH",
         "amount" => "10",
         "amountPaidSoFar" => "0",
-        "amountRemaining" => "10"
+        "amountRemaining" => "10",
+        "requestInitiated" => "2026-08-28T17:00:01.000Z"
       }
 
       assert {:ok, tx} =
@@ -825,6 +836,9 @@ defmodule DpExchange.Gemini.StakingTest do
                )
 
       # The dangerous reading is "ten arrived". Ten was asked for and none has arrived.
+      assert tx.type == :unstake
+      assert tx.venue_type == nil
+      assert tx.venue_time == ~U[2026-08-28 17:00:01.000Z]
       assert Decimal.equal?(tx.amount, Decimal.new("10"))
       assert Decimal.equal?(tx.amount_remaining, Decimal.new("10"))
       refute Types.StakingTransaction.settled?(tx)

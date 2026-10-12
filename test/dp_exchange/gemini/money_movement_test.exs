@@ -148,7 +148,6 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                )
 
       assert withdrawal.status == :pending
-      refute withdrawal.status == :completed
     end
 
     test "a status the package does not recognise is pending, not completed" do
@@ -212,7 +211,6 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                )
 
       assert address.memo_required == nil
-      refute address.memo_required == false
     end
 
     test "a label is passed through when given" do
@@ -773,7 +771,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       #
       # This is not a ban on retrying. It is a ban on repeating an ACTION the venue cannot
       # tell apart from the first one: `withdraw/6` always sends a `clientTransferId` and
-      # therefore still retries, which the test above pins.
+      # therefore still retries, which `write_conventions_test.exs` pins.
       me = self()
 
       plug = fn conn ->
@@ -819,7 +817,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
         retry_delay: 1
       )
 
-      assert_receive :attempt
+      assert_receive :attempt, 5_000
       refute_receive :attempt, 200
     end
 
@@ -836,7 +834,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
 
       Private.get_balances(@credentials, plug: plug, retry_attempts: 2, retry_delay: 1)
 
-      assert_receive :attempt
+      assert_receive :attempt, 5_000
       assert_receive :attempt, 5_000
     end
   end

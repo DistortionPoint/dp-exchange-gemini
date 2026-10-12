@@ -87,28 +87,24 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert quote_struct.volume == nil
     end
 
-    test "a Date header with an unknown month name is nil, not a guess" do
-      # The `Date` header is not read at all (MD7), so a garbled one changes nothing: the
-      # traded price is still delivered and `venue_time` is nil.
-      assert {:ok, %{venue_time: nil}} =
-               Rest.get_price("BTC-USD",
-                 plug:
-                   responding(%{"bid" => "1", "ask" => "2", "last" => "1"},
-                     date: "Fri, 28 Xxx 2026 17:00:01 GMT"
-                   ),
-                 retry_attempts: 0
-               )
-    end
+    test "a garbled or non-GMT Date header is never read: venue_time stays nil, not a guess" do
+      # The `Date` header is not read at all on the public path (MD7), so a garbled one
+      # changes nothing: the traded price is still delivered and `venue_time` is nil. A zone
+      # other than GMT (RFC 7231 requires GMT) must not be read as UTC either.
+      for date <- [
+            "Fri, 28 Xxx 2026 17:00:01 GMT",
+            "Fri, XX Aug 2026 17:00:01 GMT",
+            "Fri, 28 Aug 2026 17:00:01 PST"
+          ] do
+        assert {:ok, %{venue_time: nil, price: price}} =
+                 Rest.get_price("BTC-USD",
+                   plug: responding(%{"bid" => "1", "ask" => "2", "last" => "1"}, date: date),
+                   retry_attempts: 0
+                 ),
+               "a Date header of #{date} must not change the answer"
 
-    test "a Date header with a non-numeric field is nil, not a guess" do
-      assert {:ok, %{venue_time: nil}} =
-               Rest.get_price("BTC-USD",
-                 plug:
-                   responding(%{"bid" => "1", "ask" => "2", "last" => "1"},
-                     date: "Fri, XX Aug 2026 17:00:01 GMT"
-                   ),
-                 retry_attempts: 0
-               )
+        assert Decimal.equal?(price, Decimal.new("1"))
+      end
     end
 
     test "a 200 that is not a ticker is an error, not a Quote full of nils" do
@@ -203,7 +199,9 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
         "asks" => [%{"price" => "2", "amount" => "1", "timestamp" => 1_787_936_378}]
       }
 
-      assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: responding(body))
+      assert {:ok, book} =
+               Rest.get_order_book("BTC-USD", plug: responding(body), retry_attempts: 0)
+
       assert [{bid_price, _bid_size}] = book.bids
       assert [{ask_price, _ask_size}] = book.asks
       assert Decimal.equal?(bid_price, Decimal.new("1"))
@@ -214,8 +212,10 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
 
   describe "query parameters" do
     test "depth is sent to the venue rather than trimmed here" do
+      me = self()
+
       plug = fn conn ->
-        assert conn.query_string =~ "limit_bids=5"
+        send(me, {:query, conn.query_string})
         Req.Test.json(conn, %{"bids" => [], "asks" => []})
       end
 
@@ -224,6 +224,8 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
 
       assert book.bids == []
       assert book.asks == []
+      assert_receive {:query, query}, 5_000
+      assert query =~ "limit_bids=5"
     end
   end
 
@@ -248,7 +250,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       # retries will make a process that does not exist accept the batch.
       dead = spawn(fn -> :ok end)
       ref = Process.monitor(dead)
-      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 5_000
 
       # `:noproc` alone: the `{:noproc, {module, :call, [pid, frame]}}` exit used to be kept
       # whole, frame included. See `Socket.without_frame/1`.
@@ -496,17 +498,6 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
                )
     end
 
-    test "on the public path, a non-GMT Date header leaves the venue time unstated" do
-      plug = fn conn ->
-        conn
-        |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 PST")
-        |> Req.Test.json(%{"bid" => "1", "ask" => "2", "last" => "1.5", "volume" => %{}})
-      end
-
-      assert {:ok, quoted} = Rest.get_price("BTC-USD", plug: plug, retry_attempts: 0)
-      assert quoted.venue_time == nil
-    end
-
     test "a refusal with a non-JSON body is still a refusal, keeping the venue's words" do
       # See `Rest.refusal_reason/1`'s moduledoc: this used to collapse to a bare
       # `{:refused, :refused}` because `refusal/1` pre-decoded the body through the same
@@ -646,12 +637,15 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
         DpExchange.Gemini.Feed.start_link(name: name, socket: answering_socket(self()))
 
       :ok = DpExchange.Gemini.Feed.subscribe(feed, ["BTC-USD"], to: self())
-      assert_receive {:frame, %{"method" => "subscribe"}}
+      assert_receive {:frame, %{"method" => "subscribe"}}, 5_000
 
       :ok = DpExchange.Gemini.Feed.update_symbols(feed, ["ETH-USD"])
 
-      assert_receive {:frame, %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
-      assert_receive {:frame, %{"method" => "subscribe", "params" => ["ethusd@bookTicker"]}}
+      assert_receive {:frame, %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}},
+                     5_000
+
+      assert_receive {:frame, %{"method" => "subscribe", "params" => ["ethusd@bookTicker"]}},
+                     5_000
     end
 
     test "a notice reaches a live notice subscriber and skips a dead one" do
@@ -662,14 +656,15 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
 
       dead = spawn(fn -> :ok end)
       ref = Process.monitor(dead)
-      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 5_000
 
       :ok = DpExchange.Gemini.Feed.subscribe_notices(feed, to: dead)
       :ok = DpExchange.Gemini.Feed.subscribe_notices(feed, to: self())
 
       send(feed, {:dp_exchange, :gemini, DpExchange.Core.Notice.new(:degraded, :gemini)})
 
-      assert_receive {:dp_exchange, :gemini, %DpExchange.Core.Notice{kind: :degraded}}
+      assert_receive {:dp_exchange, :gemini, %DpExchange.Core.Notice{kind: :degraded}}, 5_000
+      assert Process.alive?(feed)
     end
   end
 

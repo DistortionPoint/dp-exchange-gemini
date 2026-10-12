@@ -83,7 +83,6 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert %Types.Funding{} = funding
       assert Decimal.equal?(funding.amount, Decimal.from_float(-1.50991))
       assert Decimal.equal?(funding.estimated_amount, Decimal.from_float(-2.10595))
-      refute Decimal.equal?(funding.amount, funding.estimated_amount)
       assert funding.funded_at == DateTime.from_unix!(1_787_936_401_000, :millisecond)
       assert funding.next_funding_at == DateTime.from_unix!(1_787_940_001_000, :millisecond)
     end
@@ -163,7 +162,6 @@ defmodule DpExchange.Gemini.DerivativesTest do
 
       assert Decimal.equal?(stats.mark_price, Decimal.new("59500"))
       assert Decimal.equal?(stats.index_price, Decimal.new("59480"))
-      refute Decimal.equal?(stats.mark_price, stats.index_price)
     end
 
     test "open interest arrives in contracts and in notional" do
@@ -266,7 +264,6 @@ defmodule DpExchange.Gemini.DerivativesTest do
 
       assert position.symbol == "ETHGUSDPERP", "the real position survives"
       assert position.side == :short
-      refute is_nil(position.side)
     end
 
     test "an unreadable quantity still refuses the whole reply, unlike a flat one" do
@@ -389,29 +386,14 @@ defmodule DpExchange.Gemini.DerivativesTest do
     test "the symbol goes through SymbolFormat, like every other private call" do
       me = self()
 
-      plug = fn conn ->
-        payload =
-          conn
-          |> Plug.Conn.get_req_header("x-gemini-payload")
-          |> List.first()
-          |> Base.decode64!()
-          |> Jason.decode!()
-
-        send(me, {:payload, payload})
-
-        conn
-        |> Plug.Conn.put_resp_header("date", @date)
-        |> Req.Test.json(%{})
-      end
-
       assert {:ok, _margin} =
                Private.get_account_margin(@credentials,
                  symbol: "BTC-GUSD-PERP",
-                 plug: plug,
+                 plug: capturing(%{}, me),
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:request, _path, _query, payload}
 
       assert payload["symbol"] ==
                DpExchange.Gemini.SymbolFormat.to_exchange_symbol("BTC-GUSD-PERP")
@@ -665,7 +647,8 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert {:ok, [rate]} =
                Private.get_margin_rates(@credentials, plug: responding(body), retry_attempts: 0)
 
-      assert rate["borrowRate"] != rate["borrowRateDaily"]
+      assert rate["borrowRate"] == "0.00001141552511"
+      assert rate["borrowRateDaily"] == "0.00027397260264"
       assert rate["borrowRateAnnual"] == "0.1"
     end
 
@@ -788,16 +771,6 @@ defmodule DpExchange.Gemini.DerivativesTest do
       body = %{"openPositions" => [%{"quantity" => "1"}]}
 
       assert {:error, {:missing_required_field, :symbol}} =
-               Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
-    end
-
-    test "an unreadable quantity refuses — it is not the same as a flat position" do
-      # A quantity of exactly zero is flat and keeps `side: nil` (see "a zero quantity has no
-      # side" above). A quantity that could not be READ is a different thing, and reporting it
-      # as a position with no size says nothing about what is held.
-      body = %{"openPositions" => [%{"symbol" => "BTCGUSDPERP", "quantity" => "not a number"}]}
-
-      assert {:error, {:invalid_decimal, :quantity, "not a number"}} =
                Private.get_positions(@credentials, plug: responding(body), retry_attempts: 0)
     end
 

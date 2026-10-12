@@ -128,7 +128,9 @@ defmodule DpExchange.Gemini.AuthTest do
       now = System.system_time(:second)
 
       assert is_integer(nonce)
-      assert abs(nonce - now) <= 1
+      # A few seconds of slack for a loaded gate; the unit is what is asserted (a
+      # millisecond value would be ~1000x off), and the venue's own window is 30.
+      assert abs(nonce - now) <= 5
     end
 
     test "incremental is milliseconds, which a time-based key would reject" do

@@ -152,8 +152,6 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert_receive {:payload, payload}
       assert payload["amount"] == "0.00000001"
       assert payload["price"] == "150"
-      refute String.contains?(payload["amount"], "E")
-      refute String.contains?(payload["price"], "E")
     end
 
     test "a limit order sends the venue's own type string and no options" do
@@ -1211,7 +1209,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      refute conversion.status == :settled
+      assert conversion.status == :quoted
 
       assert Conversion.expired?(conversion, ~U[2026-08-28 17:00:30Z]) ==
                false
@@ -1277,7 +1275,6 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       assert conversion.from_asset == "ETH"
       assert conversion.to_asset == "USD"
-      refute conversion.from_asset == conversion.to_asset
       assert Decimal.equal?(conversion.from_amount, Decimal.new("1"))
       assert conversion.to_amount == nil
     end
@@ -1616,7 +1613,7 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       # The canonical pair goes out in the venue's spelling, the same as every other symbol
       # this package sends — the vendor's own example for this parameter is `btcusd`.
-      assert payload["symbol"] == DpExchange.Gemini.SymbolFormat.to_exchange_symbol("BTC-USD")
+      assert payload["symbol"] == "btcusd"
       assert payload["request"] == "/v1/notionalvolume"
     end
 
@@ -1707,11 +1704,12 @@ defmodule DpExchange.Gemini.PrivateTest do
         end
       end
 
-      Private.get_balances(@credentials, plug: plug, retry_attempts: 2)
+      Private.get_balances(@credentials, plug: plug, retry_attempts: 2, retry_delay: 1)
 
       assert_received {:nonce, first}
       assert_received {:nonce, second}
       assert second != first
+      assert :counters.get(counter, 1) == 2
     end
   end
 

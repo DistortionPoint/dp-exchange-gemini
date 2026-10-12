@@ -57,7 +57,7 @@ defmodule DpExchange.Gemini.SocketTest do
 
       assert_receive {:dp_exchange, :gemini, %Quote{} = quote_struct}
       assert Decimal.equal?(quote_struct.price, Decimal.new("77834.11000"))
-      refute Map.has_key?(quote_struct, :bid)
+      assert quote_struct.symbol == "BTC-USD"
     end
 
     test "event time is read as NANOseconds" do
@@ -101,13 +101,6 @@ defmodule DpExchange.Gemini.SocketTest do
       assert_receive {:dp_exchange, :gemini, %TopOfBook{}}
       # `deliver/1` is a direct call: everything it sends is already in the mailbox.
       refute_received {:dp_exchange, :gemini, %Quote{}}
-    end
-
-    test "price is the last trade when the book has traded" do
-      assert {:ok, _state} = deliver(@book_ticker)
-
-      assert_receive {:dp_exchange, :gemini, %Quote{price: price}}
-      assert Decimal.equal?(price, Decimal.new("77834.11000"))
     end
 
     test "a book that has never traded delivers top-of-book and NO quote" do
@@ -178,19 +171,11 @@ defmodule DpExchange.Gemini.SocketTest do
                )
     end
 
-    test "a symbol with an overlapping quote still splits correctly off the wire" do
+    test "a native symbol whose quote currency is GUSD splits correctly off the wire" do
       assert {:ok, _state} = deliver(%{@book_ticker | "s" => "aavegusd"})
 
       assert_receive {:dp_exchange, :gemini, %Quote{symbol: "AAVE-GUSD"}}
-    end
-
-    test "a Quote's venue_time is nil even when the frame carries a real E" do
-      # `c` (websocket.yaml:1254-1256) is "Last trade price, present once the book has
-      # traded" — no trade time is documented. The frame's `E` is the book UPDATE time, not
-      # the trade's, and stamping it onto the trade attaches a real timestamp to the wrong
-      # event.
-      assert {:ok, _state} = deliver(@book_ticker)
-      assert_receive {:dp_exchange, :gemini, %Quote{venue_time: nil}}
+      assert_receive {:dp_exchange, :gemini, %TopOfBook{symbol: "AAVE-GUSD"}}
     end
 
     test "the SAME last trade price is reported only once per connection" do
@@ -255,15 +240,18 @@ defmodule DpExchange.Gemini.SocketTest do
 
   describe "frames this package does not model" do
     test "unrecognised JSON is ignored, not crashed on" do
-      assert {:ok, _state} = deliver(%{"e" => "depthUpdate", "s" => "btcusd"})
+      assert {:ok, _state} = deliver(%{"e" => "kline", "s" => "btcusd"})
+      refute_received {:dp_exchange, :gemini, _anything}
     end
 
     test "malformed JSON is ignored" do
       assert {:ok, _state} = Socket.handle_frame({:text, "{not json"}, state())
+      refute_received {:dp_exchange, :gemini, _anything}
     end
 
     test "a binary frame is ignored" do
       assert {:ok, _state} = Socket.handle_frame({:binary, <<1, 2, 3>>}, state())
+      refute_received {:dp_exchange, :gemini, _anything}
     end
   end
 
@@ -301,10 +289,24 @@ defmodule DpExchange.Gemini.SocketTest do
       end
     end
 
-    test "a non-string symbol does not raise" do
+    test "a non-string symbol does not raise, and nothing is delivered for it" do
       for bad <- [0, %{}, []] do
         assert {:ok, _state} = deliver(%{@trade_frame | "s" => bad})
+
+        assert_received {:dp_exchange, :gemini,
+                         %Notice{kind: :data_quality, details: %{reason: "undecodable trade"}}}
+
         assert {:ok, _state} = deliver(%{@book_ticker | "s" => bad})
+
+        assert_received {:dp_exchange, :gemini,
+                         %Notice{
+                           kind: :data_quality,
+                           details: %{reason: "undecodable book ticker"}
+                         }}
+
+        refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Trade{}}
+        refute_received {:dp_exchange, :gemini, %TopOfBook{}}
+        refute_received {:dp_exchange, :gemini, %Quote{}}
       end
     end
 

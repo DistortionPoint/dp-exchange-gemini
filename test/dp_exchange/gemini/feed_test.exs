@@ -279,7 +279,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       ref = Process.monitor(subscriber)
       Process.exit(subscriber, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^subscriber, _reason}, 5_000
 
       # A call is answered only after the feed's own `:DOWN` has been handled.
       _settled = Feed.coverage(feed)
@@ -298,7 +298,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       ref = Process.monitor(watcher)
       Process.exit(watcher, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^watcher, _reason}, 5_000
       _settled = Feed.coverage(feed)
 
       refute MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
@@ -320,7 +320,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       ref = Process.monitor(holder)
       Process.exit(holder, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^holder, _reason}, 5_000
       _settled = Feed.coverage(feed)
 
       # Still subscribed under the name, ready for whatever registers next.
@@ -535,7 +535,7 @@ defmodule DpExchange.Gemini.FeedTest do
       feed = start_feed()
       dead = spawn(fn -> :ok end)
       ref = Process.monitor(dead)
-      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 5_000
 
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: dead)
       :ok = Feed.subscribe(feed, ["BTC-USD"], to: self())
@@ -666,7 +666,7 @@ defmodule DpExchange.Gemini.FeedTest do
       socket = :sys.get_state(feed).socket
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
 
-      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => params}}
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => params}}, 5_000
       assert Enum.sort(params) == ["btcusd@bookTicker", "ethusd@bookTicker"]
     end
 
@@ -677,7 +677,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      assert_receive {:frame_sent, frame}
+      assert_receive {:frame_sent, frame}, 5_000
       assert frame["method"] == "subscribe"
       assert Enum.sort(frame["params"]) == ["btcusd@bookTicker", "ethusd@bookTicker"]
     end
@@ -692,7 +692,8 @@ defmodule DpExchange.Gemini.FeedTest do
       socket = :sys.get_state(feed).socket
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
 
-      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}},
+                     5_000
     end
 
     test "a reconnect report from a socket this feed no longer holds is ignored" do
@@ -718,7 +719,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      assert_receive {:frame_sent, frame}
+      assert_receive {:frame_sent, frame}, 5_000
       assert frame["params"] == ["btcusd@bookTicker"]
     end
 
@@ -828,7 +829,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}, 5_000
       _settled = Feed.coverage(feed)
       refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
@@ -1122,9 +1123,11 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
-      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}},
+                     5_000
 
-      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@trade"]}}
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@trade"]}},
+                     5_000
     end
 
     test "a reconnect resubscribes @trade at once, same as @bookTicker" do
@@ -1136,9 +1139,11 @@ defmodule DpExchange.Gemini.FeedTest do
       socket = :sys.get_state(feed).socket
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
 
-      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@bookTicker"]}},
+                     5_000
 
-      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@trade"]}}
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["btcusd@trade"]}},
+                     5_000
     end
 
     test "a Trade reaches the subscriber like any other event" do
@@ -1147,7 +1152,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, {:dp_exchange, :gemini, trade_for("BTC-USD")})
 
-      assert_receive {:dp_exchange, :gemini, %Trade{symbol: "BTC-USD", side: :sell}}
+      assert_receive {:dp_exchange, :gemini, %Trade{symbol: "BTC-USD", side: :sell}}, 5_000
     end
 
     test "a delivered Trade is tracked under :trades, never under :quotes or :top_of_book" do
@@ -1231,7 +1236,7 @@ defmodule DpExchange.Gemini.FeedTest do
     end
   end
 
-  describe "found 2026-10-10" do
+  describe "a wire unsubscribe that failed is remembered, not forgotten" do
     test "a wire unsubscribe that failed is retried on the next tick" do
       # It was forgotten: `wanted` narrowed, and the venue kept streaming the symbol to this
       # connection until it next reconnected.
@@ -1247,7 +1252,8 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, :resubscribe)
 
       assert_receive {:frame_sent,
-                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
+                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}},
+                     5_000
 
       # Settled by a call that queues behind the `:resubscribe`, not by a refute window.
       _settled = Feed.coverage(feed)
@@ -1266,7 +1272,8 @@ defmodule DpExchange.Gemini.FeedTest do
       assert_receive {:frame_sent, %{"method" => "subscribe"}}
 
       send(feed, :resubscribe)
-      assert_receive {:frame_sent, %{"method" => "subscribe"}}
+      assert_receive {:frame_sent, %{"method" => "subscribe"}}, 5_000
+      _settled = Feed.coverage(feed)
       refute_received {:frame_sent, %{"method" => "unsubscribe"}}
     end
   end
@@ -1348,7 +1355,8 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, :resubscribe)
 
       assert_receive {:frame_sent,
-                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}}
+                      %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}},
+                     5_000
 
       _settled = Feed.coverage(feed)
       refute_received {:frame_sent, %{"method" => "subscribe"}}

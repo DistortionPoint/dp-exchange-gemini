@@ -75,11 +75,6 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
                {:error, {:credential_required, :request_for_quote_session}}
     end
 
-    test "the public requestForQuote channel is not refused for lacking a credential" do
-      refute Socket.subscribe(:no_such_socket, [], :request_for_quote) ==
-               {:error, {:credential_required, :request_for_quote}}
-    end
-
     test "empty symbols against a public per-symbol channel is not refused — registers, asks for nothing" do
       assert Socket.subscribe(:no_such_socket, [], :book_ticker) == :ok
     end
@@ -155,6 +150,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
 
       assert {:ok, _state} = Socket.handle_frame(frame(undated), state())
       refute_received {:dp_exchange, :gemini, %Types.Trade{}}
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
     end
   end
 
@@ -610,8 +606,9 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
 
     test "an undated diff delivers nothing, but still advances the sequence" do
       # A delta whose place in the sequence cannot be stated must not reach a consumer —
-      # same rule as an undated trade or a book ticker with no event time. The sequence
-      # bookkeeping is unaffected: `depth_gap?/2` reads `u`, not the decoded delta.
+      # same rule as an undated trade (a book ticker is different: its contract allows a nil
+      # `venue_time`). The sequence bookkeeping is unaffected: `depth_gap?/2` reads `u`, not
+      # the decoded delta.
       undated = Map.delete(@diff, "E")
 
       assert {:ok, new_state} = Socket.handle_frame(frame(undated), state())
@@ -767,6 +764,12 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     setup do
       {:ok, socket} = SocketStub.start_link(state())
       %{socket: socket}
+    end
+
+    test "the public requestForQuote channel is not refused for lacking a credential", %{
+      socket: socket
+    } do
+      assert :ok = Socket.subscribe(socket, [], :request_for_quote)
     end
 
     test "the same symbol on a second partial-depth channel is fine", %{socket: socket} do

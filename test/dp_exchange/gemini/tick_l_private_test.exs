@@ -117,7 +117,18 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
   end
 
   # The fake side, for the reads the behaviour has one for. The others (accounts, clearing,
-  # funding payments) are Gemini-only calls with no fake, so they stand in as themselves.
+  # funding payments) are Gemini-only calls with no fake, so they are not compared: comparing
+  # the real call with itself could never fail.
+  @fake_reads [
+    :orders,
+    :trades,
+    :transfers,
+    :custody_fees,
+    :transactions,
+    :staking_history,
+    :staking_rewards
+  ]
+
   defp fake(:orders, opts, creds) do
     Fake.get_orders(creds, [history: true] ++ opts)
   end
@@ -144,10 +155,6 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
 
   defp fake(:staking_rewards, opts, creds) do
     Fake.get_staking_rewards([credentials: creds, since: @rewards_since] ++ opts)
-  end
-
-  defp fake(read, opts, _creds) do
-    real(read, opts)
   end
 
   @refused [
@@ -192,9 +199,13 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
     end
 
     test "the fake refuses the same value in the same shape, even with no credential" do
-      for {read, key, value} <- @refused do
+      with_fakes = for {read, _key, _value} = row <- @refused, read in @fake_reads, do: row
+      assert length(with_fakes) >= 15
+
+      for {read, key, value} <- with_fakes do
         refusal = real(read, [{key, value}])
 
+        assert {:error, {:invalid_option, ^key, ^value}} = refusal
         assert fake(read, [{key, value}], %{}) == refusal, "#{read} #{key}: #{inspect(value)}"
         assert fake(read, [{key, value}], @credentials) == refusal
       end

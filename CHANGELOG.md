@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **A bookTicker frame with an absent, blank or non-text symbol was dropped in silence.** Trade
+  and depth frames with the same defect raise one `:data_quality` notice; this one now does too
+  (`"undecodable book ticker"`, the venue's value quoted bounded).
+- **Test suite (tick V, every test file read line by line):** staking fixtures now match the
+  vendor's `StakingDeposit`/`StakingWithdrawal`; a fake-versus-real test that compared the real
+  call with itself now compares only reads that have a fake; guard tests run against a raising
+  plug so a broken guard cannot reach the real host; direct tests for the depth gap, stale and
+  restart checks; `coverage_by_kind` and supervisor tests assert real values; waits on spawned
+  processes are 5s; forming-bar tests no longer depend on a minute rollover; duplicate,
+  can-never-fail and Decimal-only tests removed.
+
 ## [0.2.129] - 2026-10-12
 
 ### Changed (documentation only, tick U)

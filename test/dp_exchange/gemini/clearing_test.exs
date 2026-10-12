@@ -48,6 +48,10 @@ defmodule DpExchange.Gemini.ClearingTest do
     end
   end
 
+  # Stands in for the venue on a call that must be refused first: if the guard under test
+  # broke, the call would reach this plug and raise rather than reach the real host.
+  defp exploding, do: fn _conn -> raise "must not reach the venue" end
+
   defp capturing(body, test_pid) do
     fn conn ->
       payload =
@@ -95,12 +99,20 @@ defmodule DpExchange.Gemini.ClearingTest do
 
     test "an order missing any term is refused before a request is made" do
       assert {:error, :missing_clearing_terms} =
-               Private.create_clearing_order(%{symbol: "BTC-USD", side: :buy}, @credentials, [])
+               Private.create_clearing_order(
+                 %{symbol: "BTC-USD", side: :buy},
+                 @credentials,
+                 plug: exploding(),
+                 retry_attempts: 0
+               )
     end
 
     test "an amount, price or side that is not a real order term is refused before signing" do
       refused = fn terms ->
-        Private.create_clearing_order(terms, @credentials, retry_attempts: 0)
+        Private.create_clearing_order(terms, @credentials,
+          plug: exploding(),
+          retry_attempts: 0
+        )
       end
 
       assert {:error, {:non_positive_amount, :amount, 0}} = refused.(%{@terms | amount: 0})
@@ -161,13 +173,17 @@ defmodule DpExchange.Gemini.ClearingTest do
       assert {:error, {:missing_option, :source_counterparty_id}} =
                Private.create_broker_clearing_order(@terms, @credentials,
                  target_counterparty_id: "tgt",
-                 expires_in_hrs: 12
+                 expires_in_hrs: 12,
+                 plug: exploding(),
+                 retry_attempts: 0
                )
 
       assert {:error, {:missing_option, :target_counterparty_id}} =
                Private.create_broker_clearing_order(@terms, @credentials,
                  source_counterparty_id: "src",
-                 expires_in_hrs: 12
+                 expires_in_hrs: 12,
+                 plug: exploding(),
+                 retry_attempts: 0
                )
     end
 
@@ -175,7 +191,9 @@ defmodule DpExchange.Gemini.ClearingTest do
       assert {:error, {:missing_option, :expires_in_hrs}} =
                Private.create_broker_clearing_order(@terms, @credentials,
                  source_counterparty_id: "src",
-                 target_counterparty_id: "tgt"
+                 target_counterparty_id: "tgt",
+                 plug: exploding(),
+                 retry_attempts: 0
                )
     end
   end
@@ -225,7 +243,13 @@ defmodule DpExchange.Gemini.ClearingTest do
 
     test "a confirm missing a term is refused rather than filled in" do
       assert {:error, :missing_clearing_terms} =
-               Private.confirm_clearing_order("c-1", %{symbol: "BTC-USD"}, @credentials, [])
+               Private.confirm_clearing_order(
+                 "c-1",
+                 %{symbol: "BTC-USD"},
+                 @credentials,
+                 plug: exploding(),
+                 retry_attempts: 0
+               )
     end
   end
 
@@ -272,21 +296,26 @@ defmodule DpExchange.Gemini.ClearingTest do
     end
 
     test "a window with one bound is refused before a request goes out" do
-      # `rest.yaml:4184`: each `*_start` "Requires `*_end` if set", and the reverse. No plug:
-      # reaching HTTP would fail on the connection rather than the guard.
+      # `rest.yaml:4184`: each `*_start` "Requires `*_end` if set", and the reverse. The plug
+      # raises, so a guard that let the call through would not pass as the refusal.
+      guard = [plug: exploding(), retry_attempts: 0]
+
       assert {:error, {:window_needs_both_bounds, :expiration}} =
-               Private.list_clearing_orders(@credentials,
-                 expiration_start: ~U[2026-08-28 17:00:01Z]
+               Private.list_clearing_orders(
+                 @credentials,
+                 [expiration_start: ~U[2026-08-28 17:00:01Z]] ++ guard
                )
 
       assert {:error, {:window_needs_both_bounds, :submission}} =
-               Private.list_clearing_orders(@credentials,
-                 submission_end: ~U[2026-08-28 17:00:01Z]
+               Private.list_clearing_orders(
+                 @credentials,
+                 [submission_end: ~U[2026-08-28 17:00:01Z]] ++ guard
                )
 
       assert {:error, {:window_needs_both_bounds, :expiration}} =
-               Private.list_clearing_brokers(@credentials,
-                 expiration_end: ~U[2026-08-28 17:00:01Z]
+               Private.list_clearing_brokers(
+                 @credentials,
+                 [expiration_end: ~U[2026-08-28 17:00:01Z]] ++ guard
                )
     end
 

@@ -43,15 +43,14 @@ defmodule DpExchange.Gemini.NaNGuardTest do
       assert Decimal.equal?(top.ask, Decimal.new("100.5"))
     end
 
-    test "what a NaN would have done downstream, stated rather than assumed" do
-      # The reason this guard exists rather than a comment saying "should not happen".
-      {nan, ""} = Decimal.parse("NaN")
+    test "an ask that is poison refuses the book too, whichever side carries it" do
+      for value <- @poison do
+        frame = %{"E" => "1757548800000000000", "b" => "99.5", "a" => value}
 
-      assert Decimal.nan?(nan)
-      # Silently poisons arithmetic...
-      assert Decimal.add(nan, Decimal.new(1)) |> Decimal.nan?()
-      # ...and raises on the comparison a consumer is most likely to reach for.
-      assert_raise Decimal.Error, fn -> Decimal.compare(nan, Decimal.new(1)) end
+        assert {:error, :unexpected_frame_shape} =
+                 WsDecode.to_top_of_book(frame, "BTC-USD", @observed_at),
+               "#{value} in the ask was admitted"
+      end
     end
   end
 end

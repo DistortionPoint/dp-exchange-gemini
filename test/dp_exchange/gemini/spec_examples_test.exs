@@ -472,21 +472,6 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert fees["api_maker_fee_bps"] == 0
       assert fees["fee_tier"]["tier"] == "0bps"
     end
-
-    test "opts[:symbol] is sent lowercase and separatorless, the shape /v1/feepromos moved to" do
-      test_pid = self()
-      body = fixture!("rest/private/orders/get_fees.json")
-
-      assert {:ok, _fees} =
-               Private.get_fees(@credentials,
-                 symbol: "BTC-USD",
-                 plug: capturing(body, test_pid),
-                 retry_attempts: 0
-               )
-
-      assert_receive {:payload, payload}
-      assert payload["symbol"] == "btcusd"
-    end
   end
 
   describe "Private.get_transfers/2 — POST /v2/transfers, rest.yaml:3196 examples.multiNetworkTransfers" do
@@ -1182,20 +1167,6 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       btc = Enum.find(rows, &(&1["currency"] == "BTC"))
       assert btc["amount"] == "1154.62034001"
       assert btc["amountNotional"] == "10386000.59"
-    end
-
-    test "the currency is lowercased into the path, matching the vendor's basic example" do
-      test_pid = self()
-
-      plug = fn conn ->
-        send(test_pid, {:path, conn.request_path})
-        conn |> Plug.Conn.put_resp_header("date", @date) |> Req.Test.json([])
-      end
-
-      Private.get_notional_balances(@credentials, "USD", plug: plug, retry_attempts: 0)
-
-      assert_receive {:path, path}
-      assert path == "/v1/notionalbalances/usd"
     end
   end
 

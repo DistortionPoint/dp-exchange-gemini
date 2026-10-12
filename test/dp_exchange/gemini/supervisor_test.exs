@@ -1,6 +1,7 @@
 defmodule DpExchange.Gemini.SupervisorTest do
   use ExUnit.Case, async: false
 
+  alias DpExchange.Core.DefaultRateLimiter
   alias DpExchange.Gemini.{Auth, Supervisor}
 
   @moduletag :capture_log
@@ -70,6 +71,18 @@ defmodule DpExchange.Gemini.SupervisorTest do
       assert is_pid(Process.whereis(opts[:limiter]))
       assert caps.public_ceiling.limit == 120
       assert caps.public_ceiling.burst == 5
+
+      # Read off the running limiter, not the declaration. `check/3` reserves nothing, and on
+      # a fresh bucket a weight inside the burst is admitted at once while one past it waits
+      # exactly one emission interval: 60_000 / 120 = 500 ms public, 60_000 / 600 = 100 ms
+      # private. A limiter that fell back to Core's default (10 per second, burst 10) would
+      # admit a weight of 6.
+      limiter = [limiter: opts[:limiter]]
+
+      assert DefaultRateLimiter.check(:gemini, 5, limiter) == :ok
+      assert DefaultRateLimiter.check(:gemini, 6, limiter) == {:rate_limited, 500}
+      assert DefaultRateLimiter.check(:gemini_private, 5, limiter) == :ok
+      assert DefaultRateLimiter.check(:gemini_private, 6, limiter) == {:rate_limited, 100}
     end
 
     test "public and private are separate buckets, because they differ 5x" do
@@ -86,7 +99,7 @@ defmodule DpExchange.Gemini.SupervisorTest do
       # unavailable" to every call, and the error does not say what is missing.
       {_pid, opts} = start_tree()
 
-      assert DpExchange.Core.DefaultRateLimiter.check(:gemini, 1, limiter: opts[:limiter]) == :ok
+      assert DefaultRateLimiter.check(:gemini, 1, limiter: opts[:limiter]) == :ok
     end
   end
 
