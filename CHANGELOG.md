@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.133] - 2026-10-12
+
 - **Docs (`usage-rules.md` and README checked line by line against the code):** corrected the
   bookTicker `Quote` re-send rule, the `1w`/`1M` behaviour for a `:start` older than the reply
   (the bars the venue sent, not an empty list, also corrected in the `Rest` moduledoc), auth
