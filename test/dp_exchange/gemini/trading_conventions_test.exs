@@ -253,6 +253,15 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
                place(Map.put(@request, :client_order_id, 470_135), answering(502, "oops"))
     end
 
+    test "a 2xx whose order_id is null, blank or not an id is unconfirmed, not a success" do
+      request = Map.put(@request, :client_order_id, "c-9")
+
+      for id <- ["null", ~s(""), ~s("  "), "{}"] do
+        assert {:error, {:order_unconfirmed, "c-9", {:missing_required_field, :order_id}}} =
+                 place(request, answering(200, ~s({"order_id": #{id}, "symbol": "btcusd"})))
+      end
+    end
+
     test "a timeout after the send is unconfirmed" do
       timing_out = fn conn -> Req.Test.transport_error(conn, :timeout) end
 
@@ -277,8 +286,8 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
                )
     end
 
-    test "a 2xx that names the order stays an order, even with an unreadable id" do
-      assert {:ok, %Order{id: nil}} =
+    test "a 2xx that names a readable order id is an order; a null id is unconfirmed" do
+      assert {:error, {:order_unconfirmed, nil, {:missing_required_field, :order_id}}} =
                place(@request, answering(200, ~s({"order_id":null})))
 
       confirmed = answering(200, Jason.encode!(@order_body))
@@ -359,9 +368,22 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
     end
 
     test "a 404 for an order is a refusal, :not_found, on read and on cancel" do
+      body = ~s({"result":"error","reason":"OrderNotFound","message":"no such order"})
+
       for call <- [&Private.get_order/3, &Private.cancel_order/3] do
-        assert call.(@credentials, "999", opts(answering(404, "not found"))) ==
+        assert call.(@credentials, "999", opts(answering(404, body))) ==
                  {:refused, :not_found}
+      end
+    end
+
+    test "a 404 that is the endpoint or the host missing is not an order missing" do
+      endpoint =
+        ~s({"result":"error","reason":"EndpointNotFound","message":"API entry point not found"})
+
+      for call <- [&Private.get_order/3, &Private.cancel_order/3],
+          body <- [endpoint, "<html>404 Not Found</html>", "", "{}"] do
+        assert {:refused, reason} = call.(@credentials, "999", opts(answering(404, body)))
+        refute reason == :not_found
       end
     end
 
@@ -403,7 +425,8 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
 
   describe "the fake answers what the real path answers" do
     test "an unknown id is the real 404's answer" do
-      real = Private.get_order(@credentials, "424242", opts(answering(404, "no")))
+      body = ~s({"result":"error","reason":"OrderNotFound","message":"no such order"})
+      real = Private.get_order(@credentials, "424242", opts(answering(404, body)))
 
       assert real == {:refused, :not_found}
       assert Fake.get_order(@credentials, "424242", []) == real

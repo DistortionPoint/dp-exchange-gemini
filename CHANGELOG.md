@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (tick R regression review)
+
+- **BREAKING: a placement answered 2xx with `"order_id": null`, blank or not an id is
+  `{:error, {:order_unconfirmed, client_order_id, {:missing_required_field, :order_id}}}`.** It
+  was `{:ok, %Order{id: nil}}`: a success with no handle on the order. The family rule is that a
+  2xx without the order id is unconfirmed.
+
+- **A 404 is `{:refused, :not_found}` from `get_order/3` and `cancel_order/3` only when the
+  body is a JSON object naming a `reason` other than `EndpointNotFound`.** Every 404 used to
+  be read as "no such order", including the spec's own `EndpointNotFound` 404 and the HTML 404
+  page a wrong host answers (`docs/reference/gemini/demo-environment.md`), so a `cancel_order/3`
+  against the wrong host or a retired path told the caller the order was not there while it
+  stayed live. Those 404s are now `{:refused, reason}` carrying the venue's words, as any
+  other refusal. Unmeasured: the body the live venue sends for a truly unknown order.
+- **Correction:** the `OrderNotFound` reason is NOT in the committed spec
+  (`docs/reference/gemini/openapi/rest.yaml` has no such word); the 0.2.123 entry called it
+  "documented". It stays mapped to `:not_found` as an exact-match word, unprobed. A caller must
+  not read `:not_found` from `cancel_order/3` as "never existed": an order that already filled
+  or was cancelled may answer the same, so reconcile with `get_order/3` or the order history.
+
 ## [0.2.123] - 2026-10-12
 
 ### Changed (BREAKING) - non-order writes (tick Q)

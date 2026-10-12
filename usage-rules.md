@@ -1271,8 +1271,11 @@ even if some field of it is unreadable.
 
 `get_order/3` and `cancel_order/3` take the id as a **string of digits**. An integer, `nil` or
 a blank string is `{:error, {:invalid_order_id, v}}`; an order the venue does not know is
-`{:refused, :not_found}` (a 404, or the venue's `OrderNotFound` reason, which is named from
-its error vocabulary and has not been probed here). `cancel_order/3` is sent once.
+`{:refused, :not_found}` (a 404 whose JSON body names a reason other than `EndpointNotFound`,
+or the `OrderNotFound` reason; neither word is in the committed spec and the live body has not
+been probed, and a 404 that is the endpoint or host missing stays an ordinary refusal). Do not
+read `:not_found` from a cancel as "never existed": an order that already filled may answer the
+same, so check `get_order/3` before placing again. `cancel_order/3` is sent once.
 `DpExchange.Gemini.Fake` answers the same for all of this: each placement gets its own numeric id,
 an id it did not issue in the calling process is `{:refused, :not_found}`, and the order carries
 the side as `:buy` / `:sell` whatever case you passed.

@@ -367,8 +367,15 @@ defmodule DpExchange.Gemini.Private do
   # after the send may all have created an order, so each is `:order_unconfirmed` with the
   # `client_order_id` actually sent (or `nil`), which is the only handle a caller has to find
   # out. A venue refusal and anything decided before the send stay what they were.
-  defp placed_order({:ok, %{"order_id" => _id} = body, _headers}, _client_order_id),
-    do: to_order(body, :lenient)
+  #
+  # An `order_id` that is `null`, blank or not an id is no id: `{:ok, %Order{id: nil}}` was a
+  # success with no handle on the order, so it is `:order_unconfirmed` like a 2xx naming none.
+  # The 2026-10-10 revert above was about a plain error inviting a retry; this shape does not.
+  defp placed_order({:ok, %{"order_id" => id} = body, _headers}, client_order_id) do
+    if order_id_present?(id),
+      do: to_order(body, :lenient),
+      else: unconfirmed(client_order_id, {:missing_required_field, :order_id})
+  end
 
   defp placed_order({:ok, _body, _headers}, client_order_id),
     do: unconfirmed(client_order_id, :unexpected_response_shape)
@@ -383,6 +390,10 @@ defmodule DpExchange.Gemini.Private do
 
   defp unconfirmed(client_order_id, reason),
     do: {:error, {:order_unconfirmed, client_order_id, bounded_reason(reason)}}
+
+  defp order_id_present?(id) when is_integer(id), do: true
+  defp order_id_present?(id) when is_binary(id), do: String.trim(id) != ""
+  defp order_id_present?(_absent_or_not_an_id), do: false
 
   # Core's own text for the refusals that happen before a request leaves the process, and the
   # venue's 429 (the venue says it did not take the request). An unmapped 4xx is the venue
@@ -657,8 +668,10 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  # A 2xx is the order. A 404, or the venue's `OrderNotFound` reason (taken from the venue's
-  # own error vocabulary, not probed here), is an order that is not there.
+  # A 2xx is the order. A 404 naming a reason (see `order_missing_body?/1`), or the reason
+  # `OrderNotFound`, is an order that is not there. **Neither is in the committed spec and
+  # neither was probed**: the word was recalled, not measured, and a cancel of an order that
+  # already filled may be answered the same way, so `:not_found` is not "never existed".
   defp order_result({:ok, body, _headers}), do: to_order(body)
   defp order_result({:refused, {:unknown_reason, "OrderNotFound"}}), do: {:refused, :not_found}
   defp order_result(other), do: other
@@ -1141,6 +1154,24 @@ defmodule DpExchange.Gemini.Private do
 
   # `subject: :order` marks a call about one order, whose 404 is that order not being there
   # (`{:refused, :not_found}`), not an unknown endpoint to describe by the venue's text.
+  #
+  # **A 404 is "no such order" only when the venue's own error body says something other than
+  # "no such endpoint".** The spec's 404 is `reason: EndpointNotFound` ("API entry point not
+  # found"), and a wrong host answers a 404 HTML page (`docs/reference/gemini/
+  # demo-environment.md`). Read as `:not_found`, a `cancel_order/3` against a retired path or
+  # the wrong host told the caller the order was not there while it stayed live on the book.
+  # So a 404 whose body is not a JSON object naming a reason, or names `EndpointNotFound`, is
+  # an ordinary refusal carrying the venue's words. What the venue's 404 body is for a truly
+  # unknown order has not been measured.
+  defp order_missing_body?(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{"reason" => reason}} when is_binary(reason) -> reason != "EndpointNotFound"
+      _other -> false
+    end
+  end
+
+  defp order_missing_body?(_other), do: false
+
   defp post(path, params, credentials, opts, subject \\ :other),
     do: post_signed(path, params, credentials, opts, subject, & &1)
 
@@ -1157,8 +1188,10 @@ defmodule DpExchange.Gemini.Private do
       when status in 200..299 ->
         with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
 
-      {:ok, %{status: 404}} when subject == :order ->
-        {:refused, :not_found}
+      {:ok, %{status: 404, body: body}} when subject == :order ->
+        if order_missing_body?(body),
+          do: {:refused, :not_found},
+          else: {:refused, refusal(body, opts)}
 
       # Permanent for the request as sent. A caller refreshes a token and calls again —
       # that is a different request, not a retry of this one.
