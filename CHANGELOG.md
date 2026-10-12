@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.125] - 2026-10-12
+
 ### Changed (tick R market-data conventions, family rules MD1-MD9 and DV1, DV6, DV7)
 
 - **BREAKING: REST `Quote.venue_time` and `TopOfBook.venue_time` are always `nil` (MD7).**
