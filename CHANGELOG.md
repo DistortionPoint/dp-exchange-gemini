@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.135] - 2026-10-12
+
 - **Endpoint inventory re-dated 2026-10-12:** two prediction-market reward reports appeared
   (`maker-rebate/payouts`, `taker-rewards/payouts/summary`). This package implements none of
   the prediction-market API, so no declaration changes.
