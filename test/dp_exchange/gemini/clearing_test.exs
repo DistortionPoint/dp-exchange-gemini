@@ -307,13 +307,15 @@ defmodule DpExchange.Gemini.ClearingTest do
                  retry_attempts: 0
                )
 
-      assert {:error, :unexpected_response_shape} =
+      # A 200 that names no `result` cannot show what happened to the order: unconfirmed
+      # (W1), carrying the clearing id to look it up by.
+      assert {:error, {:write_unconfirmed, "c-1", :unexpected_response_shape}} =
                Private.cancel_clearing_order("c-1", @credentials,
                  plug: responding(%{}),
                  retry_attempts: 0
                )
 
-      assert {:error, :unexpected_response_shape} =
+      assert {:error, {:write_unconfirmed, "c-1", :unexpected_response_shape}} =
                Private.confirm_clearing_order("c-1", @terms, @credentials,
                  plug: responding(%{}),
                  retry_attempts: 0

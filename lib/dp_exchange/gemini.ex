@@ -860,10 +860,16 @@ defmodule DpExchange.Gemini do
   # `update_symbols(["btc-usd"])`, then a `BTC-USD` quote, and `coverage/1` was `%{}`.
   # Case is the one difference normalised here. Anything else that is not canonical is the
   # caller's to fix.
-  defp canonical_case(symbols) when is_list(symbols),
-    do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
-
-  defp canonical_case(other), do: other
+  #
+  # An argument `Feed.canonical_symbols/1` refuses (not a proper list of non-blank strings) is
+  # passed on UNCHANGED, so the refusal carries the caller's whole argument as given, and an
+  # improper list is not raised on by `Enum.map/2` here.
+  defp canonical_case(symbols) do
+    case Feed.canonical_symbols(symbols) do
+      {:ok, _canonical} -> Enum.map(symbols, &String.upcase/1)
+      {:error, _invalid} -> symbols
+    end
+  end
 
   # --- health ------------------------------------------------------------
 

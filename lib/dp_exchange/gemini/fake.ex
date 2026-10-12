@@ -1583,7 +1583,7 @@ defmodule DpExchange.Gemini.Fake do
         {:ok,
          %Types.Conversion{
            # Numeric, as the venue's `quoteId` is, so `commit_conversion/2` (which checks the id
-           # through `Private.validate_commit_terms/2`) accepts the quote this fake issued.
+           # through `Private.commit_terms/2`) accepts the quote this fake issued.
            # `"fake-gemini-quote-1"` was refused as `:invalid_quote_id`, the same defect as
            # issue #5 for orders.
            id: "1",
@@ -1609,26 +1609,53 @@ defmodule DpExchange.Gemini.Fake do
       # The venue's execute call needs the terms it quoted against, not the id alone —
       # `:symbol`, `:side`, `:amount`, `:price` and `:fee` (the venue requires the last and
       # states it "must match fee returned in the quote", `rest.yaml:5071`). Checked by the
-      # real function, `Private.validate_commit_terms/2`, and before the credential, exactly
+      # real function, `Private.commit_terms/2`, and before the credential, exactly
       # as `Private.commit_conversion/2` does. This used its own `Keyword.has_key?/2` test,
       # which `price: nil` and `price: ""` satisfy (the real one counts neither as given),
       # never looked at the quote id, and asked for the credential first.
-      with :ok <- Private.validate_commit_terms(id, opts),
+      with {:ok, terms} <- Private.commit_terms(id, opts),
+           {:ok, base, quote_asset} <- committed_pair(terms["symbol"]),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
-        {:ok,
-         %Types.Conversion{
-           # A string, as the real decode makes it; the id may arrive as the integer the venue
-           # names, which `validate_commit_terms/2` also accepts.
-           id: to_string(id),
-           status: :settled,
-           from_asset: "USD",
-           to_asset: "BTC",
-           rate: Decimal.new("40000"),
-           venue_time: @at,
-           provider: :gemini
-         }}
+        {:ok, committed_conversion(id, terms, base, quote_asset)}
       end
     end)
+  end
+
+  # The pair the conversion was committed on, from the symbol that was committed. It used to be
+  # a fixed `USD -> BTC` whatever was committed: a consumer that converted ETH to GBP was told
+  # it had converted USD to BTC. A symbol that does not split into two assets is refused, not
+  # guessed.
+  defp committed_pair(symbol) do
+    case symbol |> SymbolFormat.to_canonical_symbol() |> String.split("-") do
+      [base, quote_asset] when base != "" and quote_asset != "" -> {:ok, base, quote_asset}
+      _unsplit -> {:error, {:invalid_symbol, symbol}}
+    end
+  end
+
+  # What a settled conversion carries that the commit itself stated: the pair (a buy gives up
+  # the quote asset for the base, a sell the reverse), the price as the rate, the fee, and the
+  # base quantity on the side it lands on. The other amount is the venue's own figure and the
+  # real reply reports no proceeds for a sell, so it is `nil` here rather than arithmetic.
+  defp committed_conversion(id, terms, base, quote_asset) do
+    {from_asset, to_asset} =
+      if terms["side"] == "buy", do: {quote_asset, base}, else: {base, quote_asset}
+
+    quantity = Decimal.new(terms["quantity"])
+
+    %Types.Conversion{
+      # A string, as the real decode makes it; the id may arrive as the integer the venue
+      # names, which `commit_terms/2` also accepts.
+      id: to_string(id),
+      status: :settled,
+      from_asset: from_asset,
+      to_asset: to_asset,
+      from_amount: if(terms["side"] == "buy", do: nil, else: quantity),
+      to_amount: if(terms["side"] == "buy", do: quantity, else: nil),
+      rate: Decimal.new(terms["price"]),
+      fee: Decimal.new(terms["fee"]),
+      venue_time: @at,
+      provider: :gemini
+    }
   end
 
   @impl true
@@ -1781,7 +1808,9 @@ defmodule DpExchange.Gemini.Fake do
          %Types.Withdrawal{
            # The idempotency key the real package always sends, echoed so a consumer can
            # assert its own was used. A blank one is no key there, and is none here.
-           id: supplied_id || "fake-transfer-1",
+           # Unique per call when the caller gave none, as the real path's generated key is: one
+           # fixed id for every withdrawal made two withdrawals look like one.
+           id: supplied_id || Private.generate_transfer_id(),
            # **`:pending`, never `:completed`.** The venue accepting a withdrawal is not the
            # chain confirming it, and a fake that reported completion would teach a consumer
            # the money has arrived.
@@ -1858,28 +1887,26 @@ defmodule DpExchange.Gemini.Fake do
       # Both ends first, then the credential: `Private.transfer_internal/5` refuses a missing
       # `:from` or `:to` before it signs anything. The amount is written out in full, as there,
       # through `decimal/1` — `Decimal.new/1` raised on a float.
-      case {Keyword.get(transfer_opts, :from), Keyword.get(transfer_opts, :to)} do
-        {nil, _to} ->
-          {:error, {:missing_option, :from}}
-
-        {_from, nil} ->
-          {:error, {:missing_option, :to}}
-
-        {from, to} ->
-          # The asset and amount are checked by the function the real call uses, after the
-          # two account names and before the credential, as there.
-          with {:ok, _currency, wire_amount} <- Private.validate_internal_transfer(asset, amount),
-               {:ok, _supplied_id} <-
-                 Private.client_transfer_id(Keyword.get(transfer_opts, :client_transfer_id)),
-               :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
-            {:ok,
-             %{
-               "asset" => asset,
-               "amount" => wire_amount,
-               "sourceAccount" => from,
-               "targetAccount" => to
-             }}
-          end
+      #
+      # The account names are checked by the real function (non-blank strings, and not the
+      # same account), then the asset and amount, then the key, then the credential, as there.
+      # The reply carries the venue's own response fields (`rest.yaml`, "Transfer Between
+      # Accounts"): `fromAccount`, `toAccount`, `amount` and a `uuid` unique to the transfer.
+      # It no longer echoes the request's `asset`, a field the venue's reply does not have.
+      with {:ok, from, to} <- Private.validate_internal_accounts(transfer_opts),
+           {:ok, _currency, wire_amount} <- Private.validate_internal_transfer(asset, amount),
+           {:ok, _supplied_id} <-
+             Private.client_transfer_id(Keyword.get(transfer_opts, :client_transfer_id)),
+           :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
+        {:ok,
+         %{
+           "fromAccount" => from,
+           "toAccount" => to,
+           "amount" => wire_amount,
+           # The venue's id for the completed transfer, unique per call; not the caller's key.
+           "uuid" => Private.generate_transfer_id(),
+           "message" => "Success, transfer completed."
+         }}
       end
     end)
   end

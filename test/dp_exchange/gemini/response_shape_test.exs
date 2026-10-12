@@ -224,8 +224,12 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
       cancel = &Private.cancel_all_orders(@credentials, [scope: :account] ++ &1)
 
       assert {:ok, %{cancelled: ["1", "2"], rejected: []}} = cancel.(body.([1, "2"]))
-      assert {:error, :unexpected_response_shape} = cancel.(body.([1, %{}]))
-      assert {:error, :unexpected_response_shape} = cancel.(body.([1, nil]))
+
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
+               cancel.(body.([1, %{}]))
+
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
+               cancel.(body.([1, nil]))
     end
 
     test "an accepted withdrawal with an unreadable body carries the key that was sent" do
@@ -345,7 +349,7 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
     test "cancel_all_orders/2" do
       body = %{"result" => "ok", "details" => %{"cancelledOrders" => "x", "cancelRejects" => []}}
 
-      assert {:error, :unexpected_response_shape} =
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Private.cancel_all_orders(@credentials, [scope: :account] ++ base(body))
     end
 

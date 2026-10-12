@@ -604,6 +604,13 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # **A float is refused (W4).** It has already lost digits before it gets here, and
+  # `Decimal.from_float/1` would sign whatever shortest round-trip text it happens to have as a
+  # money amount: `0.1 + 0.2` becomes `0.30000000000000004` on a transfer. Accepted: `Decimal`,
+  # integer, numeric string. The tag is `{:invalid_amount, value}`, not `:invalid_decimal`, so a
+  # caller can tell "you gave a float" from "that does not parse".
+  defp wire_decimal(value, _field) when is_float(value), do: {:error, {:invalid_amount, value}}
+
   defp wire_decimal(value, field) do
     case wire_number(value) do
       {:ok, number} -> {:ok, number}
@@ -611,7 +618,6 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp wire_number(value) when is_float(value), do: {:ok, Decimal.from_float(value)}
   defp wire_number(value) when is_integer(value), do: {:ok, Decimal.new(value)}
 
   # NaN, Infinity and an exponent no amount has are refused. The last matters here as it does
@@ -935,9 +941,12 @@ defmodule DpExchange.Gemini.Private do
           | {:error, term()}
           | {:refused, term()}
   def cancel_all_orders(credentials, opts) do
+    # Sent once (W2/T10): a bulk cancel that took effect and lost its reply, sent again, is
+    # answered with empty lists, which reads as "nothing was open". An outcome that may have
+    # been acted on is `{:write_unconfirmed, nil, _}` (W1) -- list the open orders to find out.
     with {:ok, path} <- cancel_scope(Keyword.get(opts, :scope)),
-         {:ok, body, _headers} <- post(path, %{}, credentials, opts) do
-      cancel_all_result(body)
+         {:ok, body, _headers} <- path |> post_once(%{}, credentials, opts) |> after_send(nil) do
+      body |> cancel_all_result() |> readable_write(nil)
     end
   end
 
@@ -1101,12 +1110,46 @@ defmodule DpExchange.Gemini.Private do
     post(path, params, credentials, Keyword.put(opts, :retry_attempts, 1), subject)
   end
 
+  # **Every write that is not an order answers "unconfirmed" when it may have been done (W1).**
+  # A transport failure or timeout after the send, a 5xx, a 2xx that is not JSON: the venue
+  # may have acted and the caller was not told. A bare `{:error, _}` reads as "nothing
+  # happened" and invites a retry, which for a transfer, a conversion or a stake is the same
+  # thing done twice. So the outcome is `{:error, {:write_unconfirmed, key, reason}}`, `key`
+  # being the idempotency or correlation handle that actually went out (`nil` where the venue
+  # has none), the one thing a caller can use to find out. Decided before the send (validation,
+  # credentials, our own limiter, a venue 429, an unmapped 4xx the venue answered) stays plain.
+  defp write_unconfirmed(key, reason),
+    do: {:error, {:write_unconfirmed, key, bounded_reason(reason)}}
+
+  # The result of a SENT-ONCE write: an `{:error, _}` that may have reached the venue becomes
+  # unconfirmed; a success, a refusal and a pre-send failure pass through.
+  defp after_send({:error, reason} = error, key) do
+    if request_may_have_been_sent?(reason), do: write_unconfirmed(key, reason), else: error
+  end
+
+  defp after_send(other, _key), do: other
+
+  # A 2xx that was accepted but whose body cannot show the write happened (or cannot be read
+  # into the result) is unconfirmed too, never the hard error that reads as "nothing moved".
+  defp readable_write({:error, reason}, key), do: write_unconfirmed(key, reason)
+  defp readable_write(other, _key), do: other
+
+  # A 2xx body for a write whose result is the venue's own object. Anything but an object
+  # cannot establish what was done.
+  defp object_write(%{} = body, _key) when not is_struct(body), do: {:ok, body}
+  defp object_write(_body, key), do: write_unconfirmed(key, :unexpected_response_shape)
+
   # `subject: :order` marks a call about one order, whose 404 is that order not being there
   # (`{:refused, :not_found}`), not an unknown endpoint to describe by the venue's text.
-  defp post(path, params, credentials, opts, subject \\ :other) do
+  defp post(path, params, credentials, opts, subject \\ :other),
+    do: post_signed(path, params, credentials, opts, subject, & &1)
+
+  # `wrap` is applied to the per-attempt signer, so a caller that must know how many attempts
+  # actually left the process (`withdraw/6`, which retries a keyed write) can count them.
+  defp post_signed(path, params, credentials, opts, subject, wrap) do
     scheme = auth_scheme(credentials, opts)
 
-    headers = signer(scheme, path, stringify(params), credentials, opts)
+    headers = wrap.(signer(scheme, path, stringify(params), credentials, opts))
     url = base_url(opts) <> path
 
     case HttpClient.request(:post, url, headers, "", request_opts(opts)) do
@@ -1896,6 +1939,11 @@ defmodule DpExchange.Gemini.Private do
   before a request is made. `id` — the quote's `quoteId` — is sent as the integer the
   venue's own schema names (`rest.yaml:5072`), parsed back from the string this package
   handed the caller in the quote; an id that does not parse is refused rather than sent.
+
+  Sent once. A commit that may have been executed -- a transport failure or timeout after the
+  send, a 5xx, a 2xx that is not JSON or whose body does not name the conversion -- is
+  `{:error, {:write_unconfirmed, quote_id, reason}}`, never a bare error: check the account
+  before quoting again. Amounts that are floats are `{:error, {:invalid_amount, value}}`.
   """
   @spec commit_conversion(String.t(), keyword()) ::
           {:ok, Conversion.t()} | {:error, term()} | {:refused, term()}
@@ -1907,25 +1955,35 @@ defmodule DpExchange.Gemini.Private do
     # "no conversion happened" for one that did. The transport error this sends instead says
     # what is true: the outcome is unknown. The spec never says a repeat of a spent
     # `quoteId` returns the original result, so this does not assume it. See `post_once/4`.
+    #
+    # **A commit that may have been executed is `{:error, {:write_unconfirmed, quote_id,
+    # reason}}`** (W1): the quote id sent is the handle a caller reconciles with. A 2xx whose
+    # body cannot be read into a conversion is the same, never a hard error after the venue
+    # accepted.
     with {:ok, params} <- execute_params(id, opts),
-         {:ok, body, headers} <- post_once("/v1/instant/execute", params, credentials, opts) do
-      to_conversion(body, nil, nil, :settled, headers, params["side"])
+         key = Integer.to_string(params["quoteId"]),
+         {:ok, body, headers} <-
+           "/v1/instant/execute"
+           |> post_once(params, credentials, opts)
+           |> after_send(key) do
+      body
+      |> to_conversion(nil, nil, :settled, headers, params["side"])
+      |> readable_write(key)
     end
   end
 
   @doc """
-  Whether `id` and `opts` carry everything `commit_conversion/2` sends, checked without
-  sending it.
+  The wire terms `commit_conversion/2` sends (`"quoteId"`, `"symbol"`, `"side"`,
+  `"quantity"`, `"price"`, `"fee"`), checked without sending anything, or the refusal.
 
   The five terms the quote was made at (`:symbol`, `:side`, `:amount`, `:price`, `:fee`) first,
   as `{:error, {:missing_option, missing}}`, then the quote id, as
-  `{:error, {:invalid_quote_id, id}}`. Exposed so `DpExchange.Gemini.Fake` refuses with this
-  exact function, in the same order, rather than a second copy of the rules.
+  `{:error, {:invalid_quote_id, id}}`, then the numbers (`{:error, {:invalid_amount, v}}` for a
+  float). Exposed so `DpExchange.Gemini.Fake` refuses with this exact function, in the same
+  order, and answers with what was committed rather than a fixed pair.
   """
-  @spec validate_commit_terms(term(), keyword()) :: :ok | {:error, term()}
-  def validate_commit_terms(id, opts) do
-    with {:ok, _params} <- execute_params(id, opts), do: :ok
-  end
+  @spec commit_terms(term(), keyword()) :: {:ok, map()} | {:error, term()}
+  def commit_terms(id, opts), do: execute_params(id, opts)
 
   # The venue needs the same symbol, side and spend it quoted against, alongside the id —
   # `/v1/instant/execute` does not take the quote id alone. A caller holding the
@@ -2211,6 +2269,11 @@ defmodule DpExchange.Gemini.Private do
   `opts[:side]` to say which.
 
   Returns a `Conversion` already `:settled`. It has happened.
+
+  Sent once. A conversion that may have been made but is not proven -- a transport failure or
+  timeout after the send, a 5xx, a 2xx that is not JSON or whose body does not name the
+  conversion -- is `{:error, {:write_unconfirmed, nil, reason}}` (the endpoint has no key):
+  check the account before converting again.
   """
   @spec convert(String.t(), String.t(), Decimal.t(), keyword()) ::
           {:ok, Conversion.t()} | {:error, term()} | {:refused, term()}
@@ -2221,9 +2284,15 @@ defmodule DpExchange.Gemini.Private do
          {:ok, wire_amount} <- wire_positive(amount, :amount) do
       params = %{"amount" => wire_amount, "side" => side}
 
+      # No idempotency key exists on this endpoint, so an unconfirmed outcome carries `nil`
+      # (W1): the caller reconciles by looking at the account, not by re-sending.
       with {:ok, body, headers} <-
-             post_once("/v1/wrap/#{segment(symbol)}", params, credentials, opts) do
-        to_conversion(body, from, to, :settled, headers, side)
+             "/v1/wrap/#{segment(symbol)}"
+             |> post_once(params, credentials, opts)
+             |> after_send(nil) do
+        body
+        |> to_conversion(from, to, :settled, headers, side)
+        |> readable_write(nil)
       end
     end
   end
@@ -2734,9 +2803,18 @@ defmodule DpExchange.Gemini.Private do
 
   **An accepted withdrawal is always `{:ok, _}`, with an id.** The id is the venue's
   `withdrawalId` where it sends a readable one, and otherwise the `clientTransferId` that went
-  out with this request. A 2xx whose body could not be read used to come back as an error.
-  That told the caller a withdrawal had failed when the venue had accepted it, and the
-  obvious next step, a retry without a key, sends the money again.
+  out with this request. A 2xx JSON object that is missing fields is still a withdrawal.
+
+  **A withdrawal that may have been sent is `{:error, {:write_unconfirmed, transfer_id,
+  reason}}`.** This retries (the key makes that safe), and every outcome after a send that is
+  not a success -- a transport failure or timeout after the retries, a 5xx, a 2xx that is not
+  JSON (a captive portal answers `200 text/html`), a refusal or a 4xx answered to a *retry*
+  (the venue's answer to a duplicate `clientTransferId`, not a verdict on the first attempt),
+  a limiter refusing a retry after an earlier attempt went out -- carries the
+  `clientTransferId` actually sent, the generated one included. Re-send with
+  `client_transfer_id: transfer_id` and the venue deduplicates, or look it up; never re-send
+  without it. Validation, credentials, our own limiter refusing before anything was sent, and
+  a refusal to the only attempt made stay plain.
 
   ## The memo is required on some networks and this package cannot tell you which
 
@@ -2794,24 +2872,98 @@ defmodule DpExchange.Gemini.Private do
         }
         |> put_present("memo", wire_memo(memo))
 
+      calls = :atomics.new(1, signed: false)
+
+      # **Retried, because it carries a key the venue honours; so every way it can fail after
+      # a send carries that key (W1/W2).** The `clientTransferId` is generated when the caller
+      # gives none, and used to be dropped on a final failure: the caller then retried
+      # without it and sent the money twice. `calls` counts signer calls, so a limiter
+      # refusing before anything left the process stays a plain error, and a 4xx answered to a
+      # RETRY (a duplicate `clientTransferId`) is not read as a refusal of the first attempt.
       with {:ok, body, _headers} <-
-             post(
-               "/v2/withdraw/#{network_segment}/#{segment(ticker)}",
-               params,
-               credentials,
-               opts
-             ) do
+             "/v2/withdraw/#{network_segment}/#{segment(ticker)}"
+             |> post_signed(params, credentials, opts, :other, &counting(&1, calls))
+             |> withdraw_outcome(transfer_id, calls, opts) do
         # The amount and memo as the contract types them (`Decimal`, string), not as the caller
         # held them: an integer or a string amount and an integer destination tag came back
         # on the `Withdrawal` unchanged, in fields typed otherwise.
-        to_withdrawal(
-          body,
+        body
+        |> to_withdrawal(
           transfer_id,
           {asset, network, address, Decimal.new(wire_amount), wire_memo(memo)}
         )
+        |> withdraw_refusal(transfer_id, calls, opts)
       end
     end
   end
+
+  # Counts how many times a request was signed. `Core.HttpClient` signs once per attempt
+  # (twice on a blocking limiter), so the count tells an error with nothing yet sent from one
+  # after a first attempt.
+  defp counting(signer, calls) do
+    fn ->
+      :atomics.add(calls, 1, 1)
+      signer.()
+    end
+  end
+
+  # How many attempts actually left the process. Blocking limiter: signed before and after
+  # the limiter wait, so two calls per attempt. Otherwise one per attempt, the last of which
+  # was never sent when it was our own limiter that refused it.
+  defp sent_attempts(calls, opts, limiter_refused?) do
+    signed = :atomics.get(calls, 1)
+
+    cond do
+      Config.opt(opts, :rate_limit_blocking, false) -> div(signed, 2)
+      limiter_refused? -> max(signed - 1, 0)
+      true -> signed
+    end
+  end
+
+  # What a retried, keyed write's failure means (W1/W2). The key is always the one sent.
+  #
+  #   * our own limiter refused: plain when nothing had been sent, unconfirmed when an earlier
+  #     attempt had gone out (that attempt may have been acted on);
+  #   * a refusal or a venue 4xx answered to an attempt AFTER the first: unconfirmed, because
+  #     it is the venue answering a repeat of a request it may already have taken (a duplicate
+  #     `clientTransferId`), not a verdict on the first;
+  #   * a transport failure, a timeout, a 5xx or a 2xx that is not JSON: unconfirmed.
+  defp withdraw_outcome({:refused, reason} = refusal, key, calls, opts) do
+    if sent_attempts(calls, opts, false) > 1,
+      do: write_unconfirmed(key, {:refused_after_retry, reason}),
+      else: refusal
+  end
+
+  defp withdraw_outcome({:error, reason} = error, key, calls, opts) do
+    limiter? = limiter_refusal?(reason)
+    sent = sent_attempts(calls, opts, limiter?)
+
+    cond do
+      limiter? and sent == 0 -> error
+      limiter? -> write_unconfirmed(key, reason)
+      request_may_have_been_sent?(reason) or sent > 1 -> write_unconfirmed(key, reason)
+      true -> error
+    end
+  end
+
+  defp withdraw_outcome(ok, _key, _calls, _opts), do: ok
+
+  # A 2xx body that says the venue refused (`result: "error"`) on an attempt after the first
+  # is the same repeat answer as a 4xx would be.
+  defp withdraw_refusal({:refused, body} = refusal, key, calls, opts) do
+    if sent_attempts(calls, opts, false) > 1,
+      do: write_unconfirmed(key, {:refused_after_retry, body}),
+      else: refusal
+  end
+
+  defp withdraw_refusal(other, _key, _calls, _opts), do: other
+
+  defp limiter_refusal?({:exchange_error, _venue, "Throttled by our own rate limiter" <> _rest}),
+    do: true
+
+  defp limiter_refusal?({:exchange_error, _venue, "Rate limiter unavailable"}), do: true
+  defp limiter_refusal?({:exchange_error, _venue, :rate_limit_timeout}), do: true
+  defp limiter_refusal?(_reason), do: false
 
   # A caller that says the network needs a memo and then sends none is stopped here, where
   # nothing has moved, rather than at the venue after the transfer is accepted. A blank memo
@@ -2882,7 +3034,14 @@ defmodule DpExchange.Gemini.Private do
   # the same withdrawal must not generate the same id by accident, and must not generate a
   # *different* one for what is meant to be the same request either — which is why a caller
   # that needs a stable id across restarts passes its own.
-  defp generate_transfer_id do
+  @doc """
+  A fresh, random UUID-4 string for a transfer's `clientTransferId`.
+
+  What `withdraw/6` and `transfer_internal/5` send when the caller gives no key. Exposed so
+  `DpExchange.Gemini.Fake` issues ids the same way instead of one fixed id for every call.
+  """
+  @spec generate_transfer_id() :: String.t()
+  def generate_transfer_id do
     <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
 
     :io_lib.format("~8.16.0b-~4.16.0b-4~3.16.0b-~4.16.0b-~12.16.0b", [
@@ -3067,8 +3226,12 @@ defmodule DpExchange.Gemini.Private do
       # nothing here the venue could tell a retry by — and `HttpClient` retries a timeout or
       # a 5xx three times by default. Adding a bank account twice is not a retry, it is a
       # second payment method, and removing one is not something this API does.
-      with {:ok, body, _headers} <- post_once(path, details, credentials, opts) do
-        {:ok, body}
+      #
+      # A registration that may have gone through is `{:write_unconfirmed, nil, _}` (W1): the
+      # venue gives it no key, so list the payment methods before adding it again.
+      with {:ok, body, _headers} <-
+             path |> post_once(details, credentials, opts) |> after_send(nil) do
+        object_write(body, nil)
       end
     end
   end
@@ -3099,7 +3262,11 @@ defmodule DpExchange.Gemini.Private do
   **Not `withdraw/5`.** Nothing leaves the venue and no chain is involved, so there is no
   address, no network and no network fee. `opts[:from]` and `opts[:to]` are the venue's own
   account names and both are required: a transfer with one end missing is not a transfer,
-  and defaulting either would move funds between accounts the caller did not name.
+  and defaulting either would move funds between accounts the caller did not name. Both must
+  be non-blank strings (`{:error, {:invalid_option, key, value}}`), and a transfer from an
+  account to itself is `{:error, {:invalid_transfer, :same_account}}`. A transfer that may
+  have been made is `{:error, {:write_unconfirmed, client_transfer_id, reason}}`, carrying the
+  id sent (generated or the caller's).
 
   **`clientTransferId` is sent on every call**, generated when `opts[:client_transfer_id]`
   names none — the same pattern `withdraw/6` uses for its own idempotency key, and the
@@ -3115,8 +3282,7 @@ defmodule DpExchange.Gemini.Private do
   @spec transfer_internal(String.t(), Decimal.t(), keyword(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def transfer_internal(asset, amount, transfer_opts, credentials, opts) do
-    with {:ok, from} <- required_opt(transfer_opts, :from),
-         {:ok, to} <- required_opt(transfer_opts, :to),
+    with {:ok, from, to} <- validate_internal_accounts(transfer_opts),
          {:ok, currency, wire_amount} <- validate_internal_transfer(asset, amount),
          {:ok, supplied_id} <-
            client_transfer_id(Keyword.get(transfer_opts, :client_transfer_id)) do
@@ -3134,9 +3300,14 @@ defmodule DpExchange.Gemini.Private do
       # deduplicates the way `withdraw/6`'s does — see this function's own doc — so a retry
       # is not known to be safe, and an OAuth request carries no nonce to be refused on
       # replay either. See `post_once/4`.
+      #
+      # **An outcome that may have moved the money carries the `clientTransferId` sent (W1)**:
+      # `{:error, {:write_unconfirmed, transfer_id, reason}}`, the generated one included.
       with {:ok, body, _headers} <-
-             post_once("/v1/account/transfer/#{segment(currency)}", params, credentials, opts) do
-        {:ok, body}
+             "/v1/account/transfer/#{segment(currency)}"
+             |> post_once(params, credentials, opts)
+             |> after_send(transfer_id) do
+        object_write(body, transfer_id)
       end
     end
   end
@@ -3163,8 +3334,9 @@ defmodule DpExchange.Gemini.Private do
 
   @doc """
   The plain-notation string `quote_conversion/4`, `convert/4` and the other money-moving calls
-  send for `value`, or the refusal: a finite number above zero, else
-  `{:error, {:invalid_decimal | :non_positive_amount, field, value}}`.
+  send for `value`, or the refusal: a `Decimal`, integer or numeric string that is finite and
+  above zero, else `{:error, {:invalid_decimal | :non_positive_amount, field, value}}`. A
+  float is `{:error, {:invalid_amount, value}}` (it has already lost digits).
 
   Exposed so `DpExchange.Gemini.Fake` refuses with this function rather than a second copy.
   """
@@ -3255,6 +3427,40 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # An account or counterparty NAME the venue will act on: a non-blank string. `required_opt/2`
+  # took any non-nil value, so an integer or `""` was signed into a transfer between accounts
+  # (W4/M1). Absent is `{:missing_option, key}`; present and not a usable name is
+  # `{:invalid_option, key, value}`.
+  defp required_name(opts, key) do
+    case Keyword.get(opts, key) do
+      nil -> {:error, {:missing_option, key}}
+      name when is_binary(name) -> if present?(name), do: {:ok, name}, else: bad_name(key, name)
+      other -> bad_name(key, other)
+    end
+  end
+
+  defp bad_name(key, value), do: invalid_option(key, value)
+
+  @doc """
+  The `{from, to}` account names `transfer_internal/5` moves funds between, or the refusal.
+
+  Both `:from` and `:to` are required (`{:error, {:missing_option, key}}`, `:from` first) and
+  must be non-blank strings (`{:error, {:invalid_option, key, value}}`). A transfer from an
+  account to itself is `{:error, {:invalid_transfer, :same_account}}`: it moves nothing and
+  its reply would read as a transfer that happened. Exposed so `DpExchange.Gemini.Fake`
+  refuses with this function.
+  """
+  @spec validate_internal_accounts(keyword()) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
+  def validate_internal_accounts(transfer_opts) do
+    with {:ok, from} <- required_name(transfer_opts, :from),
+         {:ok, to} <- required_name(transfer_opts, :to) do
+      if from == to,
+        do: {:error, {:invalid_transfer, :same_account}},
+        else: {:ok, from, to}
+    end
+  end
+
   @doc """
   Asks the venue to add `address` to the withdrawal allowlist for `network` —
   `/v1/approvedAddresses/{network}/request`.
@@ -3279,15 +3485,17 @@ defmodule DpExchange.Gemini.Private do
         %{"address" => address, "label" => label}
         |> put_present("memo", Keyword.get(opts, :memo))
 
-      # Still `post/4`, deliberately. Unlike the two writes above, the thing being
-      # created IS the key: the request names one address on one network, and re-sending
-      # it asks for the same allowlist entry rather than a second one. That is the test
-      # `post_once/4` states — "can the venue tell the second attempt from the first" —
-      # and here it can, from the payload this module builds itself. Recorded so the
-      # next sweep does not flatten all three into one rule.
+      # **Sent once (W2).** This used to be retried on the reasoning that the payload names
+      # the entry, so a repeat asks for the same one. The spec never says the venue
+      # deduplicates it, and a request that took effect and lost its reply, sent again with a
+      # fresh nonce, is answered as a refusal ("already exists") that reads as "nothing was
+      # added". An outcome that may have been acted on is `{:write_unconfirmed, nil, _}` (W1):
+      # read `list_approved_addresses/2` to find out.
       with {:ok, body, _headers} <-
-             post("/v1/approvedAddresses/#{segment(network)}/request", params, credentials, opts) do
-        {:ok, body}
+             "/v1/approvedAddresses/#{segment(network)}/request"
+             |> post_once(params, credentials, opts)
+             |> after_send(nil) do
+        object_write(body, nil)
       end
     end
   end
@@ -3308,15 +3516,15 @@ defmodule DpExchange.Gemini.Private do
   @spec remove_approved_address(String.t(), String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def remove_approved_address(network, address, credentials, opts) do
+    # Sent once, and an outcome that may have been acted on is `{:write_unconfirmed, nil, _}`
+    # (W1/W2): a removal that took effect and lost its reply, sent again, is answered as an
+    # address that is not there.
     with :ok <- validate_approved_address(network, address),
          {:ok, body, _headers} <-
-           post(
-             "/v1/approvedAddresses/#{segment(network)}/remove",
-             %{"address" => address},
-             credentials,
-             opts
-           ) do
-      {:ok, body}
+           "/v1/approvedAddresses/#{segment(network)}/remove"
+           |> post_once(%{"address" => address}, credentials, opts)
+           |> after_send(nil) do
+      object_write(body, nil)
     end
   end
 
@@ -3818,6 +4026,11 @@ defmodule DpExchange.Gemini.Private do
   staked with several at different rates and picking one here would stake at a rate the
   caller never chose. Missing it is `{:error, :missing_provider_id}` before a request is
   made.
+
+  Sent once. A stake that may have been made but is not proven -- a transport failure or
+  timeout after the send, a 5xx, a 2xx that is not JSON or whose body does not describe a
+  transaction -- is `{:error, {:write_unconfirmed, transaction_id_or_nil, reason}}`; check
+  `get_staking_history/2` before staking again.
   """
   @spec stake(String.t(), Decimal.t(), map(), keyword()) ::
           {:ok, StakingTransaction.t()} | {:error, term()} | {:refused, term()}
@@ -3851,8 +4064,13 @@ defmodule DpExchange.Gemini.Private do
         "providerId" => provider_id
       }
 
-      with {:ok, body, _headers} <- post_once(path, params, credentials, opts) do
-        to_staking_transaction(body, type)
+      # No client key on these endpoints: an unconfirmed outcome (W1) carries `nil`, or the
+      # venue's `transactionId` when the reply named one but could not be read further.
+      with {:ok, body, _headers} <-
+             path |> post_once(params, credentials, opts) |> after_send(nil) do
+        body
+        |> to_staking_transaction(type)
+        |> readable_write(staking_reply_id(body))
       end
     end
   end
@@ -3919,6 +4137,20 @@ defmodule DpExchange.Gemini.Private do
   # why — so the reply naming no `transactionType` (it never does, on either of these two
   # endpoints) can no longer produce `:other`, an answer that used to be true only because
   # this decoder was misreading a shape it never receives.
+  #
+  # **A reply that cannot be read into a transaction is `{:write_unconfirmed, id_or_nil, _}`
+  # at the caller (W1/W3), never a hard error**: the venue accepted the stake or redemption, so
+  # "nothing moved" would be false. `staking_reply_id/1` is the `transactionId` the reply did
+  # carry, so the caller has something to look the transaction up by.
+  defp staking_reply_id(row) when is_map(row) do
+    case required_id(row["transactionId"] || row["id"], :id) do
+      {:ok, id} -> id
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp staking_reply_id(_row), do: nil
+
   defp to_staking_transaction(row, type) when is_map(row) do
     with {:ok, id} <- required_id(row["transactionId"] || row["id"], :id),
          {:ok, asset} <- required_id(row["currency"], :asset),
@@ -5008,12 +5240,9 @@ defmodule DpExchange.Gemini.Private do
         # Once: a revoke that took effect leaves the token dead, so a repeat is answered 401
         # and reads as a refusal of a revoke that worked. See `post_once/4`.
         with {:ok, body, _headers} <-
-               post_once(
-                 "/v1/oauth/revokeByToken",
-                 %{},
-                 credentials,
-                 Keyword.put(opts, :auth_scheme, :oauth)
-               ),
+               "/v1/oauth/revokeByToken"
+               |> post_once(%{}, credentials, Keyword.put(opts, :auth_scheme, :oauth))
+               |> after_send(nil),
              do: {:ok, body}
 
       _other ->
@@ -5048,8 +5277,13 @@ defmodule DpExchange.Gemini.Private do
         |> put_present("expires_in_hrs", Keyword.get(opts, :expires_in_hrs))
 
       # Once: a repeated offer is a second offer to the counterparty. See `post_once/4`.
-      with {:ok, body, _headers} <- post_once("/v1/clearing/new", params, credentials, opts),
-           do: {:ok, body}
+      #
+      # An offer that may have reached the counterparty is `{:write_unconfirmed, nil, _}`
+      # (W1): the venue gives this call no client key, so reconcile with
+      # `list_clearing_orders/2` before sending it again.
+      with {:ok, body, _headers} <-
+             "/v1/clearing/new" |> post_once(params, credentials, opts) |> after_send(nil),
+           do: object_write(body, nil)
     end
   end
 
@@ -5071,8 +5305,8 @@ defmodule DpExchange.Gemini.Private do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_broker_clearing_order(request, credentials, opts) do
     with {:ok, params} <- clearing_order_params(request),
-         {:ok, source} <- required_opt(opts, :source_counterparty_id),
-         {:ok, target} <- required_opt(opts, :target_counterparty_id),
+         {:ok, source} <- required_name(opts, :source_counterparty_id),
+         {:ok, target} <- required_name(opts, :target_counterparty_id),
          {:ok, hours} <- required_opt(opts, :expires_in_hrs) do
       params =
         params
@@ -5082,8 +5316,10 @@ defmodule DpExchange.Gemini.Private do
 
       # Once, for the same reason as `create_clearing_order/3`.
       with {:ok, body, _headers} <-
-             post_once("/v1/clearing/broker/new", params, credentials, opts),
-           do: {:ok, body}
+             "/v1/clearing/broker/new"
+             |> post_once(params, credentials, opts)
+             |> after_send(nil),
+           do: object_write(body, nil)
     end
   end
 
@@ -5130,13 +5366,10 @@ defmodule DpExchange.Gemini.Private do
     # Once: a cancel sent again after it took effect is answered as a cancel that did not.
     with {:ok, clearing_id} <- clearing_id_arg(clearing_id),
          {:ok, body, _headers} <-
-           post_once(
-             "/v1/clearing/cancel",
-             %{"clearing_id" => clearing_id},
-             credentials,
-             opts
-           ) do
-      clearing_result(body, "ok")
+           "/v1/clearing/cancel"
+           |> post_once(%{"clearing_id" => clearing_id}, credentials, opts)
+           |> after_send(clearing_id) do
+      body |> clearing_result("ok") |> readable_write(clearing_id)
     end
   end
 
@@ -5175,8 +5408,14 @@ defmodule DpExchange.Gemini.Private do
       # Once, like the create: a confirm that executed and lost its reply, sent again, is
       # answered "already confirmed", which reads as `{:refused, _}` for a trade that
       # happened. See `post_once/4`.
-      with {:ok, body, _headers} <- post_once("/v1/clearing/confirm", params, credentials, opts),
-           do: clearing_result(body, "confirmed")
+      #
+      # The clearing id is the handle an unconfirmed outcome carries (W1): read it back with
+      # `get_clearing_order/3` and trust `is_confirmed`, not this error.
+      with {:ok, body, _headers} <-
+             "/v1/clearing/confirm"
+             |> post_once(params, credentials, opts)
+             |> after_send(clearing_id),
+           do: body |> clearing_result("confirmed") |> readable_write(clearing_id)
     end
   end
 

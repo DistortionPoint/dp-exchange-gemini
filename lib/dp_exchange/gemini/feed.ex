@@ -402,17 +402,19 @@ defmodule DpExchange.Gemini.Feed do
   Exposed so `DpExchange.Gemini.Fake` canonicalises and refuses exactly as the real feed does.
   """
   @spec canonical_symbols(term()) :: {:ok, [String.t()]} | {:error, {:invalid_symbols, term()}}
-  def canonical_symbols(symbols) when is_list(symbols) do
-    case Enum.reject(symbols, &(is_binary(&1) and String.trim(&1) != "")) do
-      [] ->
-        {:ok, symbols |> Enum.map(&canonical_symbol/1) |> Enum.uniq()}
-
-      invalid ->
-        {:error, {:invalid_symbols, invalid}}
+  def canonical_symbols(symbols) do
+    # The error carries the caller's WHOLE argument as given, not only the bad elements, and
+    # an improper list (`["BTC-USD" | "tail"]`) is refused rather than raised on.
+    if proper_list?(symbols) and Enum.all?(symbols, &(is_binary(&1) and String.trim(&1) != "")) do
+      {:ok, symbols |> Enum.map(&canonical_symbol/1) |> Enum.uniq()}
+    else
+      {:error, {:invalid_symbols, symbols}}
     end
   end
 
-  def canonical_symbols(other), do: {:error, {:invalid_symbols, other}}
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_other), do: false
 
   defp canonical_symbol(symbol) do
     symbol |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()

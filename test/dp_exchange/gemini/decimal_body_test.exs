@@ -152,8 +152,9 @@ defmodule DpExchange.Gemini.DecimalBodyTest do
       assert withdrawal.id == "sent-id"
     end
 
-    test "with bytes that are not JSON is an error, not a success" do
-      assert {:error, {:undecodable_response, :gemini}} = withdraw(raw("<html>"))
+    test "with bytes that are not JSON is unconfirmed under the key sent, not a success" do
+      assert {:error, {:write_unconfirmed, "sent-id", {:undecodable_response, :gemini}}} =
+               withdraw(raw("<html>"))
     end
   end
 

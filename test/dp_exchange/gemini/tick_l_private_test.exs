@@ -403,7 +403,8 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
     end
 
     test "a withdrawal's amount is a Decimal and its memo a string, whatever was passed" do
-      for amount <- [Decimal.new("2.5"), "2.5", 2.5] do
+      # A float is refused (W4); see write_conventions_test.exs.
+      for amount <- [Decimal.new("2.5"), "2.5"] do
         assert {:ok, %Withdrawal{} = withdrawal} =
                  Private.withdraw("ETH", "ethereum", amount, "0xabc", @credentials,
                    memo: 12_345,
@@ -435,7 +436,8 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
                  credentials: @credentials
                )
 
-      assert withdrawal.id == "fake-transfer-1"
+      # A blank key is none, so one is generated (a UUID-4), as the real path does (W6).
+      assert withdrawal.id =~ ~r/\A[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}\z/
       assert withdrawal.memo == "12345"
       assert withdrawal.amount == Decimal.new("2.5")
     end
@@ -475,8 +477,13 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
       assert settled.from_amount == Decimal.new("5")
       assert %Decimal{} = settled.to_amount
 
-      assert {:ok, %Conversion{} = quoted} = Fake.quote_conversion("GUSD", "USD", 7.5, opts)
+      assert {:ok, %Conversion{} = quoted} =
+               Fake.quote_conversion("GUSD", "USD", Decimal.new("7.5"), opts)
+
       assert quoted.from_amount == Decimal.new("7.5")
+
+      # A float has already lost digits: refused, as the real path refuses it (W4).
+      assert {:error, {:invalid_amount, 7.5}} = Fake.quote_conversion("GUSD", "USD", 7.5, opts)
     end
 
     test "a committed conversion's id is a string, as the real decode makes it" do

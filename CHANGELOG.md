@@ -20,6 +20,57 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING) - non-order writes (tick Q)
+
+- **BREAKING: a write that may have been acted on is `{:error, {:write_unconfirmed, key_or_nil,
+  reason}}`.** Covers `withdraw/5`, `transfer_internal/4`, `convert/4`, `commit_conversion/2`,
+  `stake/3`, `unstake/3`, `create_clearing_order/3`, `create_broker_clearing_order/3`,
+  `confirm_clearing_order/4`, `cancel_clearing_order/3`, `add_payment_method/2`,
+  `request_approved_address/4`, `remove_approved_address/3`, `cancel_all_orders/2` and
+  `revoke_access_token/1`. A timeout or connection failure after the send, a 5xx, a `2xx` that
+  is not JSON and a `2xx` whose body cannot show what was done were bare `{:error, {:exchange_error,
+  :gemini, _}}`, `{:error, {:undecodable_response, :gemini}}` or `{:error,
+  :unexpected_response_shape}` (or a missing-field tuple), all of which read as "nothing
+  happened". `key` is the handle sent: the `clientTransferId` for `withdraw/5` and
+  `transfer_internal/4` (generated ones included), the quote id for `commit_conversion/2`, the
+  clearing id for `confirm_clearing_order/4` and `cancel_clearing_order/3`, the `transactionId`
+  for `stake/3` and `unstake/3` when the reply carried one, else `nil`. Validation, credentials,
+  our own limiter refusing before any send, a venue refusal and an unmapped 4xx stay plain.
+- **BREAKING: `withdraw/5` drops no key.** It retries (3 attempts, the `clientTransferId` makes
+  that safe) but the final failure dropped the id, so a caller that retried without it sent the
+  money twice. Now every outcome after a send that is not a success carries it, including a
+  4xx or an `error` body answered to a RETRY (a duplicate `clientTransferId`: was
+  `{:refused, _}`, now `{:write_unconfirmed, key, {:refused_after_retry, _}}`), a limiter
+  refusing a retry after an earlier attempt went out, and a `2xx` that is not JSON (was
+  `{:error, {:undecodable_response, :gemini}}`). Signer calls are counted, so a limiter refusal
+  before anything was sent, and a refusal to the only attempt made, are unchanged.
+- **BREAKING: `cancel_all_orders/2`, `request_approved_address/4` and
+  `remove_approved_address/3` are sent once** (were retried 3 times by `Core.HttpClient`). A
+  repeat of one that took effect is answered with empty lists or a refusal, which read as
+  "nothing happened".
+- **An accepted stake, unstake, conversion or commit whose reply cannot be read is
+  `{:write_unconfirmed, ...}`** (was `{:error, {:missing_required_field, _}}` or
+  `{:error, :unexpected_response_shape}` after the venue had accepted it). An unreadable
+  OPTIONAL field is still `nil` in the returned struct.
+- **BREAKING: a float amount is `{:error, {:invalid_amount, value}}`** (was accepted through
+  `Decimal.from_float/1`) for `withdraw/5`, `transfer_internal/4`, `stake/3`, `unstake/3`,
+  `quote_conversion/4`, `convert/4`, `commit_conversion/2` (amount, price, fee), the clearing
+  calls and the margin preview's numbers. A float has already lost digits.
+- **BREAKING: `transfer_internal/4` with `from` equal to `to` is `{:error, {:invalid_transfer,
+  :same_account}}`; `from`/`to` (and a broker order's `source_counterparty_id` /
+  `target_counterparty_id`) that are not non-blank strings are `{:error, {:invalid_option, key,
+  value}}`** (an integer or `""` was signed). Absent is still `{:missing_option, key}`.
+- **Fake:** `commit_conversion/2` returns the pair, rate, fee and quantity that were committed
+  (was a fixed `USD -> BTC` at 40000); `withdraw/5` with no key returns a unique generated id
+  (was the fixed `"fake-transfer-1"`); `transfer_internal/4` returns the venue's reply fields
+  `fromAccount`, `toAccount`, `amount`, `uuid`, `message` (was the request's `sourceAccount`,
+  `targetAccount`, `asset` -- fields the real reply does not carry; `amount` is a field the
+  spec's reply does carry, so it stays). New shared validators: `Private.commit_terms/2`
+  (replaces `validate_commit_terms/2`), `validate_internal_accounts/1`, `generate_transfer_id/0`.
+- Not measured: how the live venue answers a repeated `clientTransferId` on `/v2/withdraw` (the
+  spec says it will not create an additional withdrawal; nothing here probed it).
+  `{:refused_after_retry, _}` treats that answer as unconfirmed whatever it is.
+
 ## [0.2.122] - 2026-10-12
 
 ### Changed (BREAKING) - trading conventions (tick P)

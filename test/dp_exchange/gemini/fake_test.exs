@@ -850,8 +850,10 @@ defmodule DpExchange.Gemini.FakeTest do
                  credentials: @credentials
                )
 
-      assert transfer["sourceAccount"] == "a"
+      assert transfer["fromAccount"] == "a"
+      assert transfer["toAccount"] == "b"
       refute Map.has_key?(transfer, "address")
+      refute Map.has_key?(transfer, "asset")
     end
 
     test "an allowlist request without a label is refused, as the real adapter refuses it" do

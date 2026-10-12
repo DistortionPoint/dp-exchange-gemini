@@ -994,8 +994,10 @@ defmodule DpExchange.Gemini.PrivateTest do
                )
     end
 
-    test "a body with no details is unreadable, not an empty cancellation" do
-      assert {:error, :unexpected_response_shape} =
+    test "a body with no details is unconfirmed, not an empty cancellation" do
+      # The venue answered 2xx to a bulk cancel and the body cannot say what it cancelled:
+      # `{:write_unconfirmed, nil, _}` (W1), never a bare error that reads as "nothing happened".
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Private.cancel_all_orders(@credentials,
                  scope: :session,
                  plug: responding(%{"result" => "ok"}),

@@ -538,9 +538,11 @@ because it always sends a `clientTransferId` — generated if you give none — 
 answers a repeat with the original transfer. An accepted withdrawal is always `{:ok, _}` with an
 id: the venue's `withdrawalId` where it sends a readable one, otherwise the `clientTransferId`
 that went out. So an unreadable success body never reads as a failure you might retry under a
-new key. `request_approved_address/4` is retried too:
-the address is its own key. If one of the once-only calls times out, re-issue it
-deliberately rather than assuming it did not land — and check first.
+new key. `request_approved_address/4`, `remove_approved_address/3` and `cancel_all_orders/2` are
+sent once too (they used to be retried; a repeat of one that took effect is answered as a
+refusal or as empty lists, which read as "nothing happened"). If one of the once-only calls
+fails after the send it is `{:error, {:write_unconfirmed, key, reason}}` -- see "A write that
+may have been acted on" below -- so check before you re-issue it.
 
 **A master-scoped API key names its subaccount with `account:` on every private call.** The
 venue requires the account name on account-level endpoints for a master key and answers
@@ -1179,6 +1181,54 @@ error as "it did not happen".
 This is not a blanket ban on retrying. It is a ban on repeating an action the venue cannot
 tell apart from the first one. Reads still retry, and so does any write carrying an
 idempotency key the venue honours.
+
+## A write that may have been acted on: `{:error, {:write_unconfirmed, key, reason}}`
+
+Applies to every state-changing call that is not an order: `withdraw/5`, `transfer_internal/4`,
+`convert/4`, `commit_conversion/2`, `stake/3`, `unstake/3`, `create_clearing_order/3`,
+`create_broker_clearing_order/3`, `confirm_clearing_order/4`, `cancel_clearing_order/3`,
+`add_payment_method/2`, `request_approved_address/4`, `remove_approved_address/3`,
+`cancel_all_orders/2` and `revoke_access_token/1`.
+
+A failure after the request may have reached the venue -- a timeout or connection failure, a
+5xx, a `2xx` that is not JSON or whose body cannot show what was done -- is never a bare
+`{:error, _}` (which reads as "nothing happened" and invites a duplicate). It is
+`{:error, {:write_unconfirmed, key, reason}}`, `reason` bounded to 256 characters, and `key` the
+handle to reconcile with:
+
+| Call | `key` |
+|---|---|
+| `withdraw/5` | the `clientTransferId` sent, **generated ones included**; re-send with `client_transfer_id: key` and the venue deduplicates |
+| `transfer_internal/4` | the `clientTransferId` sent (generated or yours); the venue does not promise to deduplicate it, so look the transfer up rather than re-sending |
+| `commit_conversion/2` | the quote id |
+| `confirm_clearing_order/4`, `cancel_clearing_order/3` | the clearing id; read it with `get_clearing_order/3` and trust `is_confirmed` |
+| `stake/3`, `unstake/3` | the `transactionId` when the reply carried one, else `nil` |
+| every other call above | `nil` (the venue gives it no key): look at the account first |
+
+`withdraw/5` is the one write retried internally (it carries a key the venue honours), so it also
+answers unconfirmed when the venue **refuses a retry** (a 4xx or an `error` body to the second
+attempt, e.g. a duplicate `clientTransferId`: that is the venue answering a repeat of a request
+it may have taken, not a verdict on the first) and when our own limiter turns a retry away after
+an earlier attempt went out. A refusal to the only attempt made, a refusal decided before the
+send (validation, missing credentials) and our own limiter refusing before anything was sent
+stay what they were. A `2xx` object that is missing fields is still a success: `withdraw/5` is
+`{:ok, %Withdrawal{}}` with the id, and `stake/3` is `{:ok, %StakingTransaction{}}` with an
+unreadable optional field `nil`.
+
+Amounts for `withdraw/5`, `transfer_internal/4`, `stake/3`, `unstake/3`, `quote_conversion/4`,
+`convert/4`, `commit_conversion/2` (amount, price and fee) and the clearing calls are `Decimal`s,
+integers or numeric strings. **A float is `{:error, {:invalid_amount, value}}`**: it has already
+lost digits. `transfer_internal/4`'s `from:` and `to:` are non-blank strings
+(`{:error, {:invalid_option, key, value}}`) and must differ
+(`{:error, {:invalid_transfer, :same_account}}`); so are a broker clearing order's
+`source_counterparty_id:` and `target_counterparty_id:`.
+
+`DpExchange.Gemini.Fake` refuses the same inputs in the same order. `commit_conversion/2`
+returns the pair, rate, fee and quantity that were committed (a buy gives up the quote asset
+for the base, a sell the reverse; the other amount is `nil` because the venue reports none),
+`withdraw/5` with no key returns a unique generated id, and `transfer_internal/4` returns the
+venue's own reply fields (`fromAccount`, `toAccount`, `amount`, `uuid`, `message`) and no
+echo of the request's `asset`.
 
 ## `place_order/3`: an order says what it is, and an unknown outcome names the id to look for
 

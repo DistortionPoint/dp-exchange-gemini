@@ -45,11 +45,16 @@ defmodule DpExchange.Gemini.FakeFidelityTest do
       end
     end
 
-    test "a float or string amount no longer raises in the fake" do
+    test "a string amount reads in the fake and a float is refused, as the real call refuses" do
       opts = [symbol: "BTC-USD", side: :buy, credentials: @credentials]
 
       assert {:ok, %{to_amount: %Decimal{}}} = Fake.quote_conversion("USD", "BTC", "100", opts)
-      assert {:ok, %{to_amount: %Decimal{}}} = Fake.quote_conversion("USD", "BTC", 100.5, opts)
+
+      assert {:error, {:invalid_amount, 100.5}} =
+               Fake.quote_conversion("USD", "BTC", 100.5, opts)
+
+      assert Fake.quote_conversion("USD", "BTC", 100.5, opts) ==
+               Private.quote_conversion("USD", "BTC", 100.5, opts)
     end
   end
 

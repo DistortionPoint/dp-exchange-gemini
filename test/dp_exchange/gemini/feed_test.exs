@@ -1270,8 +1270,12 @@ defmodule DpExchange.Gemini.FeedTest do
 
       assert {:error, {:invalid_symbols, "BTC-USD"}} = Feed.subscribe(feed, "BTC-USD", to: self())
 
-      assert {:error, {:invalid_symbols, [:btc_usd, nil]}} =
+      # The caller's whole argument comes back, not only the bad elements.
+      assert {:error, {:invalid_symbols, ["ETH-USD", :btc_usd, nil]}} =
                Feed.subscribe(feed, ["ETH-USD", :btc_usd, nil], to: self())
+
+      assert {:error, {:invalid_symbols, ["BTC-USD" | "tail"]}} =
+               Feed.subscribe(feed, ["BTC-USD" | "tail"], to: self())
 
       assert {:error, {:invalid_symbols, [""]}} = Feed.update_symbols(feed, [""])
       assert {:error, {:invalid_symbols, [1]}} = Feed.unsubscribe(feed, [1])

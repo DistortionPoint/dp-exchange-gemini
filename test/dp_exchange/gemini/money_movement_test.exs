@@ -879,19 +879,19 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert :counters.get(counter, 1) == 1
     end
 
-    test "request_approved_address/4 still retries — the address IS the key",
+    test "request_approved_address/4 is sent once — nothing shows the venue dedupes on it",
          %{counter: counter, plug: plug} do
-      # The control, and the reason this describe block asserts both directions. Re-sending
-      # this asks for the same allowlist entry rather than a second one, so the retries are
-      # kept and a future sweep should not flatten it in with the two above.
-      assert {:error, _reason} =
+      # This was a control that kept the retries on the assumption that re-sending asks for
+      # the same allowlist entry. The spec never says so (unmeasured), and a request that
+      # took effect and lost its reply, repeated, is answered as a refusal that reads as
+      # "nothing was added". Sent once (tick Q, W2); a possible send is write_unconfirmed.
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
                Private.request_approved_address("ethereum", "0xabc", "cold", @credentials,
                  plug: plug,
                  retry_delay: 1
                )
 
-      assert :counters.get(counter, 1) > 1,
-             "a write the venue can dedupe from the payload keeps its retries"
+      assert :counters.get(counter, 1) == 1
     end
   end
 
