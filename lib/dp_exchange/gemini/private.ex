@@ -1,6 +1,7 @@
 defmodule DpExchange.Gemini.Private do
   @moduledoc """
-  Gemini's authenticated endpoints — internal. Balances, orders and trade history.
+  Gemini's authenticated endpoints — internal. Balances, orders, fills, transfers, fees,
+  staking, margin, positions, clearing, account administration and the OAuth token calls.
 
   ## The boundary, precisely
 
@@ -8,8 +9,10 @@ defmodule DpExchange.Gemini.Private do
   hands it.** Those are different jobs and the difference is the whole design: a caller
   passes credentials into every one of these functions, they are used to sign that one
   request, and nothing is kept. This module never obtains a credential, never stores one,
-  never refreshes one, and never decides which authentication scheme applies — see `Auth`,
-  which refuses to guess.
+  never refreshes one, and never decides which authentication scheme applies on the host's
+  behalf — see `Auth`, which refuses to guess. The host names the scheme with
+  `opts[:auth_scheme]`; when it names none, `credential_scheme/1` uses the single scheme
+  whose fields are non-`nil` and refuses credentials carrying both.
 
   Which means trading works exactly as the facade intends: the host does auth, calls
   `place_order/3` with credentials, and gets a `Core.Types.Order` back.
@@ -90,8 +93,9 @@ defmodule DpExchange.Gemini.Private do
   `MissingApikeyHeader` at **400**, so the documented codes and the live ones disagree —
   the fourth documentation divergence found on this venue.
 
-  Either way 400, 401 and 403 are permanent *for the request as sent*: retrying the
-  identical bytes cannot succeed. They are `{:refused, reason}`. A caller whose token
+  Either way every 4xx but a 429 (family rule DV6; a 405, 409, 413, 415 or 422 included) is
+  permanent *for the request as sent*: retrying the identical bytes cannot succeed. They are
+  `{:refused, reason}`. A 429 and a 5xx stay plain errors. A caller whose token
   expired refreshes it and calls again with new credentials, which is a different request —
   not a retry of this one.
 
@@ -245,7 +249,7 @@ defmodule DpExchange.Gemini.Private do
   The venue's page is 10 rows by default and 50 at most (`rest.yaml:3267`), and it carries no
   cursor, so the first 10 transfers were answered as the account's complete ledger while every
   later one was dropped. With no `:limit_transfers` this asks for the maximum, 50, and a page
-  that full is `{:error, :history_truncated}` (the page was 50) — narrow with `:timestamp`, or
+  that full is `{:error, :history_truncated}` (no payload) — narrow with `:timestamp`, or
   pass `:limit_transfers` to take exactly one page on purpose. The same rule `get_orders/2`
   and `get_trade_history/2` apply.
   """
@@ -732,10 +736,11 @@ defmodule DpExchange.Gemini.Private do
   `/v1/orders/history` returns what is not. A caller asking for "orders" without saying
   which gets the resting ones, the set that can still change.
 
-  History accepts `symbol:` and `limit:` (the venue's `limit_orders`, default 50, max 500)
-  and a `since:` `DateTime`. The venue's own default applies where the caller gives none —
-  this does not substitute one of its own, because a page size chosen here would silently
-  become the caller's answer.
+  History accepts `symbol:` and `limit:` (the venue's `limit_orders`, max 500) and a `since:`
+  `DateTime`. With no `:limit` this asks for the maximum, 500, and a page that full is
+  `{:error, :history_truncated}` rather than a list that reads as the whole history: narrow
+  with `:since`, or pass `:limit` to take exactly one page on purpose. A larger limit is
+  refused, not clamped (`{:error, {:invalid_option, :limit, value}}`).
 
   **`/v1/orders` takes no filter.** `:symbol`, `:limit` and `:since` narrow the history read
   only; on the default (resting) read the endpoint documents none, so none is sent and every
@@ -1033,6 +1038,9 @@ defmodule DpExchange.Gemini.Private do
   bug `get_orders/2`'s `history_params/1` already carries the fix for. `opts[:limit]` had
   the same defect for `limit_trades`, sent as `"100"` instead of the documented integer.
 
+  With no `:limit` this asks for the maximum, 500, and a page that full is
+  `{:error, :history_truncated}` (see `get_orders/2`); a limit above 500 is refused.
+
   **Reversed trades.** A row the venue marks `"break": "full"` is left out: the vendor states
   it "should not be accounted for ... as though the transfer of fund associated with the
   trade had simply not happened". `"manual"` is kept, as the vendor says it must be for the
@@ -1231,11 +1239,6 @@ defmodule DpExchange.Gemini.Private do
     {:error, {:exchange_error, :gemini, message}}
   end
 
-  # The host chose its authentication; `:auth_scheme` says which. When it is absent the
-  # scheme is taken from what the host actually supplied — which is the host's choice
-  # expressed a different way, not this package inferring one. Credentials carrying BOTH
-  # are refused rather than resolved: sending both header families is
-  # `AmbiguousAuthentication` at the venue, and picking one would be guessing.
   # **A retry is signed again, with a fresh nonce.** Every request carries a nonce the venue
   # refuses to see twice. `Core.HttpClient` used to retry with the first attempt's headers,
   # so a read whose first attempt timed out was retried with a nonce already used, and the
@@ -1271,6 +1274,11 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
+  # The host chose its authentication; `:auth_scheme` says which. When it is absent the
+  # scheme is taken from what the host actually supplied — which is the host's choice
+  # expressed a different way, not this package inferring one. Credentials carrying BOTH
+  # are refused rather than resolved: sending both header families is
+  # `AmbiguousAuthentication` at the venue, and picking one would be guessing.
   defp auth_scheme(credentials, opts) do
     Keyword.get_lazy(opts, :auth_scheme, fn -> credential_scheme(credentials) end)
   end
@@ -1631,8 +1639,9 @@ defmodule DpExchange.Gemini.Private do
   end
 
   # Whether `executed_amount` accounts for the ENTIRE `original_amount` — the boundary
-  # between a full fill (`:filled`) and a partial one that was cancelled before it finished
-  # (`:partially_filled`). Either side unreadable answers `false` rather than guessing the
+  # between a full fill (`:filled`) and a partial one: `:partially_filled` when the order is
+  # live or unfinished, `:cancelled` when it was cancelled part-way. Either side unreadable
+  # answers `false` rather than guessing the
   # order filled in full: an order this package cannot compare is not one it can vouch for
   # as fully filled.
   defp fully_filled?(executed_amount, original_amount) do
@@ -2165,7 +2174,7 @@ defmodule DpExchange.Gemini.Private do
   #
   # `:status` is safe: every caller passes a literal atom. The other three were not.
   # `to_string_or_nil/1` answers `nil` for an absent quote id, and the two asset fields fall
-  # back to the body only when the CALLER did not name them — which `commit_conversion/3`
+  # back to the body only when the CALLER did not name them — which `commit_conversion/2`
   # does, passing `nil, nil` — so a body without `totalSpendCurrency` produced a conversion
   # naming neither side of itself. A conversion that does not say what was sold, what was
   # bought, or which quote it belongs to cannot be reconciled against anything.
@@ -3295,7 +3304,7 @@ defmodule DpExchange.Gemini.Private do
   Moves `amount` of `asset` between two accounts at this venue —
   `/v1/account/transfer/{currency}`.
 
-  **Not `withdraw/5`.** Nothing leaves the venue and no chain is involved, so there is no
+  **Not `withdraw/6`.** Nothing leaves the venue and no chain is involved, so there is no
   address, no network and no network fee. `opts[:from]` and `opts[:to]` are the venue's own
   account names and both are required: a transfer with one end missing is not a transfer,
   and defaulting either would move funds between accounts the caller did not name. Both must
@@ -3750,7 +3759,7 @@ defmodule DpExchange.Gemini.Private do
   **A full page with no `:limit` is refused, not returned as every fee.** The venue's page is
   10 by default and 50 at most (`rest.yaml:3446`) with no cursor, so the first 10 charges were
   answered as the whole history. With no `:limit` this asks for 50, and a page that full is
-  `{:error, :history_truncated}` (the page was 50): narrow with `:since`, or pass `:limit` to
+  `{:error, :history_truncated}` (no payload): narrow with `:since`, or pass `:limit` to
   take exactly one page on purpose. See `get_transfers/2`.
   """
   @spec list_custody_fees(map(), keyword()) ::
@@ -3794,7 +3803,6 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  # One unreadable row refuses the page rather than leaving a gap in it — `to_fills/2`'s rule.
   # One unreadable row refuses the whole page rather than leaving a gap in it — the rule
   # `to_fills/2` states: a list with an entry silently missing reconciles to a smaller
   # number and looks complete.
@@ -4026,9 +4034,10 @@ defmodule DpExchange.Gemini.Private do
   in the reply carries none of its own.
 
   **A full page with no `:limit` is refused, not returned as the whole history.** The venue's
-  page is 50 by default and 500 at most (`/v1/staking/history`, `rest.yaml:6677`) with no cursor, so the 50 most
-  recent transactions were answered as everything. With no `:limit` this asks for 500, and a
-  reply that full is `{:error, :history_truncated}` (the page was 500): narrow with
+  page is 50 by default and 500 at most (`/v1/staking/history`, `rest.yaml:6677`) with no
+  cursor, so the 50 most recent transactions were answered as everything. With no `:limit`
+  this asks for 500, and a reply that full is `{:error, :history_truncated}` (no payload):
+  narrow with
   `:since`/`:until`, or pass `:limit` to take exactly one page on purpose.
   """
   @spec get_staking_history(map(), keyword()) ::
@@ -5172,6 +5181,10 @@ defmodule DpExchange.Gemini.Private do
   `{:error, :refresh_token_required}`, before anything is sent: neither can succeed, and a
   refused refresh is not a reason to discard the stored token. The shape of the success body
   is unmeasured (the vendor spec does not document `/auth/token`), so it is returned as sent.
+
+  Only a 400, 401 or 403 is `{:refused, body}` here (the OAuth error map, e.g.
+  `%{"error" => "invalid_grant"}`); any other status is `{:error, {:exchange_error, :gemini,
+  _}}`, unlike the signed calls, which refuse every 4xx but a 429. Sent once.
   """
   @spec refresh_access_token(String.t() | term(), String.t() | term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -5541,7 +5554,7 @@ defmodule DpExchange.Gemini.Private do
   **A full page with no `:limit` is refused, not returned as every trade.** The venue's page
   is 100 by default and 300 at most (`rest.yaml:4700`) with no cursor, so the first 100
   trades were answered as the whole list. With no `:limit` this asks for 300, and a reply
-  that full is `{:error, :history_truncated}` (the page was 300): narrow with `:since_nanos`,
+  that full is `{:error, :history_truncated}` (no payload): narrow with `:since_nanos`,
   or pass `:limit` to take exactly one page on purpose.
   """
   @spec list_clearing_trades(map(), keyword()) ::
@@ -5759,7 +5772,7 @@ defmodule DpExchange.Gemini.Private do
   #
   # On THIS module it is worse than on the public one, because these are the authenticated
   # calls. `%{}` reached `to_order/1` as a map and became an order with no id and no status
-  # reported as success from `place_order/4`, and reached the balance readers as an empty
+  # reported as success from `place_order/3`, and reached the balance readers as an empty
   # portfolio. Refuse instead.
   #
   # `floats: :decimals`: a JSON number with a fraction or exponent becomes a `Decimal`, an

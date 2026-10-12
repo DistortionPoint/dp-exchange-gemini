@@ -20,6 +20,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (documentation only, tick T pass over `private.ex`, `fake.ex`, `auth.ex`, `environment.ex`, `supervisor.ex`, `credentials.ex`, `symbol_format.ex`)
+
+- `Private`: the moduledoc now covers the whole authenticated surface and states the DV6 rule
+  (every 4xx but a 429 is `{:refused, _}`, not only 400/401/403) and that `credential_scheme/1`
+  infers the single present scheme when `:auth_scheme` is absent. `get_orders/2` and
+  `get_trade_history/2` no longer say the venue's default page applies: both ask for 500 and
+  refuse a full page with `{:error, :history_truncated}`. `{:error, :history_truncated}` is
+  documented as carrying no payload (it said "the page was N"). `refresh_access_token/3` states
+  its own 400/401/403-only refusal. Arities now name `Private`'s own (`withdraw/6`,
+  `commit_conversion/2`, `place_order/3`); a misplaced comment moved to `auth_scheme/2`, a
+  duplicated one removed, and a comment that put cancelled partial fills under
+  `:partially_filled` corrected to `:cancelled`.
+- `Auth`: the moduledoc lists the scaled nonce mode, no longer says "nothing helps" above
+  2^64 (a declared scale does), and no longer calls an `:incremental_ns` refusal conclusive;
+  `headers/5` documents `{:invalid_credentials, :gemini}`, `{:unsupported_nonce_mode, mode}` and
+  `:nonce_exhausted`; `nonce/1`, `ensure_counter/0` and `seed_nonce/1` describe the three
+  counters.
+- `Supervisor.start_link/1` gains its `@doc`; `SymbolFormat` says two (not three) overlapping
+  pairs bite.
+
 ## [0.2.127] - 2026-10-12
 
 ### Fixed (tick T review of the depth resync state machine)

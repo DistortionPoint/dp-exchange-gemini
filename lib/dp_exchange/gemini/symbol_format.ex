@@ -11,7 +11,7 @@ defmodule DpExchange.Gemini.SymbolFormat do
   With `sep: ""` there is no separator to split on, so `CanonicalPair` recovers the base
   by matching a known quote **suffix**. The list is consulted in order, so a shorter quote
   that is also the tail of a longer one will win if it is checked first — and Gemini has
-  three overlapping pairs of exactly that shape:
+  two overlapping pairs of exactly that shape (a third row is listed for contrast):
 
   | Native | Correct split | What `USD`-before-`GUSD` would give |
   |---|---|---|

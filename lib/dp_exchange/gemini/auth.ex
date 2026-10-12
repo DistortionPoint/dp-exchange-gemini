@@ -32,6 +32,9 @@ defmodule DpExchange.Gemini.Auth do
   decision, not a detail a market-data library gets to make on its behalf.
 
   So there is no default here. The host names the scheme; this module refuses to guess.
+  (The one inference in this package lives a level up, in `Private.credential_scheme/1`: when
+  the host names none, it uses the single scheme whose fields are non-`nil`, and refuses
+  credentials carrying both. This module only ever sees the result.)
 
   ## Refusing to guess is not pedantry — the venue rejects a guess outright
 
@@ -62,8 +65,8 @@ defmodule DpExchange.Gemini.Auth do
   both**, and the venue exposes no way to ask how a key was made.
 
   It is the host's key, so it is the host's answer: `nonce_mode: :time_based | :incremental |
-  :incremental_us | :incremental_ns` (the last two for a key whose mark a millisecond counter
-  cannot reach; see below).
+  :incremental_us | :incremental_ns | {:incremental_ns, scale: k}` (the last three for a key
+  whose mark a millisecond counter cannot reach; see below).
   The default is `:time_based`, matching the venue's own recommendation, and a mismatch
   fails loudly with `InvalidNonce` on the first request rather than producing a wrong
   result.
@@ -103,7 +106,8 @@ defmodule DpExchange.Gemini.Auth do
   Stated plainly here:
 
   **An incremental key whose stored mark is already above epoch milliseconds cannot be
-  satisfied by `nonce/1` in either mode.** `:time_based` emits seconds (~`1.789e9`) and
+  satisfied by `nonce/1` in either of the two original modes.** `:time_based` emits seconds
+  (~`1.789e9`) and
   `:incremental` emits milliseconds (~`1.789e12`), and both are below the mark, so every
   request returns `InvalidNonce` — "has not increased since your last call", which is the
   incremental validator's own sentence and the thing that tells you the mode is not in
@@ -117,11 +121,12 @@ defmodule DpExchange.Gemini.Auth do
   distinction: a seed is bounded and auditable, escalation by a scale factor is not, and it
   is escalation this module refuses rather than reachability.
 
-  Above `2^64 - 1` nothing helps. The counter is a 64-bit unsigned `:atomics` cell, so a
-  mark beyond it — the `1.78e21` the section above records — is out of reach of a seed too,
-  and `seed_nonce/1` says so with `{:error, :above_counter_range}` rather than raising or
-  truncating. **That key must be rotated, which is a human action**, and no option here
-  changes it.
+  Above `2^64 - 1` neither a seed nor a unit mode helps. The counter is a 64-bit unsigned
+  `:atomics` cell, so a mark beyond it — the `1.78e21` the section above records — is out of
+  reach of a seed, and `seed_nonce/1` says so with `{:error, :above_counter_range}` rather
+  than raising or truncating. Only a host-declared scale (`{:incremental_ns, scale: k}`,
+  below) reaches such a mark, and past the largest scale **the key must be rotated, which
+  is a human action**.
 
   ## An incremental key the millisecond counter cannot reach: `:incremental_us`
 
@@ -260,7 +265,10 @@ defmodule DpExchange.Gemini.Auth do
   be unsupported, only a credential that never arrived. The tag is the venue atom, as in
   every other venue of the family; it used to be the scheme (`:api_key`, `:oauth`), which
   told a caller which field was empty and made the answer differ from every other venue's.
-  Never a partially-signed request,
+  A key or secret with surrounding whitespace is `{:error, {:invalid_credentials, :gemini}}`
+  (never trimmed and sent), an unrecognised `:nonce_mode` is `{:error,
+  {:unsupported_nonce_mode, mode}}`, and a counter with no next value is `{:error,
+  :nonce_exhausted}`. Never a partially-signed request,
   which would fail at the venue with an error about signatures rather than about the
   missing field. `{:error, :unencodable_payload}` is a `params` map the JSON encoder cannot
   write (a tuple, a pid): nothing is signed, and it no longer raises `Jason.EncodeError` in
@@ -371,7 +379,11 @@ defmodule DpExchange.Gemini.Auth do
   `:time_based` returns Unix **seconds**, which is what that mode validates against.
   `:incremental` returns a strictly increasing millisecond value, monotonic **node-wide** —
   two processes calling in the same millisecond get different, ordered values, because a
-  repeated nonce is rejected outright by an incremental key.
+  repeated nonce is rejected outright by an incremental key. `:incremental_us` and
+  `:incremental_ns` return the same shape one and two units finer, each from its own
+  counter; `{:incremental_ns, scale: k}` returns the nanosecond value times `10^k` as a
+  decimal **string** (a JSON number past 64 bits may be read as a float). `nil` is
+  `:time_based`.
 
   Raises `ArgumentError` naming the 64-bit nonce ceiling when a counter has no next value
   (a seed within one step of `2^64 - 1`, or the clock past it). `headers/5` does not raise:
@@ -415,7 +427,8 @@ defmodule DpExchange.Gemini.Auth do
 
   # dp-exchange-core issue #36: the same key rejected microseconds too. Nanoseconds are the
   # last clock-anchored step inside the 64-bit counter (~1.79e18 now, below 2^64 until about
-  # 2554), so a refusal under this mode is conclusive. Its own counter, for the same reason.
+  # 2554). A refusal under this mode is NOT conclusive (issue #37, below: the mark may sit
+  # above 64 bits; a declared scale reaches it). Its own counter, for the same reason.
   defp raw_nonce(:incremental_ns), do: next_nonce(@nonce_counter_ns, :nanosecond)
 
   defp raw_nonce(mode) when mode in [:time_based, nil], do: System.system_time(:second)
@@ -450,8 +463,9 @@ defmodule DpExchange.Gemini.Auth do
   end
 
   @doc """
-  Establishes the shared nonce counter. Called once by this venue's supervisor, and
-  serialised so that calling it from anywhere else is safe too.
+  Establishes the shared nonce counters (millisecond, microsecond and nanosecond). Called
+  once by this venue's supervisor, and serialised so that calling it from anywhere else is
+  safe too.
 
   ## Why this is not purely lazy, which is what it was first
 
@@ -576,7 +590,8 @@ defmodule DpExchange.Gemini.Auth do
   defp padded?(value), do: String.trim(value) != value
 
   @doc """
-  Raises the incremental nonce counter to `value`, once.
+  Raises the millisecond (`:incremental`) nonce counter to `value`, once. The `_us` and `_ns`
+  counters are never seeded: they re-anchor to the clock on boot.
 
   Returns `:ok` when the counter moved, `{:error, :below_current}` when `value` is not above
   where it already is, `{:error, :above_counter_range}` when it reaches the top of the 64-bit

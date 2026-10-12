@@ -69,6 +69,14 @@ defmodule DpExchange.Gemini.Supervisor do
   alias DpExchange.Core.DefaultRateLimiter
   alias DpExchange.Gemini.{Auth, Environment, Feed}
 
+  @doc """
+  Starts this venue's tree: the rate limiter, then the feed.
+
+  `opts` are the ones `DpExchange.Gemini.child_spec/1` takes (`:environment`, `:name`,
+  `:feed`, `:limiter`, `:channels`, `:max_queue_len`, `:ssl_options`, ...) and pass straight
+  through to `DpExchange.Gemini.Feed`. A `:credentials` entry is wrapped so a crash report
+  cannot print it (`DpExchange.Gemini.Credentials`).
+  """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
     # Idempotent with the wrap `DpExchange.Gemini.child_spec/1` already did. A caller that
