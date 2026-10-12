@@ -623,8 +623,14 @@ defmodule DpExchange.Gemini do
   def get_transfers(credentials, opts),
     do: Private.get_transfers(credentials, with_limiter(opts))
 
+  @doc """
+  Places one order. Nothing is defaulted: `:order_type` is required, and `:time_in_force` on
+  a `:limit` order. A request that may have reached the venue without success being proven is
+  `{:error, {:order_unconfirmed, client_order_id_or_nil, reason}}`; reconcile before placing
+  again. See `DpExchange.Gemini.Private.place_order/3` for every refusal and its order.
+  """
   @impl true
-  def place_order(credentials, request, opts),
+  def place_order(credentials, request, opts \\ []),
     do: Private.place_order(credentials, request, with_limiter(opts))
 
   @doc """
@@ -667,8 +673,12 @@ defmodule DpExchange.Gemini do
   @impl true
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Cancels one order by id. The id is a string of digits; an unknown order is
+  `{:refused, :not_found}`. Sent once, never retried.
+  """
   @impl true
-  def cancel_order(credentials, order_id, opts),
+  def cancel_order(credentials, order_id, opts \\ []),
     do: Private.cancel_order(credentials, order_id, with_limiter(opts))
 
   @doc """
@@ -680,12 +690,16 @@ defmodule DpExchange.Gemini do
   def cancel_all_orders(credentials, opts),
     do: Private.cancel_all_orders(credentials, with_limiter(opts))
 
+  @doc """
+  One order's current state. The id is a string of digits; an unknown order is
+  `{:refused, :not_found}`.
+  """
   @impl true
-  def get_order(credentials, order_id, opts),
+  def get_order(credentials, order_id, opts \\ []),
     do: Private.get_order(credentials, order_id, with_limiter(opts))
 
   @impl true
-  def get_orders(credentials, opts),
+  def get_orders(credentials, opts \\ []),
     do: Private.get_orders(credentials, with_limiter(opts))
 
   @impl true

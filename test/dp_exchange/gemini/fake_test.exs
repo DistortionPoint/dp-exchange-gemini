@@ -339,15 +339,9 @@ defmodule DpExchange.Gemini.FakeTest do
   end
 
   describe "order lifecycle in memory" do
-    test "get_order/3 answers with the id it was asked about" do
-      assert {:ok, order} = Fake.get_order(@credentials, "123456", [])
-      assert order.id == "123456"
-    end
-
-    test "cancel_order/3 reports the order cancelled" do
-      assert {:ok, order} = Fake.cancel_order(@credentials, "123456", [])
-      assert order.id == "123456"
-      assert order.status == :cancelled
+    test "an order that was never placed is not found, as the real venue's 404 is" do
+      assert Fake.get_order(@credentials, "123456", []) == {:refused, :not_found}
+      assert Fake.cancel_order(@credentials, "123456", []) == {:refused, :not_found}
     end
 
     test "both refuse without credentials, as the real adapter does" do
@@ -363,7 +357,8 @@ defmodule DpExchange.Gemini.FakeTest do
         side: :sell,
         quantity: "2",
         price: "3000",
-        order_type: :limit
+        order_type: :limit,
+        time_in_force: :gtc
       }
 
       assert {:ok, order} = Fake.place_order(@credentials, request, [])
@@ -375,17 +370,52 @@ defmodule DpExchange.Gemini.FakeTest do
     test "the id a placed order carries is one get_order/3 and cancel_order/3 accept" do
       # Issue #5: `place_order/3` issued `"fake-order-1"`, which the id check both of these
       # share with the real adapter refuses, so a place -> get -> cancel round trip failed.
-      request = %{symbol: "BTC-USD", side: :buy, quantity: "0.001", price: "100"}
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "0.001",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
-      assert {:ok, placed} = Fake.place_order(@credentials, Map.put(request, :order_type, :limit))
+      assert {:ok, placed} = Fake.place_order(@credentials, request)
       assert {:ok, %{id: id}} = Fake.get_order(@credentials, placed.id, [])
       assert id == placed.id
       assert {:ok, %{id: ^id, status: :cancelled}} = Fake.cancel_order(@credentials, id, [])
+      assert {:ok, %{id: ^id, status: :cancelled}} = Fake.get_order(@credentials, id, [])
     end
 
-    test "an integer id comes back as the string the real decoder makes of it" do
-      assert {:ok, %{id: "123456"}} = Fake.get_order(@credentials, 123_456, [])
-      assert {:ok, %{id: "123456"}} = Fake.cancel_order(@credentials, 123_456, [])
+    test "every placement is a new order with its own id" do
+      request = %{
+        symbol: "BTC-USD",
+        side: "BUY",
+        quantity: "1",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc,
+        client_order_id: "same-id"
+      }
+
+      assert {:ok, first} = Fake.place_order(@credentials, request)
+      assert {:ok, second} = Fake.place_order(@credentials, request)
+
+      assert first.id != second.id
+      # The caller's "BUY" comes back as the atom, never the string.
+      assert first.side == :buy
+      assert {:ok, [open_a, open_b]} = Fake.get_orders(@credentials, [])
+      assert Enum.sort([open_a.id, open_b.id]) == Enum.sort([first.id, second.id])
+
+      assert {:ok, _cancelled} = Fake.cancel_order(@credentials, first.id)
+      assert {:ok, [still_open]} = Fake.get_orders(@credentials, [])
+      assert still_open.id == second.id
+    end
+
+    test "an integer id is refused, as the real adapter refuses it" do
+      expected = {:error, {:invalid_order_id, 123_456}}
+
+      assert Fake.get_order(@credentials, 123_456, []) == expected
+      assert Fake.cancel_order(@credentials, 123_456, []) == expected
     end
   end
 
@@ -542,7 +572,8 @@ defmodule DpExchange.Gemini.FakeTest do
 
       assert {:error, {:missing_option, _terms}} = Fake.commit_conversion("1234", [])
       assert {:error, :scope_required} = Fake.cancel_all_orders(%{}, [])
-      assert {:error, {:missing_field, :price}} = Fake.place_order(%{}, %{}, [])
+      assert {:error, {:invalid_symbol, nil}} = Fake.place_order(%{}, %{}, [])
+      assert {:error, {:invalid_order_request, nil}} = Fake.place_order(%{}, nil, [])
 
       assert {:error, {:unsupported_fx_pair, "XYZUSD"}} =
                Fake.get_fx_rate("XYZ-USD", ~U[2026-01-02 00:00:00Z])
@@ -991,7 +1022,14 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "a placed order is for the canonical symbol" do
-      request = %{symbol: "solrlusd", side: :buy, quantity: "1", price: "100"}
+      request = %{
+        symbol: "solrlusd",
+        side: :buy,
+        quantity: "1",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
       assert {:ok, %Types.Order{symbol: "SOL-RLUSD"}} =
                Fake.place_order(@credentials, request, [])
@@ -1046,16 +1084,20 @@ defmodule DpExchange.Gemini.FakeTest do
     @order %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
 
     test "the type is recovered from the execution option, not echoed from the request" do
+      # A duration is named on a plain limit order and on nothing else.
       for {order_type, time_in_force, expected} <- [
-            {:maker_or_cancel, :gtc, :post_only},
-            {:post_only, :gtc, :post_only},
+            {:post_only, nil, :post_only},
             {:limit, :ioc, :ioc},
-            {:ioc, :gtc, :ioc},
+            {:ioc, nil, :ioc},
             {:limit, :fok, :fok},
-            {:stop_limit, :gtc, :stop_limit},
+            {:fok, nil, :fok},
+            {:stop_limit, nil, :stop_limit},
             {:limit, :gtc, :limit}
           ] do
-        request = Map.merge(@order, %{order_type: order_type, time_in_force: time_in_force})
+        request = Map.put(@order, :order_type, order_type)
+
+        request =
+          if time_in_force, do: Map.put(request, :time_in_force, time_in_force), else: request
 
         # The trigger price belongs to a stop-limit and to nothing else.
         request =
@@ -1157,7 +1199,14 @@ defmodule DpExchange.Gemini.FakeTest do
 
   describe "order round trip (core conformance assertion 31)" do
     test "the id place_order/3 mints reads back through get_order/3 and cancel_order/3" do
-      request = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
       assert {:ok, %Types.Order{id: id}} = Fake.place_order(@credentials, request)
       assert {:ok, %Types.Order{id: ^id}} = Fake.get_order(@credentials, id)

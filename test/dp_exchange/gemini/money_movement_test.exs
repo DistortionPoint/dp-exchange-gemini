@@ -790,6 +790,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
           symbol: "BTC-USD",
           side: :buy,
           order_type: :limit,
+          time_in_force: :gtc,
           quantity: Decimal.new("1"),
           price: Decimal.new("100")
         },
@@ -797,7 +798,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
         retry_delay: 1
       )
 
-      assert_receive :attempt
+      assert_receive :attempt, 5_000
       refute_receive :attempt, 200
     end
 

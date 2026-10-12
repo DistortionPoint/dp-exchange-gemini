@@ -310,7 +310,14 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "place_order/3", %{opts: opts} do
-      request = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100.00"}
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100.00",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
       assert {:ok, %DpExchange.Core.Types.Order{id: "1234"}} =
                Gemini.place_order(@credentials, request,

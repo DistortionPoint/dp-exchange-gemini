@@ -32,7 +32,14 @@ defmodule DpExchange.Gemini.TickJReviewTest do
   end
 
   @credentials %{api_key: "account-test", api_secret: "test-secret-not-real"}
-  @request %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100.00"}
+  @request %{
+    symbol: "BTC-USD",
+    side: :buy,
+    quantity: "1",
+    price: "100.00",
+    order_type: :limit,
+    time_in_force: :gtc
+  }
   @order %{
     "order_id" => "1234",
     "symbol" => "btcusd",

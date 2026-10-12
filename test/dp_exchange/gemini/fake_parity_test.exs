@@ -125,7 +125,15 @@ defmodule DpExchange.Gemini.FakeParityTest do
 
     test "place_order/3: the same InvalidSymbol reason every other private POST shares" do
       credentials = %{api_key: "k", api_secret: "s"}
-      base = %{symbol: "NOPE-USD", side: :buy, quantity: "1", price: "100"}
+
+      base = %{
+        symbol: "NOPE-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
       assert {:refused, :invalid_symbol} = Fake.place_order(credentials, base, [])
     end
@@ -164,13 +172,13 @@ defmodule DpExchange.Gemini.FakeParityTest do
       # A combination the venue refuses (`\"at most one execution option\"`) that this
       # fake used to accept because order_type and time_in_force were validated
       # independently of each other.
-      assert Private.order_wire(:post_only, :fok) ==
-               {:error, {:conflicting_execution_options, ["maker-or-cancel"], ["fill-or-kill"]}}
+      expected = {:error, {:unexpected_field, :time_in_force}}
+      assert Private.order_wire(:post_only, :fok) == expected
 
       credentials = %{api_key: "k", api_secret: "s"}
       base = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
 
-      assert {:error, {:conflicting_execution_options, ["maker-or-cancel"], ["fill-or-kill"]}} =
+      assert expected ==
                Fake.place_order(
                  credentials,
                  base |> Map.put(:order_type, :post_only) |> Map.put(:time_in_force, :fok),
@@ -179,8 +187,7 @@ defmodule DpExchange.Gemini.FakeParityTest do
     end
 
     test "a stop-limit order takes no execution option, in both adapters" do
-      expected =
-        {:error, {:unsupported_time_in_force, "immediate-or-cancel", :not_allowed_on_stop_limit}}
+      expected = {:error, {:unexpected_field, :time_in_force}}
 
       assert Private.order_wire(:stop_limit, :ioc) == expected
 

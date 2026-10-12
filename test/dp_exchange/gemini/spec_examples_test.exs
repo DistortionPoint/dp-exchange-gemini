@@ -497,7 +497,9 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                    symbol: "BTC-USD",
                    side: :buy,
                    quantity: Decimal.new("5"),
-                   price: Decimal.new("3633.00")
+                   price: Decimal.new("3633.00"),
+                   order_type: :limit,
+                   time_in_force: :gtc
                  },
                  plug: responding(body),
                  retry_attempts: 0
@@ -547,6 +549,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                    side: :buy,
                    quantity: Decimal.new("5"),
                    price: Decimal.new("3633.00"),
+                   order_type: :limit,
+                   time_in_force: :gtc,
                    client_order_id: "470135"
                  },
                  plug: capturing(body, test_pid),

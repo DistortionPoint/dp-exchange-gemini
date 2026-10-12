@@ -20,6 +20,65 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING) - trading conventions (tick P)
+
+- **BREAKING: `place_order/3` that may have reached the venue is `{:error, {:order_unconfirmed,
+  client_order_id_or_nil, reason}}`.** A timeout or reset after the send, a 5xx, a `2xx` that is
+  not JSON (was `{:error, {:undecodable_response, :gemini}}`) and a `2xx` map with no
+  `"order_id"` (was `{:error, :unexpected_response_shape}`) used to be bare errors a caller
+  would retry into a duplicate order. The id carried is the `client_order_id` sent, as a string,
+  or `nil` (this package generates none; nothing shows Gemini dedupes on it). Venue refusals,
+  validation, missing credentials, an unmapped 4xx, a venue 429 and our own rate limiter refusing
+  stay plain and unwrapped. A `2xx` naming an `order_id` stays `{:ok, %Order{}}`. Reasons are
+  bounded to 256 characters.
+- **BREAKING: nothing in an order is defaulted.** `:order_type` absent was `:limit`, now
+  `{:error, {:missing_field, :order_type}}`; `:time_in_force` absent was `:gtc`, now
+  `{:error, {:missing_field, :time_in_force}}` on `:limit`. A time in force on `:stop_limit`,
+  `:post_only`, `:ioc` or `:fok` (which carry their own option, or none) is
+  `{:error, {:unexpected_field, :time_in_force}}`, and no longer `:conflicting_execution_options`
+  or `{:unsupported_time_in_force, option, :not_allowed_on_stop_limit}`. A tif other than
+  `:gtc`/`:ioc`/`:fok` on `:limit` is `{:error, {:unsupported_order_combination, :limit, tif}}`
+  (was `{:unsupported_time_in_force, tif}`).
+- **BREAKING: an unread request key is refused.** `post_only: true` (and any other key outside
+  `:symbol :side :order_type :time_in_force :quantity :price :stop_price :client_order_id`) was
+  dropped and a plain limit order placed; it is now `{:error, {:unsupported_order_field, key}}`.
+- **BREAKING: `:maker_or_cancel` is refused** (`{:unsupported_order_type, :maker_or_cancel}`). It
+  is not a Core order type and `capabilities/0` never declared it; use `:post_only`.
+- **BREAKING: validation order and tags.** Checked as request map, unread keys, symbol, side,
+  order type, time in force, quantity, price, stop price, client order id, `opts[:account]`
+  (was type, tif, price, symbol, quantity, side). A non-map request is
+  `{:error, {:invalid_order_request, request}}` (was a `BadMapError`). A nil symbol is
+  `{:invalid_symbol, nil}` (was `{:missing_field, :symbol}`). `{:non_positive_amount, field, v}`
+  and `{:invalid_decimal, field, v}` on `:quantity`/`:price`/`:stop_price` are now
+  `{:invalid_quantity, v}`, `{:invalid_price, v}`, `{:invalid_stop_price, v}`, and a float is
+  refused (floats were accepted via their shortest representation). A side is `:buy`/`:sell` or
+  that word in any case. A non-string `opts[:account]` is `{:error, {:invalid_option, :account,
+  v}}` (was stringified onto the order).
+- **BREAKING: an integer order id is refused** by `get_order/3`, `cancel_order/3` (and the Fake):
+  `{:error, {:invalid_order_id, v}}`. Every id this package returns is a string; digit strings
+  are unchanged.
+- **BREAKING: an unknown order is `{:refused, :not_found}`** from `get_order/3` and
+  `cancel_order/3` on a 404 or the venue's `OrderNotFound` reason (the latter is the venue's
+  documented error name and has not been probed against the live venue). Was `{:refused,
+  :refused}` / `{:refused, {:unknown_reason, "OrderNotFound"}}`.
+- Facade: `place_order/2`, `cancel_order/2`, `get_order/2` and `get_orders/1` exist (`opts \\ []`).
+
+### Changed (BREAKING) - the Fake
+
+- Every `Fake.place_order/3` mints its own numeric id (was `"1"` for all), keeps the order in
+  the calling process, and `get_order/3`, `cancel_order/3` and `get_orders/2` answer for it:
+  resting orders from `get_orders/2`, cancelled ones under `history: true`. An id the Fake did
+  not issue is `{:refused, :not_found}` (was an invented `{:ok, order}`). The order carries the
+  side as `:buy`/`:sell` (was the caller's string). The Fake validates with the same
+  `Private.validate_order/2`, now including the `:account` option. Orders are per process, as
+  the Fake's subscriptions are; a reused `client_order_id` is a second order because the venue
+  is not known to dedupe on it.
+
+### Tests
+
+- `trading_conventions_test.exs` covers the above; the existing order tests now name
+  `order_type` and `time_in_force`.
+
 ## [0.2.121] - 2026-10-11
 
 ### Fixed

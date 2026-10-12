@@ -70,7 +70,9 @@ defmodule DpExchange.Gemini.PrivateTest do
     "timestampms" => 1_787_936_147_000
   }
 
-  @request %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100.00"}
+  # Nothing is defaulted: a plain limit order names its type and its duration.
+  @typeless %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100.00"}
+  @request Map.merge(@typeless, %{order_type: :limit, time_in_force: :gtc})
 
   describe "credentials are an argument, used once and not kept" do
     test "the request carries the signed headers the venue requires" do
@@ -137,7 +139,9 @@ defmodule DpExchange.Gemini.PrivateTest do
         symbol: "BTC-USD",
         side: :buy,
         quantity: Decimal.new("0.00000001"),
-        price: Decimal.normalize(Decimal.new("150.00"))
+        price: Decimal.normalize(Decimal.new("150.00")),
+        order_type: :limit,
+        time_in_force: :gtc
       }
 
       Private.place_order(@credentials, request,
@@ -175,7 +179,7 @@ defmodule DpExchange.Gemini.PrivateTest do
             {:ioc, "immediate-or-cancel"},
             {:fok, "fill-or-kill"}
           ] do
-        Private.place_order(@credentials, Map.put(@request, :order_type, order_type),
+        Private.place_order(@credentials, Map.put(@typeless, :order_type, order_type),
           plug: capturing(@order, self()),
           retry_attempts: 0
         )
@@ -198,25 +202,47 @@ defmodule DpExchange.Gemini.PrivateTest do
       end
     end
 
-    test "an order type and a time_in_force that AGREE are fine" do
-      Private.place_order(
-        @credentials,
-        @request |> Map.put(:order_type, :ioc) |> Map.put(:time_in_force, :ioc),
-        plug: capturing(@order, self()),
-        retry_attempts: 0
-      )
+    test "a time_in_force beside a type that carries its own option is refused" do
+      # An order saying both post-only and fill-or-kill has no correct reading, and
+      # agreeing is still a second statement of the same thing: nothing is reconciled.
+      for {type, tif} <- [{:ioc, :ioc}, {:post_only, :fok}, {:fok, :gtc}, {:stop_limit, :gtc}] do
+        request = Map.merge(@typeless, %{order_type: type, time_in_force: tif})
+        request = if type == :stop_limit, do: Map.put(request, :stop_price, "90"), else: request
 
-      assert_receive {:payload, payload}
-      assert payload["options"] == ["immediate-or-cancel"]
+        assert {:error, {:unexpected_field, :time_in_force}} =
+                 Private.place_order(@credentials, request, retry_attempts: 0)
+      end
     end
 
-    test "an order type and a time_in_force that DISAGREE are refused, not reconciled" do
-      # An order saying both post-only and fill-or-kill has no correct reading, and
-      # picking one would be this package deciding how someone's money is spent.
-      assert {:error, {:conflicting_execution_options, _from_type, _from_tif}} =
+    test "a plain limit order must name its time_in_force, and only the served ones" do
+      assert {:error, {:missing_field, :time_in_force}} =
+               Private.place_order(@credentials, Map.put(@typeless, :order_type, :limit),
+                 retry_attempts: 0
+               )
+
+      for tif <- [:gtd, :day, :bogus, "gtc"] do
+        assert {:error, {:unsupported_order_combination, :limit, ^tif}} =
+                 Private.place_order(@credentials, Map.put(@request, :time_in_force, tif),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "order_type is required, never defaulted to a limit" do
+      assert {:error, {:missing_field, :order_type}} =
+               Private.place_order(@credentials, @typeless, retry_attempts: 0)
+
+      assert {:error, {:missing_field, :order_type}} =
+               Private.place_order(@credentials, Map.put(@typeless, :order_type, nil),
+                 retry_attempts: 0
+               )
+    end
+
+    test ":maker_or_cancel is not a Core order type and is refused, :post_only is the atom" do
+      assert {:error, {:unsupported_order_type, :maker_or_cancel}} =
                Private.place_order(
                  @credentials,
-                 @request |> Map.put(:order_type, :post_only) |> Map.put(:time_in_force, :fok),
+                 Map.put(@typeless, :order_type, :maker_or_cancel),
                  retry_attempts: 0
                )
     end
@@ -243,7 +269,7 @@ defmodule DpExchange.Gemini.PrivateTest do
     test "no execution option may ride on a stop-limit" do
       request = @request |> Map.put(:order_type, :stop_limit) |> Map.put(:time_in_force, :ioc)
 
-      assert {:error, {:unsupported_time_in_force, _option, :not_allowed_on_stop_limit}} =
+      assert {:error, {:unexpected_field, :time_in_force}} =
                Private.place_order(@credentials, request, retry_attempts: 0)
     end
 

@@ -350,7 +350,15 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
 
     test "an order refuses every shape the venue will not take" do
       credentials = %{api_key: "k", api_secret: "s"}
-      base = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
+
+      base = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
       # The expensive one: the venue serves no market order, and its documented
       # workaround needs a limit price only the caller can choose.
@@ -372,15 +380,10 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       # adapter validate against — see its own `@doc false` comment. Before that sharing,
       # this fake validated `order_type` and `time_in_force` independently and accepted
       # both of these, which the venue's own "at most one execution option" rule refuses.
-      assert {:error, {:conflicting_execution_options, ["maker-or-cancel"], ["fill-or-kill"]}} =
-               Fake.place_order(
-                 credentials,
-                 base |> Map.put(:order_type, :post_only) |> Map.put(:time_in_force, :fok),
-                 []
-               )
+      assert {:error, {:unexpected_field, :time_in_force}} =
+               Fake.place_order(credentials, Map.put(base, :order_type, :post_only), [])
 
-      assert {:error,
-              {:unsupported_time_in_force, "immediate-or-cancel", :not_allowed_on_stop_limit}} =
+      assert {:error, {:unexpected_field, :time_in_force}} =
                Fake.place_order(
                  credentials,
                  base |> Map.put(:order_type, :stop_limit) |> Map.put(:time_in_force, :ioc),
@@ -390,14 +393,20 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
 
     test "an order the venue does take comes back as an Order" do
       credentials = %{api_key: "k", api_secret: "s"}
+
       base = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
 
       for order_type <- [:limit, :stop_limit, :post_only, :ioc, :fok] do
-        # A stop-limit carries its trigger; no other type may (`Private.validate_order/1`).
+        # A stop-limit carries its trigger; no other type may (`Private.validate_order/2`).
+        # A plain limit order names its duration; no other type may.
         request =
-          if order_type == :stop_limit, do: Map.put(base, :stop_price, "99"), else: base
+          case order_type do
+            :stop_limit -> Map.put(base, :stop_price, "99")
+            :limit -> Map.put(base, :time_in_force, :gtc)
+            _carries_its_own_option -> base
+          end
 
-        assert {:ok, %DpExchange.Core.Types.Order{}} =
+        assert {:ok, %DpExchange.Core.Types.Order{order_type: ^order_type}} =
                  Fake.place_order(credentials, Map.put(request, :order_type, order_type), [])
       end
     end
@@ -584,21 +593,22 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert {:ok, _balances} = Fake.get_balances(%{access_token: "tok"}, [])
     end
 
-    test "maker_or_cancel is accepted under either spelling" do
+    test "post_only is accepted and maker_or_cancel, no Core order type, is refused" do
       credentials = %{api_key: "k", api_secret: "s"}
       base = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
 
-      for spelling <- [:post_only, :maker_or_cancel] do
-        assert {:ok, _order} =
-                 Fake.place_order(credentials, Map.put(base, :order_type, spelling), [])
-      end
+      assert {:ok, %{order_type: :post_only}} =
+               Fake.place_order(credentials, Map.put(base, :order_type, :post_only), [])
+
+      assert {:error, {:unsupported_order_type, :maker_or_cancel}} =
+               Fake.place_order(credentials, Map.put(base, :order_type, :maker_or_cancel), [])
     end
 
     test "an unsupported time_in_force is refused" do
       credentials = %{api_key: "k", api_secret: "s"}
-      base = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
+      base = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100", order_type: :limit}
 
-      assert {:error, {:unsupported_time_in_force, :gtd}} =
+      assert {:error, {:unsupported_order_combination, :limit, :gtd}} =
                Fake.place_order(credentials, Map.put(base, :time_in_force, :gtd), [])
     end
 
@@ -609,7 +619,9 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
         symbol: "BTC-USD",
         side: :buy,
         quantity: Decimal.new("1.5"),
-        price: Decimal.new("100")
+        price: Decimal.new("100"),
+        order_type: :limit,
+        time_in_force: :gtc
       }
 
       assert {:ok, order} = Fake.place_order(credentials, request, [])

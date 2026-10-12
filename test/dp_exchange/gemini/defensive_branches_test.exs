@@ -201,24 +201,21 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
   end
 
   describe "order options the caller can ask for" do
-    @request %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
+    @request %{
+      symbol: "BTC-USD",
+      side: :buy,
+      quantity: "1",
+      price: "100",
+      order_type: :limit,
+      time_in_force: :gtc
+    }
 
-    test "maker_or_cancel is accepted as a spelling of post_only" do
-      plug = fn conn ->
-        payload =
-          conn
-          |> Plug.Conn.get_req_header("x-gemini-payload")
-          |> List.first()
-          |> Base.decode64!()
-          |> Jason.decode!()
+    test "maker_or_cancel is no Core order type and is refused before any request" do
+      exploding = fn _conn -> raise "must not reach the venue" end
 
-        send(self(), {:options, payload["options"]})
-        Req.Test.json(conn, @order)
-      end
-
-      assert {:ok, _order} =
+      assert {:error, {:unsupported_order_type, :maker_or_cancel}} =
                Private.place_order(@credentials, Map.put(@request, :order_type, :maker_or_cancel),
-                 plug: plug,
+                 plug: exploding,
                  retry_attempts: 0
                )
     end
@@ -226,7 +223,7 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
     test "a time_in_force the venue does not serve is refused before any request" do
       # `:gtd` and `:day` are in the contract's vocabulary; Gemini serves neither.
       for tif <- [:gtd, :day] do
-        assert {:error, {:unsupported_time_in_force, ^tif}} =
+        assert {:error, {:unsupported_order_combination, :limit, ^tif}} =
                  Private.place_order(@credentials, Map.put(@request, :time_in_force, tif),
                    retry_attempts: 0
                  )
@@ -247,11 +244,18 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
     end
 
     test "order calls work with credentials alone" do
-      request = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100"}
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
-      assert {:ok, _order} = Fake.place_order(@credentials, request)
-      assert {:ok, _order} = Fake.cancel_order(@credentials, "1")
-      assert {:ok, _order} = Fake.get_order(@credentials, "1")
+      assert {:ok, placed} = Fake.place_order(@credentials, request)
+      assert {:ok, _order} = Fake.get_order(@credentials, placed.id)
+      assert {:ok, %{status: :cancelled}} = Fake.cancel_order(@credentials, placed.id)
     end
 
     test "streaming calls work with symbols alone" do

@@ -89,7 +89,15 @@ defmodule DpExchange.Gemini.PrivateReviewTest do
 
     test "place_order/3 still returns the order it placed, with the field nil" do
       body = Map.put(@order, "price", "garbage")
-      request = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100.00"}
+
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100.00",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
 
       assert {:ok, order} =
                Private.place_order(@credentials, request, plug: json(body), retry_attempts: 0)

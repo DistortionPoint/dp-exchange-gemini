@@ -1180,6 +1180,53 @@ This is not a blanket ban on retrying. It is a ban on repeating an action the ve
 tell apart from the first one. Reads still retry, and so does any write carrying an
 idempotency key the venue honours.
 
+## `place_order/3`: an order says what it is, and an unknown outcome names the id to look for
+
+**Nothing is defaulted.** A request is a plain map of `:symbol`, `:side`, `:order_type`,
+`:quantity` and `:price`, plus `:time_in_force` on a `:limit` order, `:stop_price` on a
+`:stop_limit` order, and optionally `:client_order_id`. Every answer below is decided before
+anything is signed, in this order:
+
+| Request | Answer |
+|---|---|
+| not a plain map | `{:error, {:invalid_order_request, request}}` |
+| a key outside the list above (`post_only: true`, `"symbol"`) | `{:error, {:unsupported_order_field, key}}` |
+| `:symbol` nil, not a string, or blank | `{:error, {:invalid_symbol, value}}` |
+| `:side` absent / not `buy` or `sell` (atoms, or strings in any case) | `{:error, {:missing_field, :side}}` / `{:error, {:invalid_side, value}}` |
+| `:order_type` absent | `{:error, {:missing_field, :order_type}}` |
+| `:market`, `:stop`, `:maker_or_cancel`, anything else | `{:error, {:unsupported_order_type, type}}` |
+| `:limit` with no `:time_in_force` | `{:error, {:missing_field, :time_in_force}}` |
+| `:limit` with a tif other than `:gtc`, `:ioc`, `:fok` | `{:error, {:unsupported_order_combination, :limit, tif}}` |
+| a `:time_in_force` on `:stop_limit`, `:post_only`, `:ioc`, `:fok` | `{:error, {:unexpected_field, :time_in_force}}` |
+| `:quantity`, `:price` (and `:stop_price`) absent | `{:error, {:missing_field, key}}` |
+| `:quantity` / `:price` / `:stop_price` that is `<= 0`, NaN, Infinity, unparseable or a float | `{:error, {:invalid_quantity, v}}` / `{:invalid_price, v}` / `{:invalid_stop_price, v}` |
+| `:stop_price` on any type but `:stop_limit` | `{:error, {:unexpected_field, :stop_price}}` |
+| `:client_order_id` blank or neither a string nor an integer | `{:error, {:invalid_client_order_id, v}}` |
+| `opts[:account]` set but not a non-blank string | `{:error, {:invalid_option, :account, v}}` |
+
+Pass amounts as `Decimal`, integers or numeric strings; a float has already lost digits.
+`:post_only` is the one atom for maker-or-cancel. `:maker_or_cancel`, which this package used to
+accept as an alias, is not a Core order type and is refused.
+
+**An outcome that may have reached the venue is `{:error, {:order_unconfirmed, client_order_id,
+reason}}`**: a timeout or connection failure after the send, a 5xx, a `2xx` that is not JSON or
+names no `order_id`. `client_order_id` is the one you sent, as a string, or `nil` when you sent
+none (this package generates none, because nothing here shows the venue dedupes on it).
+**Do not place again.** Look for the order with `get_orders/2` (resting, then `history: true`)
+by that id, or by symbol, side, price and time when it is `nil`. A refusal from the venue
+(`{:refused, _}`), an error decided before sending (validation, missing credentials) and our
+own rate limiter refusing (`"Throttled by our own rate limiter"`) are what they were before and
+are not wrapped: nothing was sent. A `2xx` that names an `order_id` stays `{:ok, %Order{}}`
+even if some field of it is unreadable.
+
+`get_order/3` and `cancel_order/3` take the id as a **string of digits**. An integer, `nil` or
+a blank string is `{:error, {:invalid_order_id, v}}`; an order the venue does not know is
+`{:refused, :not_found}` (a 404, or the venue's `OrderNotFound` reason, which is named from
+its error vocabulary and has not been probed here). `cancel_order/3` is sent once.
+`DpExchange.Gemini.Fake` answers the same for all of this: each placement gets its own numeric id,
+an id it did not issue in the calling process is `{:refused, :not_found}`, and the order carries
+the side as `:buy` / `:sell` whatever case you passed.
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.

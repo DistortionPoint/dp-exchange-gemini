@@ -47,12 +47,34 @@ defmodule DpExchange.Gemini.Private do
 
   | `time_in_force` | Gemini option | Meaning |
   |---|---|---|
-  | `:gtc` (default) | none | fills what it can, rests the remainder on the book |
-  | (none — an ORDER TYPE: `order_type: :post_only`, alias `:maker_or_cancel`) | `maker-or-cancel` | adds liquidity only, cancels if it would take |
+  | `:gtc` (on `order_type: :limit`) | none | fills what it can, rests the remainder on the book |
+  | (none — an ORDER TYPE: `order_type: :post_only`) | `maker-or-cancel` | adds liquidity only, cancels if it would take |
   | `:ioc` | `immediate-or-cancel` | takes what it can, cancels the rest |
   | `:fok` | `fill-or-kill` | fills entirely or cancels entirely |
 
   No option may be combined with a stop-limit order.
+
+  ## An order says what it is; nothing is defaulted
+
+  `:order_type` is required (`{:error, {:missing_field, :order_type}}`), and on
+  `order_type: :limit` so is `:time_in_force`. `:post_only`, `:ioc`, `:fok` and `:stop_limit`
+  carry their execution option in the type itself (or take none), so a `:time_in_force` on
+  them is `{:error, {:unexpected_field, :time_in_force}}`. A time in force the venue does not
+  serve on `:limit` is `{:error, {:unsupported_order_combination, :limit, tif}}`. A request key
+  this builder does not read is `{:error, {:unsupported_order_field, key}}`: it used to be
+  dropped, so `post_only: true` placed a plain limit order. `:maker_or_cancel` is not a Core
+  order type and is `{:error, {:unsupported_order_type, :maker_or_cancel}}`; ask for
+  `:post_only`.
+
+  ## An unconfirmed placement carries the id it was sent with
+
+  A `place_order/3` whose request may have reached the venue without success being proven (a
+  timeout or connection failure after the send, a 5xx, a 2xx that is not JSON or names no
+  `order_id`) is `{:error, {:order_unconfirmed, client_order_id, reason}}`. The id is the
+  `client_order_id` the caller gave, as sent, or `nil` when it gave none (this package
+  generates none: nothing here proves the venue dedupes on it). A caller reconciles by
+  listing orders, never by placing again. A refusal decided before anything is sent, our own
+  rate limiter included, stays a plain `{:error, reason}`.
 
   ## A cancelled order is not a failed request
 
@@ -268,32 +290,43 @@ defmodule DpExchange.Gemini.Private do
   @doc """
   Places an order.
 
-  `request` is a map carrying at least `:symbol`, `:side`, `:quantity` and `:price`.
-  `:order_type` defaults to `:limit`; `:time_in_force` defaults to `:gtc`. A
+  `request` is a map carrying `:symbol`, `:side`, `:order_type`, `:quantity` and `:price`,
+  plus `:time_in_force` on a `:limit` order and `:stop_price` on a `:stop_limit` one. A
   `:client_order_id` is passed through when given and is strongly recommended by the venue.
+  Nothing is defaulted and no other key is accepted.
 
-  Refuses rather than substituting:
+  Checked in this order, before anything is signed or sent, with these answers:
 
-    * `order_type: :market` — the venue serves none, and the documented workaround needs a
-      limit price only the caller can choose
-    * an unknown `:time_in_force` — the venue rejects an unsupported option outright
-    * a missing price on a type that requires one
-    * a `:symbol` that is not a non-blank string — `{:error, {:invalid_symbol, symbol}}` — and
-      a `:client_order_id` that is neither a non-blank string nor an integer —
+    * a request that is not a map — `{:error, {:invalid_order_request, request}}`
+    * a key this builder does not read — `{:error, {:unsupported_order_field, key}}`
+    * a `:symbol` that is not a non-blank string — `{:error, {:invalid_symbol, symbol}}`
+    * a missing `:side` — `{:error, {:missing_field, :side}}`; one other than `:buy` / `:sell`
+      (or `"buy"` / `"sell"` in any case) — `{:error, {:invalid_side, side}}`
+    * a missing `:order_type` — `{:error, {:missing_field, :order_type}}`; `:market`, `:stop`,
+      `:maker_or_cancel` or anything else outside `:limit`, `:stop_limit`, `:post_only`,
+      `:ioc`, `:fok` — `{:error, {:unsupported_order_type, type}}` (the venue serves no market
+      order and the documented workaround needs a limit price only the caller can choose)
+    * a missing `:time_in_force` on `:limit` — `{:error, {:missing_field, :time_in_force}}`; one
+      other than `:gtc`, `:ioc`, `:fok` — `{:error, {:unsupported_order_combination, :limit,
+      tif}}`; any on the other four types — `{:error, {:unexpected_field, :time_in_force}}`
+    * a `:quantity`, `:price` or `:stop_price` that is missing — `{:error, {:missing_field,
+      key}}` — or is not a finite number above zero, or is a float —
+      `{:error, {:invalid_quantity, v}}`, `{:error, {:invalid_price, v}}`,
+      `{:error, {:invalid_stop_price, v}}`. Numbers go out in plain notation, never scientific
+    * a `:stop_price` on any type but `:stop_limit` — `{:error, {:unexpected_field, :stop_price}}`
+    * a `:client_order_id` that is neither a non-blank string nor an integer —
       `{:error, {:invalid_client_order_id, id}}`
-    * a `:side` other than `:buy` / `:sell` — `{:error, {:invalid_side, side}}`
-    * a `:quantity`, `:price` or `:stop_price` that is not a finite number above zero —
-      `{:error, {:invalid_decimal, field, value}}` or
-      `{:error, {:non_positive_amount, field, value}}`. Numbers go out in plain notation,
-      never scientific, whatever shape the caller held them in
-    * a `:stop_limit` with no `:stop_price` (`{:error, {:missing_field, :stop_price}}`), and a
-      `:stop_price` on any other type (`{:error, {:unexpected_field, :stop_price}}`) — the
-      venue's trigger price exists only on a stop-limit order
+    * an `opts[:account]` that is not a non-blank string — `{:error, {:invalid_option, :account,
+      v}}`
+
+  A request that may have reached the venue without success being proven is
+  `{:error, {:order_unconfirmed, client_order_id, reason}}`; see the moduledoc.
   """
   @spec place_order(map(), map(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
-    with {:ok, terms} <- order_terms(request) do
+    with {:ok, terms} <- order_terms(request),
+         :ok <- validate_account_opt(opts) do
       %{
         type: type,
         options: options,
@@ -318,50 +351,117 @@ defmodule DpExchange.Gemini.Private do
         |> maybe_put("client_order_id", client_order_id)
         |> maybe_put("account", Keyword.get(opts, :account))
 
-      with {:ok, body, _headers} <- post_once("/v1/order/new", params, credentials, opts) do
-        # A placed order whose id the venue did not return readably stays
-        # `{:ok, %Order{id: nil}}`. It was made `{:error, :order_id_not_returned}` on
-        # 2026-10-10 and reverted the same day: the venue accepted the order, an error reads
-        # as "nothing was placed", and since this venue's `client_order_id` is no idempotency
-        # key, a caller retrying on it places a second order. Coinbase keeps the same rule.
-        to_order(body, :lenient)
-      end
+      "/v1/order/new"
+      |> post_once(params, credentials, opts)
+      |> placed_order(client_order_id && to_string(client_order_id))
     end
   end
+
+  # **An answer to a placement is an order, a refusal, or "unconfirmed".** Nothing in between.
+  #
+  # A 2xx body that names an `order_id` is the venue confirming the order, and stays
+  # `{:ok, %Order{}}` even when a field of it is unreadable (`id: nil` included): it was made
+  # `{:error, :order_id_not_returned}` on 2026-10-10 and reverted the same day, because an
+  # error reads as "nothing was placed" and a retry then places a second order. A 2xx that
+  # confirms nothing (no `order_id`, not JSON, not an object), a 5xx, and a transport failure
+  # after the send may all have created an order, so each is `:order_unconfirmed` with the
+  # `client_order_id` actually sent (or `nil`), which is the only handle a caller has to find
+  # out. A venue refusal and anything decided before the send stay what they were.
+  defp placed_order({:ok, %{"order_id" => _id} = body, _headers}, _client_order_id),
+    do: to_order(body, :lenient)
+
+  defp placed_order({:ok, _body, _headers}, client_order_id),
+    do: unconfirmed(client_order_id, :unexpected_response_shape)
+
+  defp placed_order({:error, reason} = error, client_order_id) do
+    if request_may_have_been_sent?(reason),
+      do: unconfirmed(client_order_id, reason),
+      else: error
+  end
+
+  defp placed_order({:refused, _reason} = refusal, _client_order_id), do: refusal
+
+  defp unconfirmed(client_order_id, reason),
+    do: {:error, {:order_unconfirmed, client_order_id, bounded_reason(reason)}}
+
+  # Core's own text for the refusals that happen before a request leaves the process, and the
+  # venue's 429 (the venue says it did not take the request). An unmapped 4xx is the venue
+  # answering with a rejection. Everything else tagged `:exchange_error` (a timeout, a reset,
+  # a 5xx, an oversized reply) may have been acted on. A bare reason is a signing failure.
+  defp request_may_have_been_sent?({:exchange_error, _venue, :rate_limit_timeout}), do: false
+
+  defp request_may_have_been_sent?({:exchange_error, _venue, message}) when is_binary(message) do
+    not String.starts_with?(message, [
+      "Throttled by our own rate limiter",
+      "Rate limiter unavailable",
+      "Rate limited by the venue",
+      "HTTP 4"
+    ])
+  end
+
+  defp request_may_have_been_sent?({:exchange_error, _venue, _other}), do: true
+  defp request_may_have_been_sent?({:undecodable_response, _venue}), do: true
+  defp request_may_have_been_sent?(_decided_before_the_send), do: false
+
+  @reason_text_max 256
+
+  defp bounded_reason({:exchange_error, venue, message}) when is_binary(message),
+    do: {:exchange_error, venue, String.slice(message, 0, @reason_text_max)}
+
+  defp bounded_reason(reason) when is_atom(reason), do: reason
+  defp bounded_reason({tag, venue}) when is_atom(tag) and is_atom(venue), do: {tag, venue}
+
+  defp bounded_reason(reason),
+    do: inspect(reason, limit: 10, printable_limit: @reason_text_max)
 
   @doc """
   Whether `request` would be sent by `place_order/3`, checked without sending it.
 
-  This is the validation `place_order/3` runs before it signs anything — the order type and
-  time in force, then the price, then `:symbol`, `:quantity` and `:side`, then that the side
-  is `buy` or `sell`, the stop price agrees with the order type, and `:quantity`, `:price`
-  and `:stop_price` are finite numbers above zero — in that order and with those error
-  shapes. It is exposed so `DpExchange.Gemini.Fake` refuses with this exact
-  function rather than a second copy of the rules.
+  This is the validation `place_order/3` runs before it signs anything, in its order and with
+  its error shapes: the request is a map, no unread key, `:symbol`, `:side`, `:order_type`,
+  `:time_in_force` and the combination, `:quantity`, `:price`, `:stop_price`,
+  `:client_order_id`, then `opts[:account]`. It is exposed so `DpExchange.Gemini.Fake` refuses
+  with this exact function rather than a second copy of the rules.
   """
-  @spec validate_order(map()) :: :ok | {:error, term()}
-  def validate_order(request) do
-    with {:ok, _terms} <- order_terms(request), do: :ok
+  @spec validate_order(term(), keyword()) :: :ok | {:error, term()}
+  def validate_order(request, opts \\ []) do
+    with {:ok, _terms} <- order_terms(request), do: validate_account_opt(opts)
   end
 
-  # The values `place_order/3` sends, or the first refusal. Named refusals, not
-  # `Map.fetch!/2`: a `KeyError` raised in the caller's process on a money-moving call, where
-  # every other missing field is an `{:error, _}`.
-  defp order_terms(request) do
-    with {:ok, {type, options}} <-
-           order_wire(
-             Map.get(request, :order_type, :limit),
-             Map.get(request, :time_in_force, :gtc)
-           ),
-         {:ok, price} <- required_price(request),
-         {:ok, symbol} <- required_field(request, :symbol),
-         {:ok, symbol} <- order_symbol_arg(symbol),
-         {:ok, quantity} <- required_field(request, :quantity),
-         {:ok, side} <- required_field(request, :side),
-         {:ok, side} <- wire_side(side),
+  # `opts[:account]` names the subaccount a master key acts on. Absent is fine (an
+  # account-scoped key); anything but a non-blank string was silently ignored by
+  # `with_account/3` and, on this one call, stringified into the order.
+  defp validate_account_opt(opts) do
+    case Keyword.get(opts, :account) do
+      nil -> :ok
+      account when is_binary(account) and account != "" -> :ok
+      other -> {:error, {:invalid_option, :account, other}}
+    end
+  end
+
+  @order_fields [
+    :symbol,
+    :side,
+    :order_type,
+    :time_in_force,
+    :quantity,
+    :price,
+    :stop_price,
+    :client_order_id
+  ]
+
+  # The values `place_order/3` sends, or the first refusal, in the family's check order. Named
+  # refusals throughout: a non-map request raised `BadMapError` in the caller's process, a
+  # missing field was defaulted (`:limit`, `:gtc`) and an unread key was dropped.
+  defp order_terms(request) when is_map(request) and not is_struct(request) do
+    with :ok <- known_order_fields(request),
+         {:ok, symbol} <- order_symbol_arg(Map.get(request, :symbol)),
+         {:ok, side} <- order_side(Map.get(request, :side)),
+         {:ok, order_type} <- required_order_field(request, :order_type),
+         {:ok, {type, options}} <- order_wire(order_type, Map.get(request, :time_in_force)),
+         {:ok, quantity} <- order_amount(request, :quantity, :invalid_quantity),
+         {:ok, price} <- order_amount(request, :price, :invalid_price),
          {:ok, stop_price} <- stop_price_for(type, Map.get(request, :stop_price)),
-         {:ok, quantity} <- wire_positive(quantity, :quantity),
-         {:ok, price} <- wire_positive(price, :price),
          {:ok, client_order_id} <- client_order_id_for(Map.get(request, :client_order_id)) do
       {:ok,
        %{
@@ -374,6 +474,54 @@ defmodule DpExchange.Gemini.Private do
          stop_price: stop_price,
          client_order_id: client_order_id
        }}
+    end
+  end
+
+  defp order_terms(request), do: {:error, {:invalid_order_request, request}}
+
+  defp known_order_fields(request) do
+    case request |> Map.keys() |> Enum.sort() |> Enum.find(&(&1 not in @order_fields)) do
+      nil -> :ok
+      unread -> {:error, {:unsupported_order_field, unread}}
+    end
+  end
+
+  defp required_order_field(request, key) do
+    case Map.get(request, key) do
+      nil -> {:error, {:missing_field, key}}
+      value -> {:ok, value}
+    end
+  end
+
+  # A side is `buy` or `sell` (`NewOrderRequest.side`), as an atom or in any case as a string.
+  # Nothing else reaches the wire of a live order.
+  defp order_side(nil), do: {:error, {:missing_field, :side}}
+  defp order_side(side) when side in [:buy, :sell], do: {:ok, Atom.to_string(side)}
+
+  defp order_side(side) when is_binary(side) do
+    case String.downcase(side) do
+      wire when wire in ["buy", "sell"] -> {:ok, wire}
+      _unknown -> {:error, {:invalid_side, side}}
+    end
+  end
+
+  defp order_side(other), do: {:error, {:invalid_side, other}}
+
+  # An amount or limit price. A float has already lost digits, so it is refused with every
+  # other value that is not a finite number above zero; the tag names the field.
+  defp order_amount(request, key, tag) do
+    case Map.get(request, key) do
+      nil ->
+        {:error, {:missing_field, key}}
+
+      float when is_float(float) ->
+        {:error, {tag, float}}
+
+      value ->
+        case wire_positive(value, key) do
+          {:ok, wire} -> {:ok, wire}
+          {:error, _detail} -> {:error, {tag, value}}
+        end
     end
   end
 
@@ -415,7 +563,17 @@ defmodule DpExchange.Gemini.Private do
   # the trigger the caller named, which is a fill at a price nobody chose; a stop-limit with
   # no trigger is not an order the venue can describe. Both are refused before signing.
   defp stop_price_for("exchange stop limit", nil), do: {:error, {:missing_field, :stop_price}}
-  defp stop_price_for("exchange stop limit", stop), do: wire_positive(stop, :stop_price)
+
+  defp stop_price_for("exchange stop limit", stop) when is_float(stop),
+    do: {:error, {:invalid_stop_price, stop}}
+
+  defp stop_price_for("exchange stop limit", stop) do
+    case wire_positive(stop, :stop_price) do
+      {:ok, wire} -> {:ok, wire}
+      {:error, _detail} -> {:error, {:invalid_stop_price, stop}}
+    end
+  end
+
   defp stop_price_for(_type, nil), do: {:ok, nil}
   defp stop_price_for(_type, _stop), do: {:error, {:unexpected_field, :stop_price}}
 
@@ -479,18 +637,25 @@ defmodule DpExchange.Gemini.Private do
   Cancels one order by the venue's order id.
 
   The id is the string this package returned and is sent as the unsigned 64-bit integer the
-  venue's schema names. One that is not a whole number in that range is
-  `{:error, {:invalid_order_id, id}}`, before anything is signed.
+  venue's schema names. One that is not a string of digits in that range (an integer, `nil`,
+  a blank string) is `{:error, {:invalid_order_id, id}}`, before anything is signed. An
+  order the venue does not know is `{:refused, :not_found}`. Sent once, never retried.
   """
   @spec cancel_order(map(), String.t(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def cancel_order(credentials, order_id, opts) do
-    with {:ok, wire_id} <- order_id_param(order_id),
-         {:ok, body, _headers} <-
-           post_once("/v1/order/cancel", %{"order_id" => wire_id}, credentials, opts) do
-      to_order(body)
+    with {:ok, wire_id} <- order_id_param(order_id) do
+      "/v1/order/cancel"
+      |> post_once(%{"order_id" => wire_id}, credentials, opts, :order)
+      |> order_result()
     end
   end
+
+  # A 2xx is the order. A 404, or the venue's `OrderNotFound` reason (taken from the venue's
+  # own error vocabulary, not probed here), is an order that is not there.
+  defp order_result({:ok, body, _headers}), do: to_order(body)
+  defp order_result({:refused, {:unknown_reason, "OrderNotFound"}}), do: {:refused, :not_found}
+  defp order_result(other), do: other
 
   @doc """
   One order's current state.
@@ -501,10 +666,10 @@ defmodule DpExchange.Gemini.Private do
   @spec get_order(map(), String.t(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def get_order(credentials, order_id, opts) do
-    with {:ok, wire_id} <- order_id_param(order_id),
-         {:ok, body, _headers} <-
-           post("/v1/order/status", %{"order_id" => wire_id}, credentials, opts) do
-      to_order(body)
+    with {:ok, wire_id} <- order_id_param(order_id) do
+      "/v1/order/status"
+      |> post(%{"order_id" => wire_id}, credentials, opts, :order)
+      |> order_result()
     end
   end
 
@@ -521,15 +686,13 @@ defmodule DpExchange.Gemini.Private do
   Parses an order id into the unsigned 64-bit integer the venue's schema names.
 
   Public so `DpExchange.Gemini.Fake` refuses exactly what the real `cancel_order/3` and
-  `get_order/3` refuse, from one implementation. A string of digits (or an integer) in
-  `0..18_446_744_073_709_551_615` is `{:ok, integer}`; anything else is
-  `{:error, {:invalid_order_id, id}}`.
+  `get_order/3` refuse, from one implementation. A string of digits in
+  `0..18_446_744_073_709_551_615` is `{:ok, integer}`; anything else, an integer, `nil` and a
+  blank string included, is `{:error, {:invalid_order_id, id}}`: every id this package hands
+  out is a string, so a number is not one it issued.
   """
   @spec order_id_param(term()) ::
           {:ok, non_neg_integer()} | {:error, {:invalid_order_id, term()}}
-  def order_id_param(id) when is_integer(id) and id >= 0 and id <= @max_order_id,
-    do: {:ok, id}
-
   # Digits only. `Integer.parse/1` also reads `"+5"` and `"-0"` as whole numbers, and an id
   # with a sign is not one this package ever returned: it is refused, not normalised.
   def order_id_param(id) when is_binary(id) do
@@ -934,11 +1097,13 @@ defmodule DpExchange.Gemini.Private do
   # creates relied on the nonce refusing the repeat, and use this helper now.
   # `commit_conversion/2` uses it too: its `quoteId` is spent by the first execution, so a
   # retry is refused and a success is reported as a refusal, which is the wrong way round.
-  defp post_once(path, params, credentials, opts) do
-    post(path, params, credentials, Keyword.put(opts, :retry_attempts, 1))
+  defp post_once(path, params, credentials, opts, subject \\ :other) do
+    post(path, params, credentials, Keyword.put(opts, :retry_attempts, 1), subject)
   end
 
-  defp post(path, params, credentials, opts) do
+  # `subject: :order` marks a call about one order, whose 404 is that order not being there
+  # (`{:refused, :not_found}`), not an unknown endpoint to describe by the venue's text.
+  defp post(path, params, credentials, opts, subject \\ :other) do
     scheme = auth_scheme(credentials, opts)
 
     headers = signer(scheme, path, stringify(params), credentials, opts)
@@ -948,6 +1113,9 @@ defmodule DpExchange.Gemini.Private do
       {:ok, %{status: status, body: body, headers: response_headers}}
       when status in 200..299 ->
         with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
+
+      {:ok, %{status: 404}} when subject == :order ->
+        {:refused, :not_found}
 
       # Permanent for the request as sent. A caller refreshes a token and calls again —
       # that is a different request, not a retry of this one.
@@ -1157,73 +1325,52 @@ defmodule DpExchange.Gemini.Private do
   # rule refuses — found in the 2026-09-06 real/fake parity sweep. One implementation
   # is what `Rest.refusal_reason/1` already does for `Rest` and `Private` sharing a
   # refusal vocabulary; this is the same fix for the order-validation vocabulary.
-  @spec order_wire(atom(), atom()) :: {:ok, {String.t(), [String.t()]}} | {:error, term()}
+  @spec order_wire(term(), term()) :: {:ok, {String.t(), [String.t()]}} | {:error, term()}
   def order_wire(order_type, time_in_force) do
-    with {:ok, {type, _from_type} = resolved} <- order_type(order_type),
-         {:ok, options} <- execution_options(time_in_force, resolved) do
-      {:ok, {type, options}}
+    with {:ok, {wire_type, fixed}} <- order_type(order_type),
+         {:ok, options} <- execution_options(order_type, fixed, time_in_force) do
+      {:ok, {wire_type, options}}
     end
   end
 
   # The contract models maker-or-cancel, IOC and fill-or-kill as ORDER TYPES; Gemini
-  # models them as execution *options* on a limit order. Both spellings are therefore
-  # accepted and both land on the same wire representation, which is what translation
-  # means. Each returns `{type, options}`.
+  # models them as execution *options* on a limit order, and this translates. Each returns
+  # `{wire_type, fixed_options}`; `:limit` alone takes its option from `time_in_force`.
   #
-  # `:market` and `:stop` are absent deliberately — see the moduledoc. Neither exists at
-  # this venue, and reaching the nearest thing would mean choosing a price the caller
-  # never supplied.
-  defp order_type(:limit), do: {:ok, {"exchange limit", []}}
+  # `:market`, `:stop` and `:maker_or_cancel` are absent deliberately — see the moduledoc.
+  # The first two do not exist at this venue and reaching the nearest thing would mean
+  # choosing a price the caller never supplied; the third is no Core order type (`:post_only`
+  # is the one atom for it) and the capabilities do not declare it.
+  defp order_type(:limit), do: {:ok, {"exchange limit", :by_time_in_force}}
   defp order_type(:stop_limit), do: {:ok, {"exchange stop limit", []}}
   defp order_type(:post_only), do: {:ok, {"exchange limit", ["maker-or-cancel"]}}
-  defp order_type(:maker_or_cancel), do: {:ok, {"exchange limit", ["maker-or-cancel"]}}
   defp order_type(:ioc), do: {:ok, {"exchange limit", ["immediate-or-cancel"]}}
   defp order_type(:fok), do: {:ok, {"exchange limit", ["fill-or-kill"]}}
+  defp order_type(nil), do: {:error, {:missing_field, :order_type}}
   defp order_type(other), do: {:error, {:unsupported_order_type, other}}
 
   # Exactly one option reaches the venue, or none: "if you specify more than one option
   # (or an unsupported option) in the options array, the exchange will reject your order."
   #
-  # A caller can express the same intent twice — `order_type: :ioc` and
-  # `time_in_force: :ioc`. Agreeing is fine. **Disagreeing is refused**, not resolved by
-  # precedence: an order that says both post-only and fill-or-kill has no correct reading,
-  # and picking one would be this package deciding how someone's money is spent.
-  defp execution_options(tif, {type, from_type}) do
-    case {tif_option(tif), from_type} do
-      {{:error, reason}, _from_type} ->
-        {:error, reason}
+  # A plain limit order names its duration, and it is required: `:gtc` is no option,
+  # `:ioc` and `:fok` are one each. Every other type carries its option in the type (or
+  # takes none, "No options can be applied to stop-limit orders at this time"), so a
+  # duration supplied beside it is refused rather than reconciled with the type, which is how
+  # an order saying both post-only and fill-or-kill used to be told apart from one that did not.
+  defp execution_options(:limit, :by_time_in_force, nil),
+    do: {:error, {:missing_field, :time_in_force}}
 
-      {{:ok, []}, from_type} ->
-        allow(type, from_type)
+  defp execution_options(:limit, :by_time_in_force, :gtc), do: {:ok, []}
+  defp execution_options(:limit, :by_time_in_force, :ioc), do: {:ok, ["immediate-or-cancel"]}
+  defp execution_options(:limit, :by_time_in_force, :fok), do: {:ok, ["fill-or-kill"]}
 
-      {{:ok, from_tif}, []} ->
-        allow(type, from_tif)
+  defp execution_options(:limit, :by_time_in_force, other),
+    do: {:error, {:unsupported_order_combination, :limit, other}}
 
-      {{:ok, same}, same} ->
-        allow(type, same)
+  defp execution_options(_type, fixed, nil), do: {:ok, fixed}
 
-      {{:ok, from_tif}, from_type} ->
-        {:error, {:conflicting_execution_options, from_type, from_tif}}
-    end
-  end
-
-  defp tif_option(:gtc), do: {:ok, []}
-  defp tif_option(:ioc), do: {:ok, ["immediate-or-cancel"]}
-  defp tif_option(:fok), do: {:ok, ["fill-or-kill"]}
-  defp tif_option(other), do: {:error, {:unsupported_time_in_force, other}}
-
-  # "No options can be applied to stop-limit orders at this time."
-  defp allow("exchange stop limit", [option | _rest]),
-    do: {:error, {:unsupported_time_in_force, option, :not_allowed_on_stop_limit}}
-
-  defp allow(_type, options), do: {:ok, options}
-
-  defp required_price(request) do
-    case Map.get(request, :price) do
-      nil -> {:error, {:missing_field, :price}}
-      price -> {:ok, price}
-    end
-  end
+  defp execution_options(_type, _fixed, _time_in_force),
+    do: {:error, {:unexpected_field, :time_in_force}}
 
   # **A numeric field that is PRESENT and unreadable fails the row** (`:strict`, the default).
   # `nil` is "the venue did not say"; a quantity, price or time the venue sent and this package
@@ -1392,13 +1539,6 @@ defmodule DpExchange.Gemini.Private do
       fully_filled?(body["executed_amount"], body["original_amount"]) -> :filled
       positive?(body["executed_amount"]) -> :partially_filled
       true -> :pending
-    end
-  end
-
-  defp required_field(request, key) do
-    case Map.get(request, key) do
-      nil -> {:error, {:missing_field, key}}
-      value -> {:ok, value}
     end
   end
 
@@ -4536,7 +4676,7 @@ defmodule DpExchange.Gemini.Private do
   defp preview_side(side) when side in ["buy", "sell"], do: :ok
   defp preview_side(side), do: {:error, {:unknown_side, side}}
 
-  # Not `required_price/1` above: that one reports `{:missing_field, :price}` for an order
+  # Not `order_amount/3`: that one reports `{:missing_field, :price}` for an order
   # this package is about to place, and this reports `:price_required` for a preview it is
   # about to describe. Two callers, two vocabularies, and merging them would report a
   # placement error on a call that places nothing.

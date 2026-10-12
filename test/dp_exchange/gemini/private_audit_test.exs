@@ -79,7 +79,17 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
     "timestampms" => 1_787_936_147_000
   }
 
-  @request %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100.00"}
+  @request %{
+    symbol: "BTC-USD",
+    side: :buy,
+    quantity: "1",
+    price: "100.00",
+    order_type: :limit,
+    time_in_force: :gtc
+  }
+
+  # A type that carries its own execution option (or takes none) takes no time in force.
+  @no_duration Map.delete(@request, :time_in_force)
 
   describe "order ids go out as the integer the vendor's schema names" do
     # rest.yaml `CancelOrderRequest.order_id` and `OrderStatusRequest.order_id`:
@@ -108,7 +118,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
     end
 
     test "an id that is not an unsigned 64-bit whole number is refused before signing" do
-      for bad <- ["abc", "-1", "1.5", "", "18446744073709551616", nil, :atom, 1.5] do
+      for bad <- ["abc", "-1", "1.5", "", "18446744073709551616", nil, :atom, 1.5, 7] do
         assert {:error, {:invalid_order_id, ^bad}} =
                  Private.cancel_order(@credentials, bad, plug: exploding(), retry_attempts: 0)
 
@@ -131,32 +141,34 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
 
     test "a quantity or price that is not a finite number above zero" do
       cases = [
-        {:quantity, Decimal.new("NaN"), :invalid_decimal},
-        {:quantity, Decimal.new("Infinity"), :invalid_decimal},
-        {:quantity, "abc", :invalid_decimal},
-        {:quantity, :one, :invalid_decimal},
-        {:quantity, "0", :non_positive_amount},
-        {:quantity, Decimal.new("-1"), :non_positive_amount},
-        {:price, "NaN", :invalid_decimal},
-        {:price, "-5", :non_positive_amount},
-        {:price, 0, :non_positive_amount}
+        {:quantity, Decimal.new("NaN"), :invalid_quantity},
+        {:quantity, Decimal.new("Infinity"), :invalid_quantity},
+        {:quantity, "abc", :invalid_quantity},
+        {:quantity, :one, :invalid_quantity},
+        {:quantity, "0", :invalid_quantity},
+        {:quantity, Decimal.new("-1"), :invalid_quantity},
+        {:quantity, 0.5, :invalid_quantity},
+        {:price, "NaN", :invalid_price},
+        {:price, "-5", :invalid_price},
+        {:price, 0, :invalid_price},
+        {:price, 100.5, :invalid_price}
       ]
 
       for {field, value, tag} <- cases do
         request = Map.put(@request, field, value)
 
-        assert {:error, {^tag, ^field, ^value}} =
+        assert {:error, {^tag, ^value}} =
                  Private.place_order(@credentials, request,
                    plug: exploding(),
                    retry_attempts: 0
                  )
 
-        assert {:error, {^tag, ^field, ^value}} = Private.validate_order(request)
+        assert {:error, {^tag, ^value}} = Private.validate_order(request)
       end
     end
 
-    test "a float is sent in plain notation, never scientific" do
-      request = %{@request | quantity: 1.0e-8, price: 12_345.5}
+    test "an integer or a numeric string is sent in plain notation, never scientific" do
+      request = %{@request | quantity: "0.00000001", price: 12_345}
 
       assert {:ok, _order} =
                Private.place_order(@credentials, request,
@@ -164,14 +176,13 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
-      refute payload["amount"] =~ ~r/[eE]/
-      assert Decimal.equal?(Decimal.new(payload["amount"]), Decimal.new("0.00000001"))
-      assert Decimal.equal?(Decimal.new(payload["price"]), Decimal.new("12345.5"))
+      assert_receive {:payload, payload}, 5_000
+      assert payload["amount"] == "0.00000001"
+      assert payload["price"] == "12345"
     end
 
     test "a stop-limit needs its trigger price" do
-      request = Map.put(@request, :order_type, :stop_limit)
+      request = Map.put(@no_duration, :order_type, :stop_limit)
 
       assert {:error, {:missing_field, :stop_price}} =
                Private.place_order(@credentials, request, plug: exploding(), retry_attempts: 0)
@@ -183,7 +194,8 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
       # The vendor: "Only available for stop-limit orders." A plain limit order carrying one
       # would not wait for the trigger the caller named.
       for order_type <- [:limit, :post_only, :ioc, :fok] do
-        request = @request |> Map.put(:order_type, order_type) |> Map.put(:stop_price, "95")
+        base = if order_type == :limit, do: @request, else: @no_duration
+        request = base |> Map.put(:order_type, order_type) |> Map.put(:stop_price, "95")
 
         assert {:error, {:unexpected_field, :stop_price}} =
                  Private.place_order(@credentials, request,
@@ -195,15 +207,17 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
 
     test "a stop price must itself be a positive number" do
       request =
-        @request |> Map.put(:order_type, :stop_limit) |> Map.put(:stop_price, "0")
+        @no_duration |> Map.put(:order_type, :stop_limit) |> Map.put(:stop_price, "0")
 
-      assert {:error, {:non_positive_amount, :stop_price, "0"}} =
-               Private.validate_order(request)
+      assert {:error, {:invalid_stop_price, "0"}} = Private.validate_order(request)
+
+      assert {:error, {:invalid_stop_price, 95.5}} =
+               Private.validate_order(%{request | stop_price: 95.5})
     end
 
     test "a well-formed stop-limit sends the trigger as a plain string" do
       request =
-        @request
+        @no_duration
         |> Map.put(:order_type, :stop_limit)
         |> Map.put(:stop_price, Decimal.new("1E+2"))
 
@@ -219,8 +233,10 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
       assert payload["side"] == "buy"
     end
 
-    test "string sides are accepted and normalised" do
-      assert :ok = Private.validate_order(Map.put(@request, :side, "sell"))
+    test "string sides are accepted in any case" do
+      for side <- ["sell", "SELL", "Buy", "buy"] do
+        assert :ok = Private.validate_order(Map.put(@request, :side, side))
+      end
     end
   end
 

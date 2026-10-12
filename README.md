@@ -21,6 +21,8 @@ same facade every venue in the family exposes.
 
 88 callbacks, of which **64 are declared `:experimental`** and 24 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
 
+Placing an order: `place_order(credentials, %{symbol: "BTC-USD", side: :buy, order_type: :limit, time_in_force: :gtc, quantity: Decimal.new("1"), price: Decimal.new("100")}, opts)`. Nothing is defaulted, an unknown request key is refused, and a placement that may have reached the venue is `{:error, {:order_unconfirmed, client_order_id_or_nil, reason}}` - reconcile before placing again. See `usage-rules.md`.
+
 Asset classes: **crypto**. Streamed kinds: **quotes, top of book, trades** (`:trades` is opt-in via `Feed`'s `channels:`) — everything else pulls only.
 
 Of the 24 unsupported endpoints, **22 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/gemini/negative-claims.md`, which records the source and date behind every one.

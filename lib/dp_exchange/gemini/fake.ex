@@ -618,23 +618,50 @@ defmodule DpExchange.Gemini.Fake do
   def place_order(credentials, request, opts \\ []) do
     with_injection(fn ->
       # The refusals matter more than the success. A fake where every order works proves
-      # only that the happy path compiles. `Private.validate_order/1` is the SAME function
-      # the real adapter validates against — the type and time in force (one "at most one
-      # execution option" table, not a second copy, which is how this fake used to accept
-      # `:stop_limit` with any `time_in_force` and `:post_only` with `:fok`), then the price,
-      # then each of `:symbol`, `:quantity` and `:side` by name. The fake defaulted those
-      # last three to "1" and `:buy`, so a consumer's suite passed an order the venue never
-      # sees.
+      # only that the happy path compiles. `Private.validate_order/2` is the SAME function
+      # the real adapter validates against, in its order: the request shape, unread keys,
+      # symbol, side, type, time in force (one table, not a second copy, which is how this
+      # fake used to accept `:stop_limit` with any `time_in_force` and `:post_only` with
+      # `:fok`), quantity, prices, client order id and the `:account` option.
       #
       # **Before the credential, not after.** `Private.place_order/3` refuses a malformed
       # request before it signs anything, so a request wrong in both ways is
       # `{:error, {:missing_field, _}}` there. This answered `:missing_credentials`.
-      with :ok <- Private.validate_order(request),
+      #
+      # Each placement is a NEW order with its own numeric id, kept in the calling process
+      # (as the subscriptions are), so `get_order/3`, `cancel_order/3` and `get_orders/2`
+      # answer for what was placed and `{:refused, :not_found}` for what was not, which is
+      # what the real venue's 404 becomes. The venue is not known to dedupe on
+      # `client_order_id` (nothing here measured it), so a reused one is a second order.
+      with :ok <- Private.validate_order(request, opts),
            :ok <- authenticated(credentials, opts),
            :ok <- listed(canonical(Map.get(request, :symbol))) do
-        {:ok, order(request)}
+        placed = order(request)
+        remember_order(placed)
+        {:ok, placed}
       end
     end)
+  end
+
+  @orders_key {__MODULE__, :orders}
+
+  defp remember_order(%Types.Order{id: id} = order),
+    do: Process.put(@orders_key, Map.put(placed_orders(), id, order))
+
+  defp placed_orders, do: Process.get(@orders_key, %{})
+
+  # The one order the history read always holds (see `closed_orders/1`), so an id that read
+  # lists is one `get_order/3` knows.
+  @closed_id "9000000000000000001"
+
+  defp find_order(wire_id) do
+    id = Integer.to_string(wire_id)
+
+    cond do
+      Map.has_key?(placed_orders(), id) -> {:ok, Map.fetch!(placed_orders(), id)}
+      id == @closed_id -> {:ok, closed_order()}
+      true -> {:refused, :not_found}
+    end
   end
 
   @impl true
@@ -660,8 +687,13 @@ defmodule DpExchange.Gemini.Fake do
       # The id is checked BEFORE the credential, as `Private.cancel_order/3` does, through
       # the same `Private.order_id_param/1`, so the fake cannot be the more permissive one.
       with {:ok, wire_id} <- Private.order_id_param(order_id),
-           :ok <- authenticated(credentials, opts) do
-        {:ok, %{order(%{}) | id: Integer.to_string(wire_id), status: :cancelled}}
+           :ok <- authenticated(credentials, opts),
+           {:ok, found} <- find_order(wire_id) do
+        # An order that already executed in full stays `:filled`, as `status_of/1` reads it
+        # from the venue's own body when a cancel arrives after the last fill.
+        cancelled = if found.status == :filled, do: found, else: %{found | status: :cancelled}
+        if Map.has_key?(placed_orders(), found.id), do: remember_order(cancelled)
+        {:ok, cancelled}
       end
     end)
   end
@@ -671,7 +703,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(fn ->
       with {:ok, wire_id} <- Private.order_id_param(order_id),
            :ok <- authenticated(credentials, opts) do
-        {:ok, %{order(%{}) | id: Integer.to_string(wire_id)}}
+        find_order(wire_id)
       end
     end)
   end
@@ -692,16 +724,44 @@ defmodule DpExchange.Gemini.Fake do
            :ok <- authenticated(credentials, opts) do
         if Keyword.get(opts, :history, false),
           do: {:ok, closed_orders(opts)},
-          else: {:ok, []}
+          else: {:ok, open_orders()}
       end
     end)
+  end
+
+  # What was placed in this process and not cancelled: the resting set. The endpoint takes no
+  # filter, so neither does this.
+  defp open_orders do
+    placed_orders()
+    |> Map.values()
+    |> Enum.filter(&(&1.status == :open))
+    |> Enum.sort_by(&String.to_integer(&1.id))
+  end
+
+  defp closed_order do
+    %Types.Order{
+      id: @closed_id,
+      symbol: "BTC-USD",
+      side: :buy,
+      order_type: :limit,
+      quantity: Decimal.new("1"),
+      price: Decimal.new("1"),
+      stop_price: nil,
+      status: :filled,
+      filled_quantity: Decimal.new("1"),
+      created_at: @at,
+      updated_at: @at,
+      provider: :gemini
+    }
   end
 
   defp closed_orders(opts) do
     symbol = Keyword.get(opts, :symbol)
     since = Keyword.get(opts, :since)
 
-    [%{order(%{}) | status: :filled}]
+    cancelled = placed_orders() |> Map.values() |> Enum.reject(&(&1.status == :open))
+
+    [closed_order() | cancelled]
     |> Enum.filter(&(is_nil(symbol) or &1.symbol == canonical(symbol)))
     |> Enum.filter(&(is_nil(since) or on_or_after?(&1.created_at, since)))
     |> Enum.take(Keyword.get(opts, :limit) || 500)
@@ -873,25 +933,24 @@ defmodule DpExchange.Gemini.Fake do
   # `:fok`. The request's own spelling used to be echoed, so `order_type: :maker_or_cancel`
   # came back as `:maker_or_cancel` — an atom no real order carries — and a limit order sent
   # with `time_in_force: :ioc` came back `:limit`, naming a different order from the one
-  # the venue holds. `request` has passed `Private.validate_order/1` (or is `%{}`, whose
-  # defaults are valid), so `order_wire/2` cannot refuse it here.
+  # the venue holds. `request` has passed `Private.validate_order/2`, so `order_wire/2` cannot
+  # refuse it here, and its side is `:buy`/`:sell` in some spelling: the order carries the
+  # atom, never the caller's string.
   defp order(request) do
     {:ok, {wire_type, options}} =
-      Private.order_wire(
-        Map.get(request, :order_type, :limit),
-        Map.get(request, :time_in_force, :gtc)
-      )
+      Private.order_wire(Map.get(request, :order_type), Map.get(request, :time_in_force))
 
     %Types.Order{
       # Numeric, as the venue's are, so `Private.order_id_param/1` (which `get_order/3` and
-      # `cancel_order/3` check through) accepts the id this fake issued itself. It was
-      # `"fake-order-1"`, which those two refused: issue #5.
-      id: "1",
-      symbol: canonical(Map.get(request, :symbol, "BTC-USD")),
-      side: Map.get(request, :side, :buy),
+      # `cancel_order/3` check through) accepts the id this fake issued itself, and unique per
+      # placement so two orders are two ids. It was `"fake-order-1"` (issue #5) and then `"1"`
+      # for every placement.
+      id: Integer.to_string(System.unique_integer([:positive, :monotonic])),
+      symbol: canonical(Map.fetch!(request, :symbol)),
+      side: request |> Map.fetch!(:side) |> side_atom(),
       order_type: order_type_of(wire_type, options),
-      quantity: decimal(Map.get(request, :quantity, "1")),
-      price: decimal(Map.get(request, :price, "1")),
+      quantity: decimal(Map.fetch!(request, :quantity)),
+      price: decimal(Map.fetch!(request, :price)),
       stop_price: optional_decimal(Map.get(request, :stop_price)),
       status: :open,
       filled_quantity: Decimal.new(0),
@@ -1178,6 +1237,17 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   defp canonical(other), do: other
+
+  # A side `Private.validate_order/2` accepted: `:buy`/`:sell` or that word in any case. The
+  # order reports the atom, as the venue's `"buy"` becomes one in `Private.to_order/1`.
+  defp side_atom(side) when is_atom(side), do: side
+
+  defp side_atom(side) when is_binary(side) do
+    case String.downcase(side) do
+      "buy" -> :buy
+      "sell" -> :sell
+    end
+  end
 
   # What `Private.to_order/1` makes of the venue's own `type` and `options`: a stop-limit by
   # its type, otherwise the single execution option, otherwise a plain limit order.

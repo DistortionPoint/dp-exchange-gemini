@@ -158,7 +158,21 @@ defmodule DpExchange.Gemini.DecimalBodyTest do
   end
 
   describe "Fake refuses an order id as Private does" do
-    @bad_ids ["abc-123", "abc", "-1", "1.5", "", "18446744073709551616", nil, :atom, 1.5]
+    # An integer is refused too: every id this package hands out is a string.
+    @bad_ids [
+      "abc-123",
+      "abc",
+      "-1",
+      "1.5",
+      "",
+      "   ",
+      "18446744073709551616",
+      nil,
+      :atom,
+      1.5,
+      12,
+      0
+    ]
 
     test "cancel_order/3 and get_order/3 give the identical refusal" do
       for bad <- @bad_ids do
@@ -178,9 +192,20 @@ defmodule DpExchange.Gemini.DecimalBodyTest do
       assert Fake.get_order(%{}, "abc", []) == {:error, {:invalid_order_id, "abc"}}
     end
 
-    test "a numeric id is accepted" do
-      assert {:ok, order} = Fake.get_order(@credentials, "106817811", [])
-      assert order.id == "106817811"
+    test "a numeric id the fake issued is accepted, one it did not is not found" do
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: "1",
+        price: "100",
+        order_type: :limit,
+        time_in_force: :gtc
+      }
+
+      assert {:ok, placed} = Fake.place_order(@credentials, request, [])
+      assert {:ok, order} = Fake.get_order(@credentials, placed.id, [])
+      assert order.id == placed.id
+      assert Fake.get_order(@credentials, "106817811", []) == {:refused, :not_found}
     end
   end
 end

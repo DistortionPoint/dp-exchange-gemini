@@ -91,7 +91,14 @@ defmodule DpExchange.Gemini.OrderFidelityTest do
   end
 
   test "the fake refuses an order with no quantity or side, as the real path does" do
-    request = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "100.00"}
+    request = %{
+      symbol: "BTC-USD",
+      side: :buy,
+      quantity: "1",
+      price: "100.00",
+      order_type: :limit,
+      time_in_force: :gtc
+    }
 
     assert {:error, {:missing_field, :quantity}} =
              Fake.place_order(@credentials, Map.delete(request, :quantity))
