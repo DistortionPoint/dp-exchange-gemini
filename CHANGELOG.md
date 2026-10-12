@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.129] - 2026-10-12
+
 ### Changed (documentation only, tick U)
 
 - `Fake`: every code comment re-read against the code. Corrected: the `get_order_book/2`
