@@ -28,6 +28,16 @@
 # `:unsupported` "would claim a refusal the venue never made" — and this repository cannot
 # probe the live endpoint to find out which it is, because tier 2 never runs on a schedule.
 # Its own `@doc` carries the warning a caller needs.
+#
+# Re-diffed 2026-10-12 by the same script. REST (74) and WebSocket channels (21) unchanged.
+# TWO prediction-market operations appeared: `GET /v1/prediction-markets/maker-rebate/payouts`
+# ("List maker-rebate payouts", `limit`/`offset` paged) and
+# `GET /v1/prediction-markets/taker-rewards/payouts/summary` ("Daily rewards, monthly bonus
+# history, and participant payout summary"). Both were read in the current
+# `prediction-markets.yaml` before this list was touched. No claim this package makes rests
+# on them: it implements none of the prediction-market API (none of its 33 operations is
+# called from `lib/`), and `DpExchange.Core.Venue` has no callback for a venue's
+# prediction-market reward programme, so no `capabilities/0` declaration is made false.
 
 ## REST (specs/openapi/rest.yaml)
 GET /v1/book/{symbol}
@@ -119,8 +129,10 @@ GET /v1/prediction-markets/liquidity-rewards/config
 GET /v1/prediction-markets/liquidity-rewards/events
 GET /v1/prediction-markets/liquidity-rewards/summary/daily
 GET /v1/prediction-markets/liquidity-rewards/summary/total
+GET /v1/prediction-markets/maker-rebate/payouts
 GET /v1/prediction-markets/maker-rebate/rates
 GET /v1/prediction-markets/maker-rebate/summary/total
+GET /v1/prediction-markets/taker-rewards/payouts/summary
 GET /v1/prediction-markets/terms
 GET /v1/prediction-markets/terms/status
 GET /v1/prediction-markets/volume/{date}

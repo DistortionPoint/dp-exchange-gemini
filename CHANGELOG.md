@@ -20,6 +20,10 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Endpoint inventory re-dated 2026-10-12:** two prediction-market reward reports appeared
+  (`maker-rebate/payouts`, `taker-rewards/payouts/summary`). This package implements none of
+  the prediction-market API, so no declaration changes.
+
 ## [0.2.134] - 2026-10-12
 
 - **Security: a credential with a control character anywhere is refused.** A key, secret or
