@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.136] - 2026-10-13
+
 - **A candle at or before the epoch was dated 1970.** A bar time of `0` or below became a
   1970-or-earlier `opened_at`, which this package already refuses for a print; it is now
   `{:error, {:unparseable_venue_timestamp, value}}`, like any unreadable bar time.
