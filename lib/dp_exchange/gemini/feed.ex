@@ -559,6 +559,8 @@ defmodule DpExchange.Gemini.Feed do
     %{status | state: %{state | socket_opts: redacted}}
   end
 
+  # Deliberately defensive: the state is always this module's map, but a `format_status/1`
+  # that raises loses the crash report it was called to format.
   def format_status(status), do: status
 
   @impl true
@@ -1104,6 +1106,10 @@ defmodule DpExchange.Gemini.Feed do
     {kind, notice_reason(details), known}
   end
 
+  # Deliberately defensive. `Notice.new/3` refuses non-map `details`, and every notice this
+  # package builds goes through it, so only a hand-built struct sent to this named process
+  # gets here. Without this clause such a struct would raise `FunctionClauseError` and take
+  # down this shared feed, with every other consumer's subscription.
   defp notice_key(%Notice{kind: kind}, _wanted), do: {kind, nil, nil}
 
   # A `:refusal` from `Socket` states no `:reason`, only the venue's `subscribe_status`. Keyed
@@ -1127,6 +1133,8 @@ defmodule DpExchange.Gemini.Feed do
   defp with_suppressed(%Notice{details: details} = notice, suppressed) when is_map(details),
     do: %{notice | details: Map.put(details, :suppressed, suppressed)}
 
+  # Deliberately defensive, for the non-map `details` `notice_key/2` also tolerates: there is
+  # nowhere to put the count, so the notice is forwarded as it came.
   defp with_suppressed(notice, _suppressed), do: notice
 
   defp put_notice_seen(state, key, entry, now) do

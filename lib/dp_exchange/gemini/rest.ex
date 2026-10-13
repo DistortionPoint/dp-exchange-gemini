@@ -1390,14 +1390,19 @@ defmodule DpExchange.Gemini.Rest do
   #
   # Refuse instead. Refusal bodies do NOT come through here — see `refusal/1` below, which
   # reads the venue's own text and has its own reason to stay lenient.
+  #
+  # **The body is always bytes.** A pass-through clause for an already-decoded body stood
+  # below this one and could not run (tick AA coverage sweep, 2026-10-13): Core streams every
+  # response through `into: capped_into/1`, which appends binaries (a `:plug` included), and
+  # `request_opts/1` forwards no transport that could skip it. It was removed because it was
+  # also the only way a float could reach `decimal/1` or `candle_time/1`, whose float clauses
+  # went with it.
   defp decoded_body(body) when is_binary(body) do
     case Jason.decode(body, floats: :decimals) do
       {:ok, decoded} -> {:ok, decoded}
       {:error, _reason} -> {:error, {:undecodable_response, :gemini}}
     end
   end
-
-  defp decoded_body(body), do: {:ok, body}
 
   # A 400 or 404 from Gemini names its own reason, and the ones below are permanent for
   # the request as sent — no retry can make an unknown symbol known. That is a refusal,
@@ -1601,26 +1606,21 @@ defmodule DpExchange.Gemini.Rest do
 
   defp levels(nil, _direction), do: []
 
-  # Sorted, and levels with an unreadable price dropped — the REST arm of the fix
-  # `WsDecode.to_order_book/3` got the same day. `Core.Types.OrderBook` makes the ordering
-  # part of the contract, and `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it,
-  # so `hd(bids)` must be able to answer "the best bid" with a real number.
+  # Sorted. `Core.Types.OrderBook` makes the ordering part of the contract, and
+  # `@type level :: {Decimal.t(), Decimal.t()}` has no nil in it, so `hd(bids)` must be able
+  # to answer "the best bid" with a real number.
+  #
+  # Every row reaching here is a map whose price and amount both read: `get_order_book/2`
+  # runs `readable_book_side/1` on both sides first and refuses the whole reply otherwise.
+  # This used to drop a non-map row or an unreadable price itself and keep a nil amount; with
+  # the all-or-error check in front, those branches could no longer run (tick AA coverage
+  # sweep, 2026-10-13) and were removed rather than left to suggest a second, lenient rule.
   #
   # `{direction, Decimal}` rather than term order, because `Decimal` structs do not compare
-  # correctly as plain terms. A nil AMOUNT is kept: a level stating a price but no size is a
-  # real shape rather than an unreadable one.
+  # correctly as plain terms.
   defp levels(rows, direction) when is_list(rows) do
     rows
-    |> Enum.flat_map(fn
-      row when not is_map(row) ->
-        []
-
-      row ->
-        case decimal(row["price"]) do
-          nil -> []
-          price -> [{price, decimal(row["amount"])}]
-        end
-    end)
+    |> Enum.map(fn row -> {decimal(row["price"]), decimal(row["amount"])} end)
     |> Enum.sort_by(fn {price, _amount} -> price end, {direction, Decimal})
   end
 
@@ -1762,10 +1762,12 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp candle_time(value) when is_integer(value), do: from_unix_ms(value)
-  defp candle_time(value) when is_float(value), do: from_unix_ms(trunc(value))
 
   # `floats: :decimals` (see `decoded_body/1`) turns a fractional JSON number into a
-  # `Decimal`; it truncates to whole milliseconds exactly as the float clause above does.
+  # `Decimal`, truncated here to whole milliseconds. No float ever reaches this function: the
+  # body is always bytes decoded that way, so the float clause that stood above this one
+  # could not run and was removed (tick AA coverage sweep, 2026-10-13). A float would now
+  # fall to the last clause and be refused as unparseable, never raise.
   # The exponent is bounded BEFORE any arithmetic: `Decimal` aligns exponents to round or
   # compare, so `1E999999999` would try to build an integer of a billion digits. A real
   # epoch has an exponent of 0, a handful of negative places, or a short mantissa like `1.7E12`.
@@ -1786,6 +1788,12 @@ defmodule DpExchange.Gemini.Rest do
   end
 
   defp candle_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+
+  # A bar at or before the epoch is not a bar this venue traded: zero and negative do not
+  # raise, they become 1970 and earlier, which `from_unix_or_undated/2` above already refuses
+  # for a print. Candles took them as given. Refused with the value, like any unreadable time.
+  defp from_unix_ms(milliseconds) when milliseconds <= 0,
+    do: {:error, {:unparseable_venue_timestamp, milliseconds}}
 
   defp from_unix_ms(milliseconds) do
     case DateTime.from_unix(milliseconds, :millisecond) do
@@ -1865,8 +1873,11 @@ defmodule DpExchange.Gemini.Rest do
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  # Bounded like every other branch: `1.0e300` keeps its exponent through `from_float/1`.
-  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> bounded()
+
+  # No float clause: every value read here comes from a body decoded with
+  # `floats: :decimals` (`decoded_body/1`), which yields a `Decimal` or an integer and never a
+  # float. The clause that stood here could not run and was removed (tick AA coverage sweep,
+  # 2026-10-13); a float would fall to `decimal(_other)` and read as `nil`, never raise.
 
   # `Decimal.new/1` raises on a string the venue did not actually send a number in —
   # measured live at production scale against `wss://ws.gemini.com` for the socket's own

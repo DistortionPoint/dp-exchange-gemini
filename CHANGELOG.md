@@ -20,6 +20,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **A candle at or before the epoch was dated 1970.** A bar time of `0` or below became a
+  1970-or-earlier `opened_at`, which this package already refuses for a print; it is now
+  `{:error, {:unparseable_venue_timestamp, value}}`, like any unreadable bar time.
+- **`Socket.start_link/1` raised on a forwarded `url: nil`** inside `Feed`'s call; it now dials
+  the default endpoint, as a forwarded `nil` means everywhere else in this family.
+- **A subscriber registered by name never heard `:reconnected`**; it was sent to a pid only.
+- **Tests:** every line the suite never executed was read and either tested, proven dead and
+  removed (unreachable float and pass-through clauses in `Rest` and `Private`, among others),
+  or kept as a commented defensive clause.
+
 ## [0.2.135] - 2026-10-12
 
 - **Endpoint inventory re-dated 2026-10-12:** two prediction-market reward reports appeared

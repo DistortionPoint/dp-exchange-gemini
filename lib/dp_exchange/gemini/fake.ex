@@ -1311,6 +1311,11 @@ defmodule DpExchange.Gemini.Fake do
 
   # As the real `Core.Fanout` delivers: a `to:` name that no process holds (or a dead pid) is
   # nobody, skipped. A bare `send/2` raised `ArgumentError` for an unregistered atom.
+  #
+  # Deliberately defensive: `do_subscribe/2` already pushes nothing for a target that does not
+  # resolve, and `update_symbols/2` pushes to `self()`, so the `nil` branch is reached only
+  # when the target dies or its name is unregistered between that check and this send — a
+  # race no test can stage deterministically, and one that must not raise in the caller.
   defp deliver(target, payload) do
     case Fanout.resolve(target) do
       nil -> :ok
@@ -1476,13 +1481,14 @@ defmodule DpExchange.Gemini.Fake do
   # under `BTC-USD`. This looked the caller's spelling up verbatim, so only the exact
   # canonical one was found and the others were refused as unlisted, with a venue refusal the
   # venue never sent. A value that is not a string never gets here from a public function:
-  # `Rest.validate_symbol/1` has already refused it as `{:invalid_symbol, value}`, as the real
-  # functions do; this clause only keeps the helper total.
+  # `Rest.validate_symbol/1` (the market reads), `Private.validate_order/2` (`place_order/3`)
+  # or `Private.validate_history_opts/2` (`get_orders/2`'s `:symbol`) has already refused it
+  # as the real functions do. A pass-through clause for non-strings sat here "to keep the
+  # helper total"; no caller could reach it (tick AA coverage audit), and a non-string
+  # reaching this now is a crash, not a value carried on as though it were a symbol.
   defp canonical(symbol) when is_binary(symbol) do
     symbol |> SymbolFormat.to_exchange_symbol() |> SymbolFormat.to_canonical_symbol()
   end
-
-  defp canonical(other), do: other
 
   # A side `Private.validate_order/2` accepted: `:buy`/`:sell` or that word in any case. The
   # order reports the atom, as the venue's `"buy"` becomes one in `Private.to_order/1`.

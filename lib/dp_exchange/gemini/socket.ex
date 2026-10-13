@@ -411,8 +411,16 @@ defmodule DpExchange.Gemini.Socket do
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
+    # **A forwarded `url: nil` is no URL, and takes the default.** `Feed` forwards its own
+    # `opts` with `Keyword.take/2`, so a consumer's `url: nil` (the shape this family's
+    # forwarded opts produce when nothing upstream set it) arrived here present and `nil`.
+    # `Keyword.get_lazy/3` only defaults an ABSENT key, so `nil` went on as the URL and
+    # `URI.parse/1` raised inside `Feed`'s `handle_call`. `Config.opt/3` reads `nil` as absent.
     url =
-      Keyword.get_lazy(opts, :url, fn -> default_url(opts) end)
+      case Config.opt(opts, :url, nil) do
+        nil -> default_url(opts)
+        explicit -> explicit
+      end
 
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
@@ -579,12 +587,19 @@ defmodule DpExchange.Gemini.Socket do
 
     case sys_replace_state_returning(socket, claim) do
       {:ok, _state} ->
+        # Deliberately defensive. Any process speaking `:sys` runs `claim` before it replies,
+        # and the claim's own message reaches this process before that reply, so a real socket
+        # always answers here. A process that acknowledged the replace without running it
+        # recorded nothing, so there is nothing of this call's to give back: `{:ok, []}`,
+        # never a wait.
         receive do
           {^token, result} -> result
         after
           0 -> {:ok, []}
         end
 
+      # A socket that is gone or does not speak `:sys`: nothing was recorded. `send_rpc/4`
+      # reports the dead socket itself.
       :error ->
         {:ok, []}
     end
@@ -614,8 +629,9 @@ defmodule DpExchange.Gemini.Socket do
   defp canonical_symbols(symbols),
     do: Enum.map(symbols, &SymbolFormat.to_canonical_symbol(SymbolFormat.to_exchange_symbol(&1)))
 
-  defp withdraw_ack(_socket, [], _id), do: :ok
-
+  # Only reached when the subscribe frame failed, and `send_rpc/4` never fails an empty
+  # address list (it sends nothing and answers `:ok`), so `_streams` is never `[]` here. The
+  # `[]` clause that used to sit above this one could not be reached and was removed.
   defp withdraw_ack(socket, _streams, id) do
     case GenServer.whereis(socket) do
       pid when is_pid(pid) -> send(pid, {:ack_withdrawn, id})
@@ -933,6 +949,10 @@ defmodule DpExchange.Gemini.Socket do
   # A failure path must not depend on what happens to be in the payload. Only the reason is
   # kept: `:noproc`, `:normal`, and so on.
   defp without_frame({reason, {_module, :call, _args}}), do: reason
+  # Deliberately defensive, and unreachable today: the vendored `send_frame/3` catches every
+  # exit of its `:gen.call` and re-exits in the shape above. Kept so that a change to that
+  # shape is still reported as `{:send_exit, reason}` rather than raising
+  # `FunctionClauseError` inside this `catch` and taking `Feed` down with it.
   defp without_frame(reason), do: reason
 
   # --- callbacks ----------------------------------------------------------
@@ -1359,12 +1379,15 @@ defmodule DpExchange.Gemini.Socket do
   # consumer has no use for. The FIRST connect is not reported. `Feed` subscribes on that
   # one itself once `start_link/1` returns, and a report would only send the same
   # subscription twice. Lossy by contract, like `notify/2`.
-  defp report_reconnected(%{subscriber: subscriber}) when is_pid(subscriber) do
+  #
+  # Sent to whatever `notify/2` sends to. It used to be guarded `is_pid/1` with a silent
+  # `:ok` for anything else, which no caller reached (`Feed` passes `self()`, and
+  # `handle_connect/2` has already sent `:link_up` to the same subscriber before this runs);
+  # the guard only meant a registered-name subscriber would hear `:link_up` and never this.
+  defp report_reconnected(%{subscriber: subscriber}) do
     send(subscriber, {:dp_exchange, :gemini, :reconnected, self()})
     :ok
   end
-
-  defp report_reconnected(_state), do: :ok
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do

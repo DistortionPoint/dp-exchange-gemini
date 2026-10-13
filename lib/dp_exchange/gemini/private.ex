@@ -1171,14 +1171,16 @@ defmodule DpExchange.Gemini.Private do
   # So a 404 whose body is not a JSON object naming a reason, or names `EndpointNotFound`, is
   # an ordinary refusal carrying the venue's words. What the venue's 404 body is for a truly
   # unknown order has not been measured.
+  #
+  # The body is always bytes: `request_opts/1` sends `decode_body: false`, and
+  # `Core.HttpClient` collects every response through its `into:` cap as a binary. A clause
+  # for a non-binary body was never reached and was removed (tick AA).
   defp order_missing_body?(body) when is_binary(body) do
     case Jason.decode(body) do
       {:ok, %{"reason" => reason}} when is_binary(reason) -> reason != "EndpointNotFound"
       _other -> false
     end
   end
-
-  defp order_missing_body?(_other), do: false
 
   defp post(path, params, credentials, opts, subject \\ :other),
     do: post_signed(path, params, credentials, opts, subject, & &1)
@@ -1231,11 +1233,13 @@ defmodule DpExchange.Gemini.Private do
       # rule DV6)**: a 405, 409, 413, 415 or 422 answered to the first attempt is the venue
       # declining this request, so it is a refusal and not a bare error that a placement then
       # reads as "nothing happened". (The 429 is Core's: a retry or a rate-limited error.)
+      #
+      # Nothing else arrives as `{:ok, _}`: with `raw_status: true`, `Core.HttpClient`
+      # answers `{:ok, response}` for a 2xx or a 4xx only (a 429 is always its error, and a
+      # 1xx, 3xx or 5xx is an error string). The fallback clause that quoted any other status
+      # was never reached and was removed (tick AA), here and in the two signed GETs below.
       {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
         {:refused, refusal(body, opts)}
-
-      {:ok, %{status: status, body: body}} ->
-        status_error(status, body)
 
       {:error, reason} ->
         transport_error(reason)
@@ -1354,9 +1358,8 @@ defmodule DpExchange.Gemini.Private do
   # Req's own decoder turns each into an Elixir float, which holds at most 17 significant
   # digits: a longer amount is rounded before this package sees it (measured:
   # `1234.567890123456789` decodes as `1234.567890123457`). `decoded_body/1` decodes with
-  # `floats: :decimals` instead, so every digit survives. Core before 0.3.65 drops the
-  # option; the body then arrives already decoded (a map) and `decoded_body/1` passes it
-  # through, so the digits are only safe once Core carries the option.
+  # `floats: :decimals` instead, so every digit survives. Core before 0.3.65 dropped the
+  # option, which is why `mix.exs` requires `~> 0.3.65`: the body always arrives as bytes.
   defp request_opts(opts) do
     opts
     |> Keyword.take([
@@ -1394,9 +1397,6 @@ defmodule DpExchange.Gemini.Private do
       {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
         {:refused, refusal(body, opts)}
 
-      {:ok, %{status: status, body: body}} ->
-        status_error(status, body)
-
       {:error, reason} ->
         transport_error(reason)
     end
@@ -1427,9 +1427,6 @@ defmodule DpExchange.Gemini.Private do
 
       {:ok, %{status: status, body: body}} when status in 400..499 and status != 429 ->
         {:refused, refusal(body, opts)}
-
-      {:ok, %{status: status, body: body}} ->
-        status_error(status, body)
 
       {:error, reason} ->
         transport_error(reason)
@@ -4355,10 +4352,10 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp staking_time(value) when is_float(value), do: staking_time(trunc(value))
-
   # A fractional epoch (`1667418560.153` seconds) arrives as a `Decimal` under
-  # `floats: :decimals`; truncated to a whole number, then read like any integer epoch.
+  # `floats: :decimals`; truncated to a whole number, then read like any integer epoch. There
+  # is no float clause: every body is decoded by `decoded_body/1` with `floats: :decimals`, so
+  # no JSON number reaches here as a float (a float clause here was never reachable).
   #
   # The exponent is bounded BEFORE any arithmetic: `Decimal.round/3` and `to_integer/1` on
   # `1E+999999999` build an integer of a billion digits. A real epoch has a small exponent.
@@ -5009,8 +5006,11 @@ defmodule DpExchange.Gemini.Private do
   #
   # This helper existed, with that first line on it, while `place_order/3` sent its `amount`
   # and `price` through bare `to_string/1` a few hundred lines above. The generic
-  # `maybe_put/3` and `maybe_param/3` now refuse a `%Decimal{}` before it can reach
-  # `String.Chars` at all, so a new money field cannot repeat it by being added to a map.
+  # `maybe_put/3` and `maybe_param/3` now catch a `%Decimal{}` before it can reach
+  # `String.Chars` and write it here in plain notation, so a new money field cannot repeat it
+  # by being added to a map. **Deliberately defensive:** no field those two are given today is
+  # a `Decimal` (their callers validate to strings, integers and dates first), so these
+  # clauses run only once a future field adds one. They are kept for that day, not deleted.
   defp decimal_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
 
   # --- account administration ---------------------------------------------
@@ -5308,8 +5308,6 @@ defmodule DpExchange.Gemini.Private do
       {:error, _not_json} -> body
     end
   end
-
-  defp refused_token_body(body), do: body
 
   @doc """
   Revokes an access token — `POST /v1/oauth/revokeByToken`.
@@ -5692,8 +5690,10 @@ defmodule DpExchange.Gemini.Private do
       if String.downcase(to_string(name)) == "date", do: value
     end)
     |> case do
+      # Req (`~> 0.7`, through Core) hands headers back as a map of name to a list of string
+      # values, so a found `date` is always a list here; a bare-string clause for the pre-0.4
+      # tuple-list shape was never reachable and has been removed.
       [value | _rest] -> parse_http_date(value)
-      value when is_binary(value) -> parse_http_date(value)
       _other -> {:error, :missing_venue_timestamp}
     end
   end
@@ -5719,17 +5719,13 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp parse_http_date(_other), do: {:error, :missing_venue_timestamp}
-
   defp epoch_ms(nil), do: nil
 
-  # A float reaches here whenever the venue's encoder emits one — JSON has a single
-  # number type, so 1.787936147e12 and 1787936147000 are the same instant. Without this
-  # clause the order simply had no timestamp, silently.
-  defp epoch_ms(value) when is_float(value), do: epoch_ms(trunc(value))
-
-  # Under `floats: :decimals` (see `decoded_body/1`) the same non-integer number is a
-  # `Decimal`; truncated toward zero exactly as the float clause does.
+  # JSON has a single number type, so 1.787936147e12 and 1787936147000 are the same instant.
+  # Under `floats: :decimals` (see `decoded_body/1`, the only decoder of these bodies) the
+  # non-integer form arrives as a `Decimal`, never a float, and is truncated toward zero here.
+  # A float clause used to stand above this for Req's float decoding; with every body decoded
+  # as decimals it could not be reached, and has been removed.
   defp epoch_ms(%Decimal{} = value) do
     if Decimal.nan?(value) or Decimal.inf?(value),
       do: nil,
@@ -5827,7 +5823,9 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp decoded_body(body), do: {:ok, body}
+  # No pass-through clause for an already-decoded body. One existed for Core before 0.3.65,
+  # which dropped `decode_body: false`; `mix.exs` now requires `~> 0.3.65`, which forwards it
+  # to Req, so a 2xx body always arrives here as bytes and that clause was never reached.
 
   defp stringify(params), do: Map.new(params, fn {k, v} -> {to_string(k), v} end)
 
@@ -5847,8 +5845,9 @@ defmodule DpExchange.Gemini.Private do
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  # Bounded like every other branch: `1.0e300` keeps its exponent through `from_float/1`.
-  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> bounded()
+  # No float clause: every value read here comes from a body `decoded_body/1` decoded with
+  # `floats: :decimals`, or from a caller string (`wire_number/1`), so a float never arrives;
+  # one would fall to the `nil` catch-all below rather than be guessed at.
 
   # `Decimal.new/1` raises on a string that is not a number. `Decimal.parse/1`, requiring
   # the whole string be consumed (`{d, ""}`), is what this package already does in
