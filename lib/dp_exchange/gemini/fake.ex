@@ -259,12 +259,24 @@ defmodule DpExchange.Gemini.Fake do
 
     case Keyword.get(range, :start) do
       %DateTime{} = start ->
-        if DateTime.compare(bar.opened_at, start) == :lt,
-          do: %{bar | opened_at: bar_at_or_after(start, timeframe)},
-          else: bar
+        moved_bar(bar, start, timeframe)
 
       _no_start ->
         bar
+    end
+  end
+
+  # The bar moved to the first boundary at or after `start`, when `start` is after it. A
+  # boundary `DateTime` cannot represent (a `:start` in the last bar of year 9999) leaves the
+  # bar where it is, which `Rest.select_candles/4` then drops as before `start`: the answer the
+  # real call gives for a range past every bar, an empty list, where `from_unix!/2` raised in
+  # the caller's process.
+  defp moved_bar(bar, start, timeframe) do
+    with :lt <- DateTime.compare(bar.opened_at, start),
+         {:ok, at} <- bar_at_or_after(start, timeframe) do
+      %{bar | opened_at: at}
+    else
+      _keep -> bar
     end
   end
 
@@ -274,10 +286,10 @@ defmodule DpExchange.Gemini.Fake do
       {:ok, width} ->
         width_us = width * 1_000_000
         start_us = DateTime.to_unix(start, :microsecond)
-        DateTime.from_unix!(div(start_us + width_us - 1, width_us) * width_us, :microsecond)
+        DateTime.from_unix(div(start_us + width_us - 1, width_us) * width_us, :microsecond)
 
       :error ->
-        start
+        {:ok, start}
     end
   end
 

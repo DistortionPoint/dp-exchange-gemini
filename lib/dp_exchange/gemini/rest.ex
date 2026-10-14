@@ -500,7 +500,7 @@ defmodule DpExchange.Gemini.Rest do
       rows
       |> Enum.filter(&priced_pair?/1)
       |> Enum.reduce_while({:ok, %{}}, fn row, {:ok, acc} ->
-        with {:ok, price} <- stated_or_absent(row, "price"),
+        with {:ok, price} <- stated_overview_price(row),
              {:ok, change} <- stated_or_absent(row, "percentChange24h") do
           entry = %{price: price, change_24h: change}
           {:cont, {:ok, Map.put(acc, SymbolFormat.to_canonical_symbol(row["pair"]), entry)}}
@@ -515,18 +515,42 @@ defmodule DpExchange.Gemini.Rest do
   # and this package cannot read — a bad string, NaN, an absurd exponent, a boolean, an
   # object — is not "unstated": it is a malformed reply, and a map entry with a `nil` price
   # standing in for it would read as a symbol the venue has no price for.
-  defp stated_or_absent(body, key) do
-    case Map.get(body, key) do
-      nil ->
-        {:ok, nil}
+  defp stated_or_absent(body, key), do: stated_decimal(Map.get(body, key))
 
-      value ->
-        case decimal(value) do
-          nil -> {:error, :unexpected_response_shape}
-          parsed -> {:ok, parsed}
-        end
+  # A negative last price is not a price; carried into the overview it read as the pair's. Zero
+  # is NOT refused here: the venue lists pairs that have not traded, and one such row would
+  # refuse the whole catalogue overview. Absent stays `nil`.
+  defp stated_overview_price(row) do
+    with {:ok, price} <- stated_or_absent(row, "price") do
+      if price && Decimal.compare(price, 0) == :lt,
+        do: {:error, :unexpected_response_shape},
+        else: {:ok, price}
     end
   end
+
+  defp stated_decimal(nil), do: {:ok, nil}
+
+  defp stated_decimal(value) do
+    case decimal(value) do
+      nil -> {:error, :unexpected_response_shape}
+      parsed -> {:ok, parsed}
+    end
+  end
+
+  # A symbol the venue echoes back: text, or absent (the caller's own is then the one named).
+  # A number or an object in `symbol` went onto the struct as it came.
+  # Text where the contract types a string; absent is `nil`, and any other present value is
+  # unreadable rather than carried into a string field.
+  defp stated_text(nil), do: {:ok, nil}
+  defp stated_text(text) when is_binary(text), do: {:ok, text}
+  defp stated_text(_unreadable), do: {:error, :unexpected_response_shape}
+
+  defp echoed_symbol(%{"symbol" => symbol}, _asked) when is_binary(symbol) and symbol != "",
+    do: {:ok, symbol}
+
+  defp echoed_symbol(%{"symbol" => nil}, asked), do: {:ok, asked}
+  defp echoed_symbol(%{"symbol" => _unreadable}, _asked), do: {:error, :unexpected_response_shape}
+  defp echoed_symbol(_absent, asked), do: {:ok, asked}
 
   # A row that names no pair is skipped. `is_map/1` used to be the whole filter, so a row
   # with no string `pair` reached `SymbolFormat.to_canonical_symbol/1` and raised, taking
@@ -552,9 +576,9 @@ defmodule DpExchange.Gemini.Rest do
          native = SymbolFormat.to_exchange_symbol(symbol),
          {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
          {:ok, body} <- object(raw),
-         {:ok, price_increment} <- stated_or_absent(body, "quote_increment"),
-         {:ok, quantity_increment} <- stated_or_absent(body, "tick_size"),
-         {:ok, min_quantity} <- stated_or_absent(body, "min_order_size"),
+         {:ok, price_increment} <- stated_increment(body, "quote_increment"),
+         {:ok, quantity_increment} <- stated_increment(body, "tick_size"),
+         {:ok, min_quantity} <- stated_minimum(body, "min_order_size"),
          {:ok, status} <- stated_status(body) do
       {:ok,
        %{
@@ -563,6 +587,24 @@ defmodule DpExchange.Gemini.Rest do
          min_quantity: min_quantity,
          status: status
        }}
+    end
+  end
+
+  # An increment is a step a price or size is a multiple of: zero or less is no step, and a
+  # consumer rounding to it divides by it. A minimum is zero or more.
+  defp stated_increment(body, key) do
+    with {:ok, value} <- stated_or_absent(body, key) do
+      if value && Decimal.compare(value, 0) != :gt,
+        do: {:error, :unexpected_response_shape},
+        else: {:ok, value}
+    end
+  end
+
+  defp stated_minimum(body, key) do
+    with {:ok, value} <- stated_or_absent(body, key) do
+      if value && Decimal.compare(value, 0) == :lt,
+        do: {:error, :unexpected_response_shape},
+        else: {:ok, value}
     end
   end
 
@@ -656,12 +698,15 @@ defmodule DpExchange.Gemini.Rest do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
     with {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
-         {:ok, body} <- object(raw) do
+         {:ok, body} <- object(raw),
+         # Text or absent: a number or an object in a currency code went onto the instrument.
+         {:ok, base} <- stated_text(body["base_currency"]),
+         {:ok, quote_currency} <- stated_text(body["quote_currency"]) do
       {:ok,
        DpExchange.Core.Instrument.new(
          symbol: SymbolFormat.to_canonical_symbol(native),
-         base: body["base_currency"],
-         quote: body["quote_currency"],
+         base: base,
+         quote: quote_currency,
          instrument: DpExchange.Core.Instrument.instrument_from(body["product_type"]),
          status: book_status(body["status"])
        )}
@@ -915,7 +960,8 @@ defmodule DpExchange.Gemini.Rest do
   defp to_trade(row, symbol) do
     with {:ok, timestamp} <- trade_time(row),
          {:ok, price} <- required_price(Map.get(row, "price"), :price),
-         {:ok, quantity} <- required_decimal(Map.get(row, "amount"), :quantity) do
+         {:ok, quantity} <- required_quantity(Map.get(row, "amount"), :quantity),
+         {:ok, broken} <- broken_flag(Map.get(row, "broken")) do
       {:ok,
        %Trade{
          id: row |> Map.get("tid") |> to_string_or_nil(),
@@ -925,11 +971,19 @@ defmodule DpExchange.Gemini.Rest do
          price: price,
          quantity: quantity,
          timestamp: timestamp,
-         broken: Map.get(row, "broken", false) == true,
+         broken: broken,
          provider: :gemini
        }}
     end
   end
+
+  # **`broken` is a JSON boolean or absent; anything else refuses the print.** It was read as
+  # `Map.get(row, "broken", false) == true`, so `"true"`, `1` or `"yes"` counted as NOT broken:
+  # a busted trade, which did not stand, passed `reject_broken/2` and sat in the tape as an
+  # ordinary print. A flag this package cannot read is not the venue saying the trade stood.
+  defp broken_flag(flag) when flag in [nil, false], do: {:ok, false}
+  defp broken_flag(true), do: {:ok, true}
+  defp broken_flag(other), do: {:error, {:invalid_broken_flag, other}}
 
   # Milliseconds where the venue sends them, seconds otherwise — the venue publishes both
   # fields and `timestampms` is the precise one.
@@ -1174,12 +1228,17 @@ defmodule DpExchange.Gemini.Rest do
   def get_funding(symbol, opts) do
     with :ok <- validate_symbol(symbol),
          {:ok, raw} <- get_body("/v1/fundingamount/#{segment(symbol)}", opts),
-         {:ok, body} <- object(raw) do
+         {:ok, body} <- object(raw),
+         {:ok, echoed} <- echoed_symbol(body, symbol),
+         # A figure the venue SENT and this package cannot read refuses the reply: `nil` is
+         # "the venue stated none", and a funding amount of `nil` reads as nothing to pay.
+         {:ok, amount} <- stated_decimal(body["amount"] || body["fundingAmount"]),
+         {:ok, estimated} <- stated_or_absent(body, "estimatedFundingAmount") do
       {:ok,
        %Funding{
-         symbol: body["symbol"] || symbol,
-         amount: decimal(body["amount"] || body["fundingAmount"]),
-         estimated_amount: decimal(body["estimatedFundingAmount"]),
+         symbol: echoed,
+         amount: amount,
+         estimated_amount: estimated,
          funded_at: epoch_ms(body["fundingTimestampMilliSecs"]),
          next_funding_at: epoch_ms(body["nextFundingTimestamp"]),
          provider: :gemini
@@ -1231,15 +1290,21 @@ defmodule DpExchange.Gemini.Rest do
   def get_contract_stats(symbol, opts) do
     with :ok <- validate_symbol(symbol),
          {:ok, raw} <- get_body("/v1/riskstats/#{segment(symbol)}", opts),
-         {:ok, body} <- object(raw) do
+         {:ok, body} <- object(raw),
+         {:ok, echoed} <- echoed_symbol(body, symbol),
+         {:ok, product_type} <- stated_text(body["product_type"]),
+         {:ok, mark} <- stated_or_absent(body, "mark_price"),
+         {:ok, index} <- stated_or_absent(body, "index_price"),
+         {:ok, interest} <- stated_or_absent(body, "open_interest"),
+         {:ok, notional} <- stated_or_absent(body, "open_interest_notional") do
       {:ok,
        %ContractStats{
-         symbol: body["symbol"] || symbol,
-         product_type: body["product_type"],
-         mark_price: decimal(body["mark_price"]),
-         index_price: decimal(body["index_price"]),
-         open_interest: decimal(body["open_interest"]),
-         open_interest_notional: decimal(body["open_interest_notional"]),
+         symbol: echoed,
+         product_type: product_type,
+         mark_price: mark,
+         index_price: index,
+         open_interest: interest,
+         open_interest_notional: notional,
          venue_time: nil,
          provider: :gemini
        }}
@@ -1599,10 +1664,18 @@ defmodule DpExchange.Gemini.Rest do
       else: {:error, :unexpected_response_shape}
   end
 
+  # A level is a price above zero and a size of zero or more. A price of `0` or `-5` sorted into
+  # the book and sat there as a level, and a negative amount carried through as a real size.
   defp readable_book_row?(%{"price" => price, "amount" => amount}),
-    do: decimal(price) != nil and decimal(amount) != nil
+    do: book_price?(decimal(price)) and book_size?(decimal(amount))
 
   defp readable_book_row?(_row), do: false
+
+  defp book_price?(nil), do: false
+  defp book_price?(%Decimal{} = value), do: Decimal.compare(value, 0) == :gt
+
+  defp book_size?(nil), do: false
+  defp book_size?(%Decimal{} = value), do: Decimal.compare(value, 0) != :lt
 
   defp levels(nil, _direction), do: []
 
@@ -1702,6 +1775,8 @@ defmodule DpExchange.Gemini.Rest do
          {:ok, high} <- required_price(high, :high),
          {:ok, low} <- required_price(low, :low),
          {:ok, close} <- required_price(close, :close),
+         :ok <- consistent_range(low, high, opened_at),
+         {:ok, volume} <- candle_volume(volume),
          :ok <- aligned_candle(opened_at, time_ms, timeframe) do
       {:ok,
        %Candle{
@@ -1712,7 +1787,7 @@ defmodule DpExchange.Gemini.Rest do
          high: high,
          low: low,
          close: close,
-         volume: decimal(volume),
+         volume: volume,
          provider: :gemini
        }}
     end
@@ -1722,6 +1797,32 @@ defmodule DpExchange.Gemini.Rest do
   # seventh field — or one fewer — raised `FunctionClauseError` out of a `GenServer`'s own
   # fetch rather than returning an error the caller could act on.
   defp row_to_candle(_row, _symbol, _timeframe), do: {:error, :unexpected_response_shape}
+
+  # A bar whose low is above its high is not a bar. Every price in it parses and is positive,
+  # which is why nothing else refused it; a consumer computing a range from it gets a negative.
+  defp consistent_range(low, high, opened_at) do
+    if Decimal.compare(low, high) == :gt,
+      do: {:error, {:inconsistent_candle, opened_at}},
+      else: :ok
+  end
+
+  # `volume` is not an enforced key, so an ABSENT one is `nil`. One the venue SENT and this
+  # package cannot read (a string, NaN, an absurd exponent) or that is negative is a malformed
+  # row: `nil` would say the venue stated none, and a negative would sum into a series.
+  defp candle_volume(nil), do: {:ok, nil}
+
+  defp candle_volume(value) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, :volume, value}}
+      parsed -> non_negative_volume(parsed, value)
+    end
+  end
+
+  defp non_negative_volume(parsed, raw) do
+    if Decimal.compare(parsed, 0) == :lt,
+      do: {:error, {:negative_volume, raw}},
+      else: {:ok, parsed}
+  end
 
   # One unreadable row refuses the whole series rather than leaving a gap in it. A candle
   # list with a bar silently missing reads as "the venue published nothing for that minute",
@@ -1934,6 +2035,16 @@ defmodule DpExchange.Gemini.Rest do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
+    end
+  end
+
+  # A traded size of zero or less is not a print: nothing changed hands, and a negative one
+  # carried through reads as a real quantity on the tape.
+  defp required_quantity(value, field) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.compare(parsed, 0) == :gt,
+        do: {:ok, parsed},
+        else: {:error, {:non_positive_quantity, field, value}}
     end
   end
 

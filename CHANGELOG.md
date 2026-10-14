@@ -20,6 +20,48 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Decoder robustness against hostile or malformed venue payloads (tick AC). Every decoder in
+`Rest`, `Private`, `WsDecode` and `Socket` was read for a raise, a stall, or a plausible value
+standing in for an unreadable one.
+
+- **`Auth`'s nonce-counter wait is measured on the clock, not counted in sleeps.** A caller that
+  found the creation lock taken waited "5 s" by adding 1 per `Process.sleep(1)`, but each sleep
+  is a lower bound and took several milliseconds under load, so the wait ran past 30 s (seen
+  under the full cover gate) with a signing caller blocked for all of it. It now waits until a
+  monotonic deadline 5 s out.
+- **Hardening: `Private.epoch_ms/1` bounds a `Decimal` timestamp's exponent before any
+  arithmetic**, as `staking_time/1` and `Rest.candle_time/1` already did. It only refused NaN and
+  Infinity, so under `decimal ~> 2.0` (which this package still allows) a `timestampms` of
+  `1e999999999` reached `Decimal.round/3` and `to_integer/1` and built an integer of a billion
+  digits in the caller's process (fills, orders, transfers). Decimal 3 refuses that exponent
+  while decoding, so this is not reproducible in this repository's lock.
+- **A socket `E` in the wrong unit became a valid 1970 time.** Any positive integer was read as
+  nanoseconds, so milliseconds or microseconds dated a trade or delta to January 1970. `E` must
+  now fall between 10^17 and 5 * 10^18 ns; outside it the trade or delta is refused, and a
+  bookTicker's `venue_time` is `nil`.
+- **Non-positive and negative sizes and prices were carried as real values.** A WebSocket or REST
+  trade with a quantity of zero or less, a book or depth level priced at or below zero or sized
+  below zero, a bookTicker size below zero and a fill priced or sized at zero or less are refused.
+  A quantity of zero on a depth diff is still the venue's removal.
+- **`broken` and the order flags are read strictly.** A REST trade whose `broken` is not a boolean
+  is refused (`"true"` was counted as a trade that stood). An order whose `is_live` or
+  `is_cancelled` is not a boolean is refused (`:strict` reads; `place_order/3` stays lenient): a
+  string `"true"` reported a resting order as pending or filled.
+- **Present and unreadable figures refuse the reply instead of becoming `nil`:** a candle's
+  `volume` (also negative, and a bar whose low is above its high), `get_funding/2` and
+  `get_contract_stats/2` amounts, a position's prices and P&L, a non-text `symbol`, `product_type`
+  or currency code, a negative market-overview price, a non-positive quantization increment or
+  negative minimum, and a non-positive FX rate. An absent field is still `nil`.
+- **A snapshot or diff whose update id is not a whole number is refused.** `lastUpdateId` and `u`
+  were copied onto `sequence` whatever they held (absent is still `nil`).
+- **Notices quote the venue's `s` bounded.** A depth or trade frame with a map or a megabyte
+  string in `s` put it into the notice's `details` whole.
+- **`WsDecode.to_top_of_book/3` and `to_order_book_delta/2` refuse a frame that is not an
+  object** (they raised on a list or string), and `WsChannels.address/2` refuses a symbol that is
+  not text (it raised on a map).
+- **`Fake.get_historical_prices/4` no longer raises for a `:start` in the last bar of year
+  9999**; it answers an empty list as the real call does for a range past every bar.
+
 ## [0.2.137] - 2026-10-14
 
 - **A subscribe that failed during a reconnect could land on the new connection unsubscribed

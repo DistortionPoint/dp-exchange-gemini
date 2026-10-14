@@ -533,6 +533,8 @@ defmodule DpExchange.Gemini.Auth do
     end
   end
 
+  @counter_wait_ms 5_000
+
   defp create_counter(key) do
     # Re-checked INSIDE the lock: every caller that queued behind the winner arrives here
     # with its own `nil` reading from before the lock, and creating a second ref at this
@@ -562,7 +564,7 @@ defmodule DpExchange.Gemini.Auth do
            0
          ) do
       :aborted ->
-        await_counter(key, 0)
+        await_counter(key, System.monotonic_time(:millisecond) + @counter_wait_ms)
 
       ref ->
         ref
@@ -573,16 +575,21 @@ defmodule DpExchange.Gemini.Auth do
   # within milliseconds, so this polls every millisecond. After `@counter_wait_ms` with the
   # key still absent, the holder died before storing it (its lock went with it), and this
   # caller tries to create the counter itself.
-  @counter_wait_ms 5_000
-
-  defp await_counter(key, waited) do
+  #
+  # **The wait is measured on the clock, not counted in sleeps.** It used to add 1 per
+  # `Process.sleep(1)`, but a 1 ms sleep is a lower bound: under load each one took several
+  # milliseconds, so the "5 s" wait ran past 30 s (seen 2026-10-14 under the full cover gate),
+  # with a signing caller blocked for all of it. (`@counter_wait_ms` is set above
+  # `create_counter/1`, which computes the deadline.)
+  defp await_counter(key, deadline) do
     case :persistent_term.get(key, nil) do
-      nil when waited < @counter_wait_ms ->
-        Process.sleep(1)
-        await_counter(key, waited + 1)
-
       nil ->
-        create_counter(key)
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(1)
+          await_counter(key, deadline)
+        else
+          create_counter(key)
+        end
 
       ref ->
         ref

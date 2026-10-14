@@ -1564,7 +1564,8 @@ defmodule DpExchange.Gemini.Private do
          {:ok, stop_price} <- order_decimal(body, "stop_price", mode),
          {:ok, filled} <- order_decimal(body, "executed_amount", mode),
          {:ok, average} <- order_average(body, mode),
-         {:ok, created_at} <- order_time(body, mode) do
+         {:ok, created_at} <- order_time(body, mode),
+         :ok <- order_flags(body, mode) do
       {:ok,
        %Order{
          id: order_id(body["order_id"]),
@@ -1587,6 +1588,20 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp to_order(_body, _mode), do: {:error, :unexpected_response_shape}
+
+  # **`is_live` and `is_cancelled` are JSON booleans, or absent.** `status_of/1` matches only a
+  # literal `true`, so `"is_live": "true"` (or `1`) fell through to `:pending` or `:filled` and
+  # a resting order was reported as one that was not on the book, and `"is_cancelled": "true"`
+  # reported a cancelled order as live or filled. A flag this package cannot read refuses the
+  # row (`:strict`). `place_order/3` reads `:lenient` because its order is already live at the
+  # venue; an error there would read as "nothing was placed" and invite a second one.
+  defp order_flags(_body, :lenient), do: :ok
+
+  defp order_flags(body, :strict) do
+    if Enum.all?(["is_live", "is_cancelled"], &(Map.get(body, &1) in [nil, true, false])),
+      do: :ok,
+      else: {:error, :unexpected_response_shape}
+  end
 
   defp order_decimal(body, key, mode) do
     case Map.get(body, key) do
@@ -1887,8 +1902,8 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, order_id} <- required_id(row["order_id"], :order_id),
          {:ok, symbol} <- fill_symbol(row["symbol"], requested_symbol),
          {:ok, side} <- required_side(row["type"]),
-         {:ok, quantity} <- required_decimal(row["amount"], :quantity),
-         {:ok, price} <- required_decimal(row["price"], :price),
+         {:ok, quantity} <- required_positive(row["amount"], :quantity, :non_positive_quantity),
+         {:ok, price} <- required_positive(row["price"], :price, :non_positive_price),
          {:ok, timestamp} <- required_time(row["timestampms"]),
          # A fee the venue SENT and this package cannot read is a refusal, not `nil`: `nil`
          # reads as "the venue stated no fee", and a reconciliation sums it as zero.
@@ -1979,6 +1994,16 @@ defmodule DpExchange.Gemini.Private do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
+    end
+  end
+
+  # An execution of zero or less is not one: no size changed hands and no price was struck. They
+  # parsed, so a fill of `-1` at `0` was a record a consumer reconciled money against.
+  defp required_positive(value, field, tag) do
+    with {:ok, parsed} <- required_decimal(value, field) do
+      if Decimal.compare(parsed, 0) == :gt,
+        do: {:ok, parsed},
+        else: {:error, {tag, field, value}}
     end
   end
 
@@ -2601,7 +2626,7 @@ defmodule DpExchange.Gemini.Private do
   def validate_fx_pair(other), do: {:error, {:unsupported_fx_pair, inspect(other)}}
 
   defp to_fx_rate(%{"rate" => rate} = body, native, _requested_at) do
-    with {:ok, parsed_rate} <- required_decimal(rate, :rate),
+    with {:ok, parsed_rate} <- required_positive(rate, :rate, :non_positive_rate),
          {:ok, as_of} <- fx_as_of(body["asOf"]) do
       {:ok,
        %FxRate{
@@ -2790,7 +2815,9 @@ defmodule DpExchange.Gemini.Private do
   defp to_approved_address(row, network, address) do
     %ApprovedAddress{
       address: address,
-      network: row["network"] || network,
+      # Text, as the field is typed: a number or an object the venue put in `network` was carried
+      # onto the entry whole.
+      network: text_or_nil(row["network"]) || network,
       status: approval_status(row["status"]),
       asset: nil,
       label: text_or_nil(row["label"]),
@@ -2865,7 +2892,7 @@ defmodule DpExchange.Gemini.Private do
         {:ok,
          %{
            fee: fee,
-           fee_currency: body["currency"] || body["feeCurrency"],
+           fee_currency: text_or_nil(body["currency"] || body["feeCurrency"]),
            network: network,
            address: address
          }}
@@ -4551,11 +4578,8 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, symbol} <- required_position_symbol(position_symbol(row["symbol"])),
          {:ok, quantity} <- required_decimal(row["quantity"], :quantity) do
       case position_side(quantity) do
-        nil ->
-          :flat
-
-        side ->
-          {:ok, position_struct(row, at, symbol, side, position_size(quantity))}
+        nil -> :flat
+        side -> position_struct(row, at, symbol, side, position_size(quantity))
       end
     end
   end
@@ -4589,23 +4613,32 @@ defmodule DpExchange.Gemini.Private do
   defp required_position_symbol(symbol), do: {:ok, symbol}
 
   defp position_struct(row, at, symbol, side, quantity) do
-    %Position{
-      symbol: symbol,
-      side: side,
-      quantity: quantity,
-      instrument_type: position_instrument(row["instrument_type"]),
-      average_cost: decimal(row["average_cost"]),
-      mark_price: decimal(row["mark_price"]),
-      # Signed as the venue sent it: this is a value, not a magnitude with a side beside it.
-      notional_value: decimal(row["notional_value"]),
-      realised_pnl: decimal(row["realised_pnl"]),
-      unrealised_pnl: decimal(row["unrealised_pnl"]),
-      # Not published on this endpoint. `nil` is "not stated", never "no liquidation risk".
-      liquidation_price: nil,
-      leverage: nil,
-      venue_time: at,
-      provider: :gemini
-    }
+    # A figure the venue SENT and this package cannot read refuses the row: `nil` is "not
+    # stated", and a mark price or a P&L of `nil` for a held position read as nothing to report.
+    with {:ok, average_cost} <- order_decimal(row, "average_cost", :strict),
+         {:ok, mark_price} <- order_decimal(row, "mark_price", :strict),
+         {:ok, notional} <- order_decimal(row, "notional_value", :strict),
+         {:ok, realised} <- order_decimal(row, "realised_pnl", :strict),
+         {:ok, unrealised} <- order_decimal(row, "unrealised_pnl", :strict) do
+      {:ok,
+       %Position{
+         symbol: symbol,
+         side: side,
+         quantity: quantity,
+         instrument_type: position_instrument(row["instrument_type"]),
+         average_cost: average_cost,
+         mark_price: mark_price,
+         # Signed as the venue sent it: this is a value, not a magnitude with a side beside it.
+         notional_value: notional,
+         realised_pnl: realised,
+         unrealised_pnl: unrealised,
+         # Not published on this endpoint. `nil` is "not stated", never "no liquidation risk".
+         liquidation_price: nil,
+         leverage: nil,
+         venue_time: at,
+         provider: :gemini
+       }}
+    end
   end
 
   # The venue's own case, whatever it is — `to_canonical_symbol/1` uppercases (and, for a
@@ -5789,11 +5822,17 @@ defmodule DpExchange.Gemini.Private do
   # non-integer form arrives as a `Decimal`, never a float, and is truncated toward zero here.
   # A float clause used to stand above this for Req's float decoding; with every body decoded
   # as decimals it could not be reached, and has been removed.
-  defp epoch_ms(%Decimal{} = value) do
-    if Decimal.nan?(value) or Decimal.inf?(value),
-      do: nil,
-      else: value |> Decimal.round(0, :down) |> Decimal.to_integer() |> epoch_ms()
+  #
+  # The exponent is bounded BEFORE any arithmetic, as `staking_time/1` bounds it:
+  # `Decimal.round/3` and `to_integer/1` on `1E+999999999` build an integer of a billion digits
+  # in the caller's process. This clause only checked for NaN and Infinity, so one such
+  # `timestampms` on a fill, an order or a transfer stalled the read.
+  defp epoch_ms(%Decimal{coef: coef, exp: exp} = value)
+       when is_integer(coef) and exp >= -30 and exp <= 18 do
+    value |> Decimal.round(0, :down) |> Decimal.to_integer() |> epoch_ms()
   end
+
+  defp epoch_ms(%Decimal{}), do: nil
 
   # Positive only. Zero and negatives are not a venue instant: they dated a fill to 1970 and
   # slipped past `required_time/1`'s refusal, which waits for the `nil` this now answers.

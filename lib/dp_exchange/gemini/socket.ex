@@ -1526,7 +1526,7 @@ defmodule DpExchange.Gemini.Socket do
         notify(
           state,
           Notice.new(:degraded, :gemini,
-            details: %{reason: "undecodable depth update", symbol: message["s"]}
+            details: %{reason: "undecodable depth update", symbol: noticed(message["s"])}
           )
         )
 
@@ -1543,7 +1543,7 @@ defmodule DpExchange.Gemini.Socket do
     notify(
       state,
       Notice.new(:degraded, :gemini,
-        details: %{reason: "undecodable depth update", symbol: message["s"]}
+        details: %{reason: "undecodable depth update", symbol: noticed(message["s"])}
       )
     )
 
@@ -1677,7 +1677,7 @@ defmodule DpExchange.Gemini.Socket do
       Notice.new(:data_quality, :gemini,
         details: %{
           reason: "undecodable book ticker",
-          symbol: inspect(message["s"], limit: 5, printable_limit: 64)
+          symbol: noticed(message["s"])
         }
       )
     )
@@ -1686,6 +1686,14 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   defp handle_message(_other, state), do: {:ok, state}
+
+  # What the venue sent in `s`, quoted bounded for a notice. A frame names whatever it likes
+  # there, and a map or a megabyte string put into `details` whole is delivered to every
+  # subscriber and written to every log that prints the notice. Absent stays `nil`; text is cut
+  # at 64 characters; anything else is shown as `inspect/2` shows it, bounded.
+  defp noticed(nil), do: nil
+  defp noticed(text) when is_binary(text), do: String.slice(text, 0, 64)
+  defp noticed(other), do: inspect(other, limit: 5, printable_limit: 64)
 
   # A frame ending at or before what was already applied is a replay, not news. Applied, it
   # re-applied old changes and set `last_depth_update` BACK, so the frame after it was
@@ -1901,7 +1909,7 @@ defmodule DpExchange.Gemini.Socket do
         notify(
           state,
           Notice.new(:data_quality, :gemini,
-            details: %{reason: "undecodable trade", symbol: message["s"]}
+            details: %{reason: "undecodable trade", symbol: noticed(message["s"])}
           )
         )
 

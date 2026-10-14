@@ -101,8 +101,13 @@ defmodule DpExchange.Gemini.WsChannels do
       is_binary(symbol) and String.trim(symbol) == "" ->
         {:error, {:invalid_symbol, symbol}}
 
+      # A symbol is text. `to_string/1` raised `Protocol.UndefinedError` on a map or a tuple, and
+      # wrote `"btcusd"` for the atom `:btcusd`, a spelling nobody asked for.
+      not is_nil(symbol) and not is_binary(symbol) ->
+        {:error, {:invalid_symbol, symbol}}
+
       true ->
-        {:ok, String.replace(template, "{symbol}", to_string(symbol))}
+        {:ok, String.replace(template, "{symbol}", symbol || "")}
     end
   end
 
