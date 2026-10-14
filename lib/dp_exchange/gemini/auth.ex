@@ -98,6 +98,22 @@ defmodule DpExchange.Gemini.Auth do
   Reported by a consumer on dp-exchange-gemini issue #1, who reached the diagnosis using the
   venue `message` that same issue restored.
 
+  ## Ordered at the draw, not at the venue
+
+  Two processes drawing from `nonce(:incremental)` (or `_us`/`_ns`) get different, ordered
+  values, and the compare-and-exchange loop makes that hold across any interleaving of the
+  draws themselves. It cannot order what happens AFTER the draw: the process holding the
+  smaller nonce can be descheduled, or lose a connection race, and its request reach the
+  venue behind the larger one. The venue then refuses it as `InvalidNonce` ("has not
+  increased since your last call"), which reads exactly like a wrong mode, though the
+  request took no effect. Nothing here serialises signing with sending, because holding a
+  lock across an HTTP round trip would cap every incremental key at one in-flight request.
+  Instead every signed private call answered `InvalidNonce` under an incremental mode is
+  signed once more with a fresh nonce and sent again (`DpExchange.Gemini.Private`), which is
+  safe for a write too, because the venue acted on nothing. A second `:invalid_nonce` is
+  returned as the venue said it. Under `:time_based` nothing is re-sent: there the refusal
+  means clock skew, and a second signing in the same second carries the same nonce.
+
   ## When a key is out of reach, and the one bounded way back
 
   The section above explains why this module will not escalate. It did not say, in one

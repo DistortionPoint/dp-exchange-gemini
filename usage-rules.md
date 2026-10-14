@@ -470,6 +470,14 @@ This changed in response to dp-exchange-gemini issue #1, where 164 log lines rea
 today, add the two-tuple clause: a reason this package recognises is no longer less
 informative than one it does not.
 
+**Under an incremental `nonce_mode:`, an `InvalidNonce` is re-signed once before you see it.**
+Two of your processes draw ordered nonces, but the smaller can still reach the venue second,
+and the venue refuses it without acting on it. Every signed private call answered that way is
+signed again with a fresh nonce and sent once more, which is safe for a write because the
+refused request did nothing. A `:invalid_nonce` that reaches you has therefore been refused
+twice and is worth reading the sentence of. Under `:time_based` (the default) nothing is
+re-sent: there the refusal means clock skew.
+
 
 
 #### "Has not increased" while you are sending epoch seconds means the key wants `:incremental`
@@ -1495,6 +1503,11 @@ feed is too busy to answer within its call budget, and `{:error, {:feed_exited, 
 when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an empty map in
 all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
+
+**`:feed_timeout` means "no answer", not "not applied".** The request is already in the
+feed's mailbox and is applied when the feed reaches it. Retrying is safe because each of
+these calls is idempotent (add, remove or replace a symbol set, applied in order), and
+`coverage/1` shows what is being delivered once the feed answers.
 
 ## `:websocket_url` in application config replaces the default socket endpoint
 

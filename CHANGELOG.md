@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **A subscribe that failed during a reconnect could land on the new connection unsubscribed
+  from nothing.** Its frame waited in the sleeping socket's mailbox and was written to the next
+  connection, while the reconnect cleared the unsubscribe the failure had queued. The venue
+  streamed a symbol nobody wanted until the next reconnect. Those unsubscribes now survive the
+  reconnect and are sent right behind the late frame.
+- **Under an incremental `nonce_mode:`, an `InvalidNonce` refusal is re-signed once.** Two
+  processes draw ordered nonces, but the smaller can reach the venue second, and the venue
+  refuses it without acting on it. Every signed private call answered that way is signed again
+  with a fresh nonce and sent once more (safe for a write: nothing was done). A withdrawal's
+  attempt count does not include the refused attempt, so a later refusal stays a refusal.
+  Nothing is re-sent under `:time_based`, where the refusal means clock skew.
+- **Docs:** `{:error, :feed_timeout}` is documented as "no answer", not "not applied": the
+  request is still applied when the feed reaches it, and the streaming calls are idempotent.
+
 ## [0.2.136] - 2026-10-13
 
 - **A candle at or before the epoch was dated 1970.** A bar time of `0` or below became a

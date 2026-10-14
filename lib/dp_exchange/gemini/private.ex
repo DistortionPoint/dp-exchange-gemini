@@ -1188,9 +1188,58 @@ defmodule DpExchange.Gemini.Private do
   # `wrap` is applied to the per-attempt signer, so a caller that must know how many attempts
   # actually left the process (`withdraw/6`, which retries a keyed write) can count them.
   defp post_signed(path, params, credentials, opts, subject, wrap) do
-    with :ok <- https_only(base_url(opts), :base_url),
-         do: post_signed_checked(path, params, credentials, opts, subject, wrap)
+    with :ok <- https_only(base_url(opts), :base_url) do
+      once_more_on_reordered_nonce(
+        fn -> post_signed_checked(path, params, credentials, opts, subject, wrap) end,
+        opts
+      )
+    end
   end
+
+  # **An `InvalidNonce` refusal is answered by signing once more, with a fresh nonce.** Two
+  # processes draw ordered nonces (`Auth`), but the one holding the smaller can reach the venue
+  # second: interleaving (1) A draws n, (2) B draws n + 1, (3) B's request lands, (4) A's lands
+  # and is refused, "has not increased since your last call". The venue checks the nonce before
+  # it acts, so the refused request took no effect, and a write is safe to send again: this
+  # is not the transport retry `post_once/4` rules out, which re-sends a request that may have
+  # landed. Once only. A key whose mark is out of reach is refused as
+  # `{:nonce_mark_out_of_reach, _}`, not `:invalid_nonce`, and is not retried here; neither is a
+  # second `InvalidNonce`, which is a real one and is returned as the venue said it.
+  #
+  # **Incremental modes only.** Under `:time_based` (the default) the nonce is whole seconds
+  # and the venue checks it against a window around its own clock, not against the previous
+  # one, so an `InvalidNonce` there is clock skew rather than reordering, and signing again in
+  # the same second would send the very same nonce.
+  #
+  # `opts[:on_nonce_resign]` runs between the two: `withdraw/6` counts the attempts that left
+  # the process to tell a refusal of its first attempt from one answered to a repeat, and the
+  # refused attempt here provably did nothing, so it is not one of them.
+  defp once_more_on_reordered_nonce(send, opts) do
+    case send.() do
+      {:refused, reason} = refused ->
+        if reordered_nonce?(reason) and incremental_mode?(Keyword.get(opts, :nonce_mode)),
+          do: resend(send, Keyword.get(opts, :on_nonce_resign, fn -> :ok end)),
+          else: refused
+
+      other ->
+        other
+    end
+  end
+
+  defp incremental_mode?(mode) when mode in [:incremental, :incremental_us, :incremental_ns],
+    do: true
+
+  defp incremental_mode?({:incremental_ns, _scale}), do: true
+  defp incremental_mode?(_time_based_or_other), do: false
+
+  defp resend(send, before_resign) do
+    before_resign.()
+    send.()
+  end
+
+  defp reordered_nonce?(:invalid_nonce), do: true
+  defp reordered_nonce?({:invalid_nonce, _message}), do: true
+  defp reordered_nonce?(_other), do: false
 
   # **An authenticated request is never sent over cleartext.** `:base_url` (and `:auth_url`
   # for the token refresh) is the consumer-overridable test/proxy seam, and every private call
@@ -1381,7 +1430,11 @@ defmodule DpExchange.Gemini.Private do
   # rather than a parameter one. One string, used in both places, is what keeps them equal.
   defp signed_get(path, credentials, opts) do
     with :ok <- https_only(base_url(opts), :base_url),
-         do: signed_get_checked(path, credentials, opts)
+         do:
+           once_more_on_reordered_nonce(
+             fn -> signed_get_checked(path, credentials, opts) end,
+             opts
+           )
   end
 
   defp signed_get_checked(path, credentials, opts) do
@@ -1413,7 +1466,11 @@ defmodule DpExchange.Gemini.Private do
 
   defp signed_get_bytes(path, credentials, opts) do
     with :ok <- https_only(base_url(opts), :base_url),
-         do: signed_get_bytes_checked(path, credentials, opts)
+         do:
+           once_more_on_reordered_nonce(
+             fn -> signed_get_bytes_checked(path, credentials, opts) end,
+             opts
+           )
   end
 
   defp signed_get_bytes_checked(path, credentials, opts) do
@@ -2959,7 +3016,13 @@ defmodule DpExchange.Gemini.Private do
       # RETRY (a duplicate `clientTransferId`) is not read as a refusal of the first attempt.
       with {:ok, body, _headers} <-
              "/v2/withdraw/#{network_segment}/#{segment(ticker)}"
-             |> post_signed(params, credentials, opts, :other, &counting(&1, calls))
+             |> post_signed(
+               params,
+               credentials,
+               Keyword.put(opts, :on_nonce_resign, fn -> :atomics.put(calls, 1, 0) end),
+               :other,
+               &counting(&1, calls)
+             )
              |> withdraw_outcome(transfer_id, calls, opts) do
         # The amount and memo as the contract types them (`Decimal`, string), not as the caller
         # held them: an integer or a string amount and an integer destination tag came back

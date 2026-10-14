@@ -511,6 +511,10 @@ defmodule DpExchange.Gemini.Feed do
        # Symbols whose wire unsubscribe failed, retried on the next resubscribe tick. Cleared
        # by any new connection, which carries no subscriptions. See `retry_unsubscribe/2`.
        unsubscribe_pending: MapSet.new(),
+       # The subset of `unsubscribe_pending` queued by a FAILED SUBSCRIBE (`queue_unsubscribe/2`):
+       # symbols whose subscribe frame may still land. A `:reconnected` keeps these pending and
+       # drops the rest. See `handle_info({:dp_exchange, :gemini, :reconnected, socket}, _)`.
+       late_subscribes: MapSet.new(),
        # True between the socket's `:link_down` and its `:reconnected`. Nothing is sent to it
        # meanwhile — see the moduledoc's "A socket that is reconnecting is not sent to".
        link_down?: false,
@@ -738,8 +742,30 @@ defmodule DpExchange.Gemini.Feed do
   # timer tick, but the timer is NOT re-armed here: re-sending `:resubscribe` would start
   # a second timer chain beside the first. A report from a socket that is no longer
   # `state.socket` falls through to the catch-all.
+  #
+  # **A subscribe that failed on the old connection can still land on the new one.** Found by
+  # reading the orderings (tick AB). The interleaving, step by step:
+  #
+  #   1. The socket's connection drops and it sleeps its backoff inside `handle_disconnect/2`,
+  #      reading no messages. Its `:link_down` is queued behind whatever this process is doing.
+  #   2. A `subscribe/3` for ETH-USD sends its frame (`Socket.subscribe/3`). The socket reads
+  #      nothing, so the `send_frame` call times out after 5s: `{:error, :send_timeout}`. The
+  #      call's message is still in the socket's mailbox. The registration is undone and
+  #      ETH-USD is queued for a wire unsubscribe (`queue_unsubscribe/2`).
+  #   3. The socket reconnects. `handle_connect/2` reports `:reconnected` FIRST, then the loop
+  #      reads its mailbox and sends the stale subscribe frame on the NEW connection.
+  #   4. This clause used to wipe `unsubscribe_pending` ("a new connection carries no
+  #      subscriptions"), true of the old connection and false of this frame. The venue then
+  #      streamed ETH-USD to a feed that no longer wanted it, for the life of the connection,
+  #      and nothing ever unsubscribed it (every payload was dropped as unwanted).
+  #
+  # So the symbols queued by a failed SUBSCRIBE stay pending, and `resubscribe/1` below sends
+  # their unsubscribe (behind the stale frame, which is older in the socket's mailbox). The
+  # symbols queued by a failed UNSUBSCRIBE are still dropped: the old connection's
+  # subscription died with it, and a stale unsubscribe landing on the new one is harmless.
   def handle_info({:dp_exchange, :gemini, :reconnected, socket}, %{socket: socket} = state) do
-    {:noreply, resubscribe(%{state | link_down?: false, unsubscribe_pending: MapSet.new()})}
+    pending = MapSet.intersection(state.unsubscribe_pending, late_subscribes(state))
+    {:noreply, resubscribe(%{state | link_down?: false, unsubscribe_pending: pending})}
   end
 
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
@@ -958,6 +984,9 @@ defmodule DpExchange.Gemini.Feed do
         unsubscribe_pending: MapSet.new()
     }
 
+    # A crashed socket's mailbox died with it: no stale frame can land on its replacement.
+    state = Map.put(state, :late_subscribes, MapSet.new())
+
     notify_socket_crashed(state, reason)
 
     # `resubscribe/1` — the identical function the periodic timer calls — reconnects and
@@ -1066,7 +1095,9 @@ defmodule DpExchange.Gemini.Feed do
         %{state | unsubscribe_pending: pending}
 
       unsubscribe_channels(socket, MapSet.to_list(pending), state) == :ok ->
-        %{state | unsubscribe_pending: MapSet.new()}
+        state
+        |> Map.put(:late_subscribes, MapSet.new())
+        |> Map.put(:unsubscribe_pending, MapSet.new())
 
       true ->
         %{state | unsubscribe_pending: pending}
@@ -1189,8 +1220,15 @@ defmodule DpExchange.Gemini.Feed do
   # "the frame may well have landed"), so the venue may be streaming symbols nobody wants. The
   # next resubscribe tick unsubscribes them, unless they are wanted again by then.
   defp queue_unsubscribe(state, symbols) do
-    %{state | unsubscribe_pending: MapSet.union(state.unsubscribe_pending, MapSet.new(symbols))}
+    new = MapSet.new(symbols)
+
+    state
+    |> Map.put(:unsubscribe_pending, MapSet.union(state.unsubscribe_pending, new))
+    |> Map.put(:late_subscribes, MapSet.union(late_subscribes(state), new))
   end
+
+  # `Map.get/3`: a state built before this field existed (or by a test) has none.
+  defp late_subscribes(state), do: Map.get(state, :late_subscribes, MapSet.new())
 
   defp drop(state, symbols) do
     %{
