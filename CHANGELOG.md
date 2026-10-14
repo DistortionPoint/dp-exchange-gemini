@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.138] - 2026-10-14
+
 Decoder robustness against hostile or malformed venue payloads (tick AC). Every decoder in
 `Rest`, `Private`, `WsDecode` and `Socket` was read for a raise, a stall, or a plausible value
 standing in for an unreadable one.
