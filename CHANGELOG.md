@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.139] - 2026-10-14
+
 ### Changed (BREAKING: returned reasons, notice kinds and shapes; facade consistency, tick AD)
 
 - A symbol the venue does not list is `{:refused, :not_listed}` on every single-symbol read,
