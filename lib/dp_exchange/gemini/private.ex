@@ -1188,7 +1188,7 @@ defmodule DpExchange.Gemini.Private do
   # `wrap` is applied to the per-attempt signer, so a caller that must know how many attempts
   # actually left the process (`withdraw/6`, which retries a keyed write) can count them.
   defp post_signed(path, params, credentials, opts, subject, wrap) do
-    with :ok <- https_only(base_url(opts), :base_url) do
+    with :ok <- https_only(base_url(opts)) do
       once_more_on_reordered_nonce(
         fn -> post_signed_checked(path, params, credentials, opts, subject, wrap) end,
         opts
@@ -1251,15 +1251,19 @@ defmodule DpExchange.Gemini.Private do
   # it may carry userinfo.
   @loopback_hosts ["localhost", "127.0.0.1", "::1"]
 
-  defp https_only(url, option) when is_binary(url) do
+  #
+  # The refusal is `{:error, {:insecure_url, :gemini}}` — the venue, not the option that
+  # carried the URL (family decision D8): a consumer matching one tag across venues needs no
+  # per-venue option name.
+  defp https_only(url) when is_binary(url) do
     case URI.parse(url) do
       %URI{scheme: "https"} -> :ok
       %URI{scheme: "http", host: host} when host in @loopback_hosts -> :ok
-      _other -> {:error, {:insecure_url, option}}
+      _other -> {:error, {:insecure_url, :gemini}}
     end
   end
 
-  defp https_only(_not_a_string, option), do: {:error, {:insecure_url, option}}
+  defp https_only(_not_a_string), do: {:error, {:insecure_url, :gemini}}
 
   defp post_signed_checked(path, params, credentials, opts, subject, wrap) do
     scheme = auth_scheme(credentials, opts)
@@ -1429,7 +1433,7 @@ defmodule DpExchange.Gemini.Private do
   # valid signature over the wrong string, which the venue reports as a credential problem
   # rather than a parameter one. One string, used in both places, is what keeps them equal.
   defp signed_get(path, credentials, opts) do
-    with :ok <- https_only(base_url(opts), :base_url),
+    with :ok <- https_only(base_url(opts)),
          do:
            once_more_on_reordered_nonce(
              fn -> signed_get_checked(path, credentials, opts) end,
@@ -1465,7 +1469,7 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp signed_get_bytes(path, credentials, opts) do
-    with :ok <- https_only(base_url(opts), :base_url),
+    with :ok <- https_only(base_url(opts)),
          do:
            once_more_on_reordered_nonce(
              fn -> signed_get_bytes_checked(path, credentials, opts) end,
@@ -5363,8 +5367,8 @@ defmodule DpExchange.Gemini.Private do
 
     auth_url = Config.opt(opts, :auth_url, "https://exchange.gemini.com")
 
-    # The body carries the refresh token and the client secret: https only (see `https_only/2`).
-    with :ok <- https_only(auth_url, :auth_url),
+    # The body carries the refresh token and the client secret: https only (see `https_only/1`).
+    with :ok <- https_only(auth_url),
          do: post_refresh_checked(form, auth_url <> "/auth/token", opts)
   end
 

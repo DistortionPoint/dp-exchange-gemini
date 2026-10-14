@@ -243,7 +243,7 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
       assert {:ok, _state} = deliver(Map.put(@trade_frame, "s", hostile))
 
       assert_received {:dp_exchange, :gemini,
-                       %Notice{kind: :data_quality, details: %{reason: "undecodable trade"} = d}}
+                       %Notice{kind: :data_quality, details: %{reason: :undecodable_trade} = d}}
 
       assert is_binary(d.symbol)
       assert byte_size(d.symbol) < 200
@@ -255,9 +255,9 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
       assert {:ok, _state} =
                deliver(%{"e" => "depthUpdate", "U" => 1, "u" => 2, "s" => hostile})
 
-      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality, details: details}}
 
-      assert details.reason == "undecodable depth update"
+      assert details.reason == :undecodable_depth_update
       assert is_binary(details.symbol)
       assert byte_size(details.symbol) < 200
     end
@@ -268,7 +268,7 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
       assert {:ok, _state} = deliver(%{"e" => "depthUpdate", "s" => hostile})
 
       assert_received {:dp_exchange, :gemini,
-                       %Notice{details: %{reason: "undecodable depth update"} = d}}
+                       %Notice{details: %{reason: :undecodable_depth_update} = d}}
 
       assert is_binary(d.symbol)
     end
@@ -277,7 +277,7 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
       assert {:ok, _state} = deliver(@trade_frame)
 
       assert_received {:dp_exchange, :gemini,
-                       %Notice{details: %{reason: "undecodable trade", symbol: nil}}}
+                       %Notice{details: %{reason: :undecodable_trade, symbol: nil}}}
     end
 
     test "a trade stamped in milliseconds is noticed, not delivered as a 1970 print" do
@@ -294,7 +294,7 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
       assert {:ok, _state} = deliver(frame)
 
       assert_received {:dp_exchange, :gemini,
-                       %Notice{details: %{reason: "undecodable trade", symbol: "BTC-USD"}}}
+                       %Notice{details: %{reason: :undecodable_trade, symbol: "BTC-USD"}}}
 
       refute_received {:dp_exchange, :gemini, %Trade{}}
     end

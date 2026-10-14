@@ -52,7 +52,7 @@ defmodule DpExchange.Gemini.TickAAFakeTest do
 
   describe "list_instruments/1 with a symbol the fake does not carry" do
     test "fails the whole call with the venue's own refusal inside, as the real call does" do
-      expected = {:instrument_detail_failed, "DOGE-USD", {:refused, :invalid_symbol}}
+      expected = {:instrument_detail_failed, "DOGE-USD", {:refused, :not_listed}}
 
       assert Fake.list_instruments(symbols: ["BTC-USD", "DOGE-USD"]) == {:error, expected}
     end

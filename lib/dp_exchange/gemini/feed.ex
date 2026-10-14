@@ -447,6 +447,13 @@ defmodule DpExchange.Gemini.Feed do
         }
   def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind, @call_timeout)
 
+  @doc """
+  The symbols currently wanted (subscribed and not since removed), sorted: what was asked
+  for, not what arrived.
+  """
+  @spec wanted(GenServer.server()) :: [String.t()]
+  def wanted(feed), do: GenServer.call(feed, :wanted, @call_timeout)
+
   # `@call_timeout`, not `GenServer.call/2`'s five-second default.
   #
   # This was the one public call in this module left on the default, and it is the worst one
@@ -636,6 +643,10 @@ defmodule DpExchange.Gemini.Feed do
     {:reply, Map.new(all_delivering(state), fn {symbol, _at} -> {symbol, :stream} end), state}
   end
 
+  def handle_call(:wanted, _from, state) do
+    {:reply, state.wanted |> MapSet.to_list() |> Enum.sort(), state}
+  end
+
   def handle_call(:coverage_by_kind, _from, state) do
     by_kind =
       Map.new(state.delivering_by_kind, fn {kind, symbols} ->
@@ -765,7 +776,8 @@ defmodule DpExchange.Gemini.Feed do
   # subscription died with it, and a stale unsubscribe landing on the new one is harmless.
   def handle_info({:dp_exchange, :gemini, :reconnected, socket}, %{socket: socket} = state) do
     pending = MapSet.intersection(state.unsubscribe_pending, late_subscribes(state))
-    {:noreply, resubscribe(%{state | link_down?: false, unsubscribe_pending: pending})}
+    state = put_pending(%{state | link_down?: false}, pending)
+    {:noreply, resubscribe(state)}
   end
 
   # The other half of `init/1`'s `Process.flag(:trap_exit, true)` — see the moduledoc's
@@ -875,7 +887,7 @@ defmodule DpExchange.Gemini.Feed do
       Notice.new(:coverage_change, :gemini,
         severity: :warning,
         message: "periodic resubscribe failed",
-        details: %{reason: reason_text(reason)}
+        details: %{reason: :resubscribe_failed, message: reason_text(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
@@ -1067,7 +1079,7 @@ defmodule DpExchange.Gemini.Feed do
       Notice.new(:link_down, :gemini,
         severity: :warning,
         message: "socket crashed (#{reason_text(reason)}) — reconnecting now",
-        details: %{reason: reason_text(reason)}
+        details: %{reason: :socket_crashed, message: reason_text(reason)}
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :gemini, notice})
@@ -1092,7 +1104,7 @@ defmodule DpExchange.Gemini.Feed do
 
     cond do
       MapSet.size(pending) == 0 or state.link_down? or not Process.alive?(socket) ->
-        %{state | unsubscribe_pending: pending}
+        put_pending(state, pending)
 
       unsubscribe_channels(socket, MapSet.to_list(pending), state) == :ok ->
         state
@@ -1100,8 +1112,21 @@ defmodule DpExchange.Gemini.Feed do
         |> Map.put(:unsubscribe_pending, MapSet.new())
 
       true ->
-        %{state | unsubscribe_pending: pending}
+        put_pending(state, pending)
     end
+  end
+
+  # **`late_subscribes` only ever describes symbols still in `unsubscribe_pending`.** It was
+  # written by `queue_unsubscribe/2` and emptied only by a retry that SUCCEEDED, so a symbol
+  # whose failed subscribe was later made good (wanted again, which `retry_unsubscribe/2` takes
+  # out of the pending set) stayed in it for the life of the feed. That is a set that grows by
+  # one for every symbol that ever failed to subscribe, and it also gave a LATER failed
+  # unsubscribe of the same symbol the "may still land" treatment on reconnect that only a
+  # failed subscribe earns. Narrowed to the pending set wherever the pending set is narrowed.
+  defp put_pending(state, pending) do
+    state
+    |> Map.put(:unsubscribe_pending, pending)
+    |> Map.put(:late_subscribes, MapSet.intersection(late_subscribes(state), pending))
   end
 
   # **A notice flood.** `Socket` raises one notice per unreadable frame (`data_quality`), per
@@ -1143,16 +1168,20 @@ defmodule DpExchange.Gemini.Feed do
   # down this shared feed, with every other consumer's subscription.
   defp notice_key(%Notice{kind: kind}, _wanted), do: {kind, nil, nil}
 
-  # A `:refusal` from `Socket` states no `:reason`, only the venue's `subscribe_status`. Keyed
-  # on `nil` alone, a 429 landing inside the window of an earlier 400 was counted away and
-  # never reached a consumer, though the two call for different responses. The status is an
-  # integer the venue chose, so a stream of distinct values could grow the table, which is
-  # why only the closed set of HTTP-style codes (100..599) is keyed and any other value
-  # shares one key.
+  # A `:refusal` from `Socket` states one `:reason` (`:subscribe_refused`, or none when hand
+  # built) and the venue's `subscribe_status`. Keyed on the reason alone, a 429 landing inside
+  # the window of an earlier 400 was counted away and never reached a consumer, though the
+  # two call for different responses. The status is an integer the venue chose, so a stream
+  # of distinct values could grow the table, which is why only the closed set of HTTP-style
+  # codes (100..599) is keyed and any other value shares one key.
   defp notice_reason(details) do
     case {Map.get(details, :reason), Map.get(details, :subscribe_status)} do
-      {nil, status} when is_integer(status) and status in 100..599 -> {:status, status}
-      {reason, _status} -> reason
+      {reason, status}
+      when reason in [nil, :subscribe_refused] and is_integer(status) and status in 100..599 ->
+        {:status, status}
+
+      {reason, _status} ->
+        reason
     end
   end
 

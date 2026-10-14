@@ -229,6 +229,39 @@ defmodule DpExchange.Gemini.SocketTest do
 
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :refusal} = notice}
       assert notice.details.subscribe_status == 400
+      # An untracked request names no symbols; the reason is an atom (family decision D4).
+      assert notice.details.symbols == []
+      assert notice.details.reason == :subscribe_refused
+    end
+
+    test "a refusal names the symbols of the subscribe it answers (details.symbols)" do
+      {:ok, armed} = Socket.handle_info({:awaiting_ack, 41, ["BTC-USD", "ETH-USD"]}, state())
+
+      assert {:ok, answered} =
+               Socket.handle_frame({:text, Jason.encode!(%{"id" => 41, "status" => 400})}, armed)
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :refusal} = notice}
+      assert notice.details.symbols == ["BTC-USD", "ETH-USD"]
+      assert notice.details.subscribe_status == 400
+      assert notice.details.reason == :subscribe_refused
+      # Retired with the request: a later untracked refusal does not inherit them.
+      assert answered.ack_streams == %{}
+
+      untracked = {:text, Jason.encode!(%{"id" => 99, "status" => 400})}
+      assert {:ok, _state} = Socket.handle_frame(untracked, answered)
+
+      assert_receive {:dp_exchange, :gemini, %Notice{kind: :refusal} = later}
+      assert later.details.symbols == []
+    end
+
+    test "an accepted subscribe retires its symbols without a notice" do
+      {:ok, armed} = Socket.handle_info({:awaiting_ack, 41, ["BTC-USD"]}, state())
+
+      assert {:ok, answered} =
+               Socket.handle_frame({:text, Jason.encode!(%{"id" => 41, "status" => 200})}, armed)
+
+      assert answered.ack_streams == %{}
+      refute_received {:dp_exchange, :gemini, %Notice{}}
     end
 
     test "a successful subscribe ack is not noise" do
@@ -273,7 +306,7 @@ defmodule DpExchange.Gemini.SocketTest do
 
       # Found 2026-10-10: the drop used to be silent.
       assert_received {:dp_exchange, :gemini,
-                       %Notice{kind: :data_quality, details: %{reason: "undecodable trade"}}}
+                       %Notice{kind: :data_quality, details: %{reason: :undecodable_trade}}}
     end
 
     test "a trade whose price or time cannot be read raises a notice instead of vanishing" do
@@ -284,7 +317,7 @@ defmodule DpExchange.Gemini.SocketTest do
         assert_received {:dp_exchange, :gemini,
                          %Notice{
                            kind: :data_quality,
-                           details: %{reason: "undecodable trade", symbol: "BTC-USD"}
+                           details: %{reason: :undecodable_trade, symbol: "BTC-USD"}
                          }}
       end
     end
@@ -294,14 +327,14 @@ defmodule DpExchange.Gemini.SocketTest do
         assert {:ok, _state} = deliver(%{@trade_frame | "s" => bad})
 
         assert_received {:dp_exchange, :gemini,
-                         %Notice{kind: :data_quality, details: %{reason: "undecodable trade"}}}
+                         %Notice{kind: :data_quality, details: %{reason: :undecodable_trade}}}
 
         assert {:ok, _state} = deliver(%{@book_ticker | "s" => bad})
 
         assert_received {:dp_exchange, :gemini,
                          %Notice{
                            kind: :data_quality,
-                           details: %{reason: "undecodable book ticker"}
+                           details: %{reason: :undecodable_book_ticker}
                          }}
 
         refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.Trade{}}
@@ -524,7 +557,8 @@ defmodule DpExchange.Gemini.SocketTest do
       assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, state())
 
       assert_receive {:dp_exchange, :gemini, %Notice{details: details}}
-      assert Map.keys(details) == [:reason]
+      assert Map.keys(details) == [:message, :reason]
+      assert details.reason == :disconnected
     end
 
     test "a disconnect reason carrying a large venue body is bounded in the notice" do
@@ -534,11 +568,11 @@ defmodule DpExchange.Gemini.SocketTest do
                Socket.handle_disconnect(%{reason: {:remote, 1006, body}}, state())
 
       assert_receive {:dp_exchange, :gemini,
-                      %Notice{kind: :link_down, details: %{reason: reason}}}
+                      %Notice{kind: :link_down, details: %{reason: :disconnected, message: text}}}
 
-      assert is_binary(reason)
-      assert byte_size(reason) < 2_048
-      assert reason =~ "remote"
+      assert is_binary(text)
+      assert byte_size(text) < 2_048
+      assert text =~ "remote"
     end
   end
 
@@ -849,7 +883,10 @@ defmodule DpExchange.Gemini.SocketTest do
       refute_received {:dp_exchange, :gemini, %DpExchange.Core.Types.OrderBookDelta{}}
 
       assert_received {:dp_exchange, :gemini,
-                       %Notice{kind: :degraded, details: %{reason: "undecodable depth update"}}}
+                       %Notice{
+                         kind: :data_quality,
+                         details: %{reason: :undecodable_depth_update}
+                       }}
     end
 
     test "a depth frame missing its U is never read as a bookTicker" do
@@ -860,7 +897,10 @@ defmodule DpExchange.Gemini.SocketTest do
 
       # ...and it is not dropped in silence either: the book is missing this diff.
       assert_received {:dp_exchange, :gemini,
-                       %Notice{kind: :degraded, details: %{reason: "undecodable depth update"}}}
+                       %Notice{
+                         kind: :data_quality,
+                         details: %{reason: :undecodable_depth_update}
+                       }}
     end
 
     test "a bookTicker level that is present and unreadable is not published as nil" do
@@ -871,7 +911,7 @@ defmodule DpExchange.Gemini.SocketTest do
       assert_received {:dp_exchange, :gemini,
                        %Notice{
                          kind: :data_quality,
-                         details: %{reason: "unreadable bookTicker level"}
+                         details: %{reason: :unreadable_book_ticker_level}
                        }}
     end
 

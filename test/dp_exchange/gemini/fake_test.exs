@@ -51,11 +51,10 @@ defmodule DpExchange.Gemini.FakeTest do
     test "an unlisted symbol is a refusal, not an error" do
       # Each shape mirrors the specific endpoint behind it — see `Fake`'s own moduledoc —
       # rather than one invented atom standing in for all three.
-      assert Fake.get_price("NOPE-USD") ==
-               {:refused, {:unknown_reason, "'NOPE-USD' does not have available data yet"}}
+      assert Fake.get_price("NOPE-USD") == {:refused, :no_quote}
 
-      assert Fake.get_order_book("NOPE-USD") == {:refused, :invalid_symbol}
-      assert Fake.quantization("NOPE-USD") == {:refused, :invalid_symbol}
+      assert Fake.get_order_book("NOPE-USD") == {:refused, :not_listed}
+      assert Fake.quantization("NOPE-USD") == {:refused, :not_listed}
     end
 
     test "a width the venue does not serve is an error" do
@@ -228,6 +227,18 @@ defmodule DpExchange.Gemini.FakeTest do
       :ok = Fake.unsubscribe(["BTC-USD"])
 
       assert Fake.coverage() == %{}
+    end
+  end
+
+  describe "wanted/1" do
+    test "is the sorted set of symbols subscribed, narrowed by unsubscribe" do
+      assert Fake.wanted() == []
+
+      :ok = Fake.subscribe(["ETH-USD", "BTC-USD"], to: self())
+      assert Fake.wanted() == ["BTC-USD", "ETH-USD"]
+
+      :ok = Fake.unsubscribe(["BTC-USD"])
+      assert Fake.wanted() == ["ETH-USD"]
     end
   end
 
@@ -781,7 +792,7 @@ defmodule DpExchange.Gemini.FakeTest do
     test "an unlisted symbol is refused, not answered with someone else's tape" do
       # This used to answer unconditionally for ANY symbol, which is MORE capable than
       # `Rest.get_trades/2` — found in the 2026-09-06 real/fake parity sweep.
-      assert Fake.get_trades("NOPE-USD") == {:refused, {:unknown_reason, "BadRequest"}}
+      assert Fake.get_trades("NOPE-USD") == {:refused, :not_listed}
     end
 
     test "the tape is not the caller's own fills" do
@@ -1190,7 +1201,7 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:error, {:unsupported_timeframe, "2h"}} =
                Fake.get_historical_prices("NOPE-USD", "2h")
 
-      assert {:error, {:invalid_range, :start, "yesterday"}} =
+      assert {:error, {:invalid_range, [start: "yesterday"]}} =
                Fake.get_historical_prices("NOPE-USD", "1d", start: "yesterday")
     end
 

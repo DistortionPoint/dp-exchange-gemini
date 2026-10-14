@@ -213,7 +213,7 @@ defmodule DpExchange.Gemini.WsDecode do
     # unreadable price was dropped and one with an unreadable quantity kept as `{price, nil}`,
     # so a damaged frame was delivered as a complete book with every other value real. Diffs
     # already refuse through `fully_read?/2`; a snapshot holds itself to the same rule, and
-    # `Socket` reports the refusal as its existing `:degraded` notice.
+    # `Socket` reports the refusal as a `:data_quality` notice.
     with {:ok, bids} <- read_sorted(bids, :desc),
          {:ok, asks} <- read_sorted(asks, :asc) do
       build_snapshot(frame, bids, asks, symbol, observed_at)
@@ -585,7 +585,11 @@ defmodule DpExchange.Gemini.WsDecode do
 
   # Only a string or an integer is an id. `to_string/1` raised on a map or a list, in the
   # socket process.
-  defp to_string_or_nil(value) when is_binary(value), do: value
+  #
+  # A string id is copied: it is a sub-binary of the whole decoded frame, and a `Trade` is the
+  # one payload a consumer keeps for as long as it keeps a tape, so each id would otherwise
+  # hold its frame alive with it.
+  defp to_string_or_nil(value) when is_binary(value), do: :binary.copy(value)
   defp to_string_or_nil(value) when is_integer(value), do: Integer.to_string(value)
   defp to_string_or_nil(_absent_or_unreadable), do: nil
 

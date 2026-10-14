@@ -87,13 +87,15 @@ defmodule DpExchange.Gemini.Socket do
   `WsChannels.partial_depth/0` on the same connection with `{:error,
   {:partial_depth_symbol_conflict, existing_symbol}}`, and a frame that arrives while none — or
   more than one, which should not be reachable through `subscribe/3` but is not assumed
-  impossible — is claimed raises a `:degraded` notice rather than vanishing.
+  impossible — is claimed raises a `:data_quality` notice rather than vanishing.
 
   ## A depth gap raises one notice, and the consumer must discard that book
 
-  A `depthUpdate` whose `U` skips ahead of the last applied `u` raises a `:degraded` notice
-  (`details.reason: "depth sequence gap"`), as does a sequence that goes BACKWARDS by more
-  than one frame's span (`"depth sequence restart"`: the venue reset its counter). The
+  A `depthUpdate` whose `U` skips ahead of the last applied `u` raises a `:data_quality`
+  notice (`details.reason: :sequence_gap`, words in `details.message`), as does a sequence
+  that goes BACKWARDS by more than one frame's span (`:sequence_restart`: the venue reset
+  its counter). An undecodable depth update is `:data_quality` too
+  (`:undecodable_depth_update`); `:degraded` is kept for "a slower path is in use". The
   first notice is the instruction to discard that symbol's book. A replay (`u` at or just
   behind the last applied) is dropped without one.
 
@@ -119,7 +121,7 @@ defmodule DpExchange.Gemini.Socket do
   `depth_streams`. Depth is not a `coverage/1` kind, so the notice is the not-delivering
   signal. UNMEASURED: that the venue answers an unsubscribe and writes nothing of the old
   subscription after the answer; if it does not, the retries are the only recovery. An
-  undecodable trade frame likewise raises one `:data_quality` notice (`"undecodable trade"`)
+  undecodable trade frame likewise raises one `:data_quality` notice (`:undecodable_trade`)
   per frame, rather than being dropped in silence.
 
   ## Event time is nanoseconds
@@ -528,7 +530,7 @@ defmodule DpExchange.Gemini.Socket do
          {:ok, claimed?} <- claim_partial_depth(socket, symbols, channel) do
       streams = streams(symbols, channel)
       id = next_request_id()
-      await_ack(socket, streams, id)
+      await_ack(socket, streams, id, symbols)
 
       case send_rpc(socket, "subscribe", streams, id) do
         :ok ->
@@ -643,11 +645,11 @@ defmodule DpExchange.Gemini.Socket do
   # is out before it can hear the answer. An empty address list sends nothing and so expects
   # nothing. A socket that cannot be found is not told: `send/2` to an unregistered name
   # raises, and `send_rpc/4` already turns that same missing socket into a reported error.
-  defp await_ack(_socket, [], _id), do: :ok
+  defp await_ack(_socket, [], _id, _symbols), do: :ok
 
-  defp await_ack(socket, _streams, id) do
+  defp await_ack(socket, _streams, id, symbols) do
     case GenServer.whereis(socket) do
-      pid when is_pid(pid) -> send(pid, {:awaiting_ack, id})
+      pid when is_pid(pid) -> send(pid, {:awaiting_ack, id, canonical_symbols(symbols)})
       _not_running -> :ok
     end
   end
@@ -1023,6 +1025,7 @@ defmodule DpExchange.Gemini.Socket do
        unanswered_subscribes: 0,
        ack_deadline: nil,
        ack_requests: [],
+       ack_streams: %{},
        # When this session came up. See `handle_disconnect/2`'s short-session backoff.
        connected_at: now_ms()
      })}
@@ -1062,6 +1065,13 @@ defmodule DpExchange.Gemini.Socket do
   # strength of a clock that started before it was sent.
   def handle_info({:awaiting_ack, id}, state) do
     {:ok, add_ack_request(state, id)}
+  end
+
+  # The same announce, naming the (canonical) symbols the request subscribes. A refusal of the
+  # request reports those symbols (`details.symbols`), which the venue's own answer does not name.
+  def handle_info({:awaiting_ack, id, symbols}, state) do
+    state = add_ack_request(state, id)
+    {:ok, Map.put(state, :ack_streams, Map.put(ack_streams(state), id, symbols))}
   end
 
   # **The depth resync (family rule MD9), one `{symbol, channel}` at a time.** A gap or a
@@ -1115,7 +1125,7 @@ defmodule DpExchange.Gemini.Socket do
   def handle_info({:resync_timeout, key, ref}, state) do
     case Map.get(depth_resync(state), key) do
       {:unsubscribing, ^ref, _id} ->
-        {:ok, resync_failed(state, key, "depth resync unsubscribe unanswered")}
+        {:ok, resync_failed(state, key, :resync_unsubscribe_unanswered)}
 
       _moved_on ->
         {:ok, state}
@@ -1171,7 +1181,8 @@ defmodule DpExchange.Gemini.Socket do
 
       {{_id, timer}, rest} ->
         Process.cancel_timer(timer)
-        {:ok, put_ack_requests(state, rest)}
+        state = put_ack_requests(state, rest)
+        {:ok, Map.put(state, :ack_streams, Map.delete(ack_streams(state), id))}
     end
   end
 
@@ -1193,7 +1204,7 @@ defmodule DpExchange.Gemini.Socket do
       )
 
       cancel_ack_timers(state)
-      {:close, put_ack_requests(state, [])}
+      {:close, state |> put_ack_requests([]) |> Map.put(:ack_streams, %{})}
     else
       {:ok, state}
     end
@@ -1256,16 +1267,32 @@ defmodule DpExchange.Gemini.Socket do
   defp resync_backoff(failures),
     do: min(@resync_min_gap_ms * Bitwise.bsl(1, min(failures - 1, 10)), @resync_max_backoff_ms)
 
+  # `reason` is an atom, and the words for it ride in `details.message` (family decision D4:
+  # `details.reason` is never free text).
+  @not_delivering_text %{
+    resync_unsubscribe_unanswered: "depth resync unsubscribe unanswered",
+    resubscribe_refused: "depth resubscribe refused",
+    book_not_rebuildable:
+      "depth book cannot be rebuilt on a connection without the snapshot parameter"
+  }
+
   defp notify_not_delivering(state, {symbol, channel}, reason, extra \\ %{}) do
     until = Map.get(extra, :until, @until_resync)
+    text = Map.fetch!(@not_delivering_text, reason)
 
     notify(
       state,
       Notice.new(:coverage_change, :gemini,
         severity: :warning,
-        message: "#{reason} — #{symbol} is not delivering #{until}",
+        message: "#{text} — #{symbol} is not delivering #{until}",
         details:
-          Map.merge(extra, %{reason: reason, symbol: symbol, channel: channel, delivering: false})
+          Map.merge(extra, %{
+            reason: reason,
+            message: text,
+            symbol: symbol,
+            channel: channel,
+            delivering: false
+          })
       )
     )
 
@@ -1273,6 +1300,7 @@ defmodule DpExchange.Gemini.Socket do
   end
 
   defp ack_requests(state), do: Map.get(state, :ack_requests, [])
+  defp ack_streams(state), do: Map.get(state, :ack_streams, %{})
 
   # A request owed an answer, keyed by the id its frame carries; that id is also what its
   # deadline message names, so the two cannot be confused with another request's.
@@ -1307,13 +1335,19 @@ defmodule DpExchange.Gemini.Socket do
     case List.keytake(ack_requests(state), id, 0) do
       {{_id, timer}, rest} ->
         Process.cancel_timer(timer)
-        state |> put_ack_requests(rest) |> resync_subscribe_answered(id, message["status"])
+        {symbols, streams} = Map.pop(ack_streams(state), id, [])
+
+        state
+        |> put_ack_requests(rest)
+        |> Map.merge(%{ack_streams: streams, answered_symbols: symbols})
+        |> resync_subscribe_answered(id, message["status"])
 
       nil ->
-        resync_unsubscribe_answered(state, id)
+        state |> Map.put(:answered_symbols, []) |> resync_unsubscribe_answered(id)
     end
   end
 
+  defp note_answer(%{"id" => _not_an_integer}, state), do: Map.put(state, :answered_symbols, [])
   defp note_answer(_message, state), do: state
 
   # The answer to a resync's own unsubscribe: the old subscription is over, so exactly the key
@@ -1359,7 +1393,7 @@ defmodule DpExchange.Gemini.Socket do
     |> put_resync(Map.delete(depth_resync(state), key))
     |> Map.put(:depth_streams, MapSet.delete(depth_streams(state), key))
     |> Map.update(:depth_retry, %{key => retry_ref}, &Map.put(&1, key, retry_ref))
-    |> notify_not_delivering(key, "depth resubscribe refused", %{status: status})
+    |> notify_not_delivering(key, :resubscribe_refused, %{status: status})
   end
 
   @impl true
@@ -1395,7 +1429,11 @@ defmodule DpExchange.Gemini.Socket do
     # whole into every notice subscriber and every telemetry handler.
     reason_text = inspect(reason, limit: 50, printable_limit: 1_024)
 
-    notify(state, Notice.new(:link_down, :gemini, details: %{reason: reason_text}))
+    notify(
+      state,
+      Notice.new(:link_down, :gemini, details: %{reason: :disconnected, message: reason_text})
+    )
+
     Telemetry.link_down(:gemini, reason_text)
 
     # `attempt_number` comes from `websockex` itself. It is a documented key of the
@@ -1523,13 +1561,7 @@ defmodule DpExchange.Gemini.Socket do
       # under, so nothing there advances either — there is nothing left to make consistent
       # for a symbol this package was never told.
       :error ->
-        notify(
-          state,
-          Notice.new(:degraded, :gemini,
-            details: %{reason: "undecodable depth update", symbol: noticed(message["s"])}
-          )
-        )
-
+        notify_undecodable_depth(state, noticed(message["s"]))
         {:ok, state}
     end
   end
@@ -1540,13 +1572,7 @@ defmodule DpExchange.Gemini.Socket do
   # the next frame showed no gap against a sequence this frame never advanced. Same outcome as
   # a gap, same notice: discard and resubscribe.
   defp handle_message(%{"e" => "depthUpdate"} = message, state) do
-    notify(
-      state,
-      Notice.new(:degraded, :gemini,
-        details: %{reason: "undecodable depth update", symbol: noticed(message["s"])}
-      )
-    )
-
+    notify_undecodable_depth(state, noticed(message["s"]))
     {:ok, state}
   end
 
@@ -1568,8 +1594,12 @@ defmodule DpExchange.Gemini.Socket do
           {:error, _reason} ->
             notify(
               state,
-              Notice.new(:degraded, :gemini,
-                details: %{reason: "unreadable partial-depth snapshot", symbol: symbol}
+              Notice.new(:data_quality, :gemini,
+                details: %{
+                  reason: :unreadable_partial_depth_snapshot,
+                  message: "unreadable partial-depth snapshot",
+                  symbol: symbol
+                }
               )
             )
         end
@@ -1581,8 +1611,11 @@ defmodule DpExchange.Gemini.Socket do
       _zero_or_ambiguous ->
         notify(
           state,
-          Notice.new(:degraded, :gemini,
-            details: %{reason: "unattributable partial-depth snapshot"}
+          Notice.new(:data_quality, :gemini,
+            details: %{
+              reason: :unattributable_partial_depth_snapshot,
+              message: "unattributable partial-depth snapshot"
+            }
           )
         )
     end
@@ -1633,7 +1666,11 @@ defmodule DpExchange.Gemini.Socket do
         notify(
           state,
           Notice.new(:data_quality, :gemini,
-            details: %{reason: "unreadable bookTicker level", symbol: symbol}
+            details: %{
+              reason: :unreadable_book_ticker_level,
+              message: "unreadable bookTicker level",
+              symbol: symbol
+            }
           )
         )
     end
@@ -1654,12 +1691,19 @@ defmodule DpExchange.Gemini.Socket do
   # `:coverage_change` is reserved for the generic, unexplained resubscribe-failure shape
   # this venue does not have. Found by a cross-package audit comparing notice usage
   # across all five venues for the identical condition.
+  #
+  # `details.symbols` is the symbols of the request this answers, as the caller named them
+  # to `subscribe/3` (empty when the request is not one this socket tracked: a resync's own
+  # subscribe, or an answer that matches nothing outstanding). `details.reason` is an atom;
+  # the venue's text, where there is any, belongs in `details.message`.
   defp handle_message(%{"id" => _id, "status" => status}, state) when status != 200 do
+    {symbols, state} = Map.pop(state, :answered_symbols, [])
+
     notify(
       state,
       Notice.new(:refusal, :gemini,
         message: "gemini refused a subscription: status #{status}",
-        details: %{subscribe_status: status}
+        details: %{reason: :subscribe_refused, subscribe_status: status, symbols: symbols}
       )
     )
 
@@ -1676,7 +1720,8 @@ defmodule DpExchange.Gemini.Socket do
       state,
       Notice.new(:data_quality, :gemini,
         details: %{
-          reason: "undecodable book ticker",
+          reason: :undecodable_book_ticker,
+          message: "undecodable book ticker",
           symbol: noticed(message["s"])
         }
       )
@@ -1692,7 +1737,13 @@ defmodule DpExchange.Gemini.Socket do
   # subscriber and written to every log that prints the notice. Absent stays `nil`; text is cut
   # at 64 characters; anything else is shown as `inspect/2` shows it, bounded.
   defp noticed(nil), do: nil
-  defp noticed(text) when is_binary(text), do: String.slice(text, 0, 64)
+  #
+  # **Copied, not sliced.** `Jason.decode/1` hands back string values as sub-binaries of the
+  # frame, and `String.slice/3` of one is another sub-binary of it, so a 64-byte symbol kept
+  # the WHOLE frame alive (a depth diff runs to tens of KB, and a frame may reach the 16 MiB
+  # cap) for as long as anything held the notice: this feed's `notice_seen` key, or a consumer
+  # that keeps its recent notices. `:binary.copy/1` makes it stand alone.
+  defp noticed(text) when is_binary(text), do: text |> String.slice(0, 64) |> :binary.copy()
   defp noticed(other), do: inspect(other, limit: 5, printable_limit: 64)
 
   # A frame ending at or before what was already applied is a replay, not news. Applied, it
@@ -1721,7 +1772,7 @@ defmodule DpExchange.Gemini.Socket do
         resyncing_frame(message, symbol, state)
 
       WsDecode.depth_restart?(message, applied) ->
-        declare_gap(message, symbol, state, last_by_symbol, "depth sequence restart")
+        declare_gap(message, symbol, state, last_by_symbol, :sequence_restart)
 
       WsDecode.stale_depth?(message["u"], applied) ->
         {:ok, state}
@@ -1746,15 +1797,23 @@ defmodule DpExchange.Gemini.Socket do
   # that as the whole book would be worse than the loss.
   defp refuse_unsequenced_depth_update(message, symbol, state) do
     {_discarded, state} = decode_depth_frame(message, symbol, state)
+    notify_undecodable_depth(state, symbol)
+    {:ok, state}
+  end
 
+  # A depth update the book cannot apply is bad data, not a slower path: `:data_quality`,
+  # with an atom `reason` and the text in `message` (family decision D4).
+  defp notify_undecodable_depth(state, symbol) do
     notify(
       state,
-      Notice.new(:degraded, :gemini,
-        details: %{reason: "undecodable depth update", symbol: symbol}
+      Notice.new(:data_quality, :gemini,
+        details: %{
+          reason: :undecodable_depth_update,
+          message: "undecodable depth update",
+          symbol: symbol
+        }
       )
     )
-
-    {:ok, state}
   end
 
   defp apply_depth_update(message, symbol, state, last_by_symbol, last_applied) do
@@ -1764,7 +1823,7 @@ defmodule DpExchange.Gemini.Socket do
       # Per symbol — websocket.yaml:1269-1270 states the rule per book, and a single
       # node-wide counter (this package's own defect until now) could mask a real gap on
       # one symbol behind unrelated traffic on another, or flag one that never happened.
-      declare_gap(message, symbol, state, last_by_symbol, "depth sequence gap")
+      declare_gap(message, symbol, state, last_by_symbol, :sequence_gap)
     else
       deliver_depth_frame(message, symbol, state, last_by_symbol)
     end
@@ -1777,8 +1836,17 @@ defmodule DpExchange.Gemini.Socket do
   # that keeps gapping is not unsubscribed and resubscribed in a loop. With no channel known
   # (a frame fed to a bare socket state) no resubscribe is possible and the frame is
   # delivered as before, after the notice.
+  defp gap_text(:sequence_gap), do: "depth sequence gap"
+  defp gap_text(:sequence_restart), do: "depth sequence restart"
+
   defp declare_gap(message, symbol, state, last_by_symbol, reason) do
-    notify(state, Notice.new(:degraded, :gemini, details: %{reason: reason, symbol: symbol}))
+    # A sequence gap is bad data, not a slower path: `:data_quality` (family decision D4).
+    notify(
+      state,
+      Notice.new(:data_quality, :gemini,
+        details: %{reason: reason, message: gap_text(reason), symbol: symbol}
+      )
+    )
 
     case for({^symbol, _channel} = key <- depth_streams(state), do: key) do
       [] ->
@@ -1808,7 +1876,7 @@ defmodule DpExchange.Gemini.Socket do
       notify_not_delivering(
         acc,
         key,
-        "depth book cannot be rebuilt on a connection without the snapshot parameter",
+        :book_not_rebuildable,
         %{until: "until the caller subscribes it again and rebuilds the book"}
       )
     end)
@@ -1863,12 +1931,7 @@ defmodule DpExchange.Gemini.Socket do
       # every price real. It is the same outcome as a sequence gap, and it gets the same
       # notice: discard and resubscribe.
       {:error, _reason} ->
-        notify(
-          state,
-          Notice.new(:degraded, :gemini,
-            details: %{reason: "undecodable depth update", symbol: symbol}
-          )
-        )
+        notify_undecodable_depth(state, symbol)
     end
 
     {:ok, Map.put(state, :last_depth_update, Map.put(last_by_symbol, symbol, message["u"]))}
@@ -1909,7 +1972,11 @@ defmodule DpExchange.Gemini.Socket do
         notify(
           state,
           Notice.new(:data_quality, :gemini,
-            details: %{reason: "undecodable trade", symbol: noticed(message["s"])}
+            details: %{
+              reason: :undecodable_trade,
+              message: "undecodable trade",
+              symbol: noticed(message["s"])
+            }
           )
         )
 
@@ -1928,7 +1995,11 @@ defmodule DpExchange.Gemini.Socket do
         notify(
           state,
           Notice.new(:data_quality, :gemini,
-            details: %{reason: "undecodable trade", symbol: symbol}
+            details: %{
+              reason: :undecodable_trade,
+              message: "undecodable trade",
+              symbol: symbol
+            }
           )
         )
     end

@@ -272,8 +272,8 @@ defmodule DpExchange.Gemini.TickAaSocketTest do
 
       assert_received {:dp_exchange, :gemini,
                        %Notice{
-                         kind: :degraded,
-                         details: %{reason: "undecodable depth update", symbol: nil}
+                         kind: :data_quality,
+                         details: %{reason: :undecodable_depth_update, symbol: nil}
                        }}
 
       refute_received {:dp_exchange, :gemini, %OrderBookDelta{}}

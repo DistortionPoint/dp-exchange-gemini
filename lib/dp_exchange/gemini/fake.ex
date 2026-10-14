@@ -23,17 +23,13 @@ defmodule DpExchange.Gemini.Fake do
 
   A fake where everything works proves half the contract. This one refuses:
 
-    * a symbol it does not carry, with **the real reason for that endpoint** — Gemini
-      does not refuse a bad symbol the same way everywhere, and neither does this fake:
-      `:invalid_symbol` where `Rest`'s own tests pin a JSON `InvalidSymbol` body
-      (`get_order_book/2`, `quantization/1`, `place_order/3`), `{:unknown_reason, text}`
-      where the venue answers with plain text instead (`get_price/2`, `get_top_of_book/2`
-      — measured live, `/v1/pubticker` — and `get_historical_prices/4` — measured live,
-      `/v2/candles`), or the venue's own unrecognised JSON reason (`get_trades/2`,
-      measured live as `BadRequest`). A single invented `:not_listed` used to stand in
-      for all of these, which is precisely the divergence the 2026-09-06 real/fake
-      parity sweep exists to catch: a consumer's test pattern-matching the real shape
-      passed here for the wrong reason;
+    * a symbol it does not carry, with **the real reason for that endpoint**: the family's
+      `{:refused, :not_listed}` wherever the real call answers it (a JSON `InvalidSymbol`
+      on `get_order_book/2`, `quantization/1` and `place_order/3`, the plain-text 400 of
+      `get_historical_prices/4`, `get_trades/2`'s `BadRequest`, and the empty 404s of the
+      funding and risk reads), and `{:refused, :no_quote}` for `get_price/2` and
+      `get_top_of_book/2`, where `/v1/pubticker` answers `'X' does not have available data
+      yet`. No venue text rides in either reason;
     * a timeframe Gemini does not serve, including `2h`, `4h` and `12h`, which the shared
       vocabulary models and this venue does not;
     * a range reaching **before the venue's fixed window**, with `{:range_unavailable,
@@ -163,7 +159,7 @@ defmodule DpExchange.Gemini.Fake do
          }}
 
       :error ->
-        not_listed(symbol)
+        no_quote(symbol)
     end
   end
 
@@ -200,7 +196,7 @@ defmodule DpExchange.Gemini.Fake do
          }}
 
       :error ->
-        not_listed(symbol)
+        no_quote(symbol)
     end
   end
 
@@ -244,7 +240,7 @@ defmodule DpExchange.Gemini.Fake do
           # symbol with a plain-text 400, `Supplied value '#{symbol}' is not a valid
           # symbol` — see `Rest.get_body/2`'s own comment. `:not_listed` never appeared
           # anywhere in the real vocabulary; found in the parity sweep.
-          {:refused, {:unknown_reason, "Supplied value '#{symbol}' is not a valid symbol"}}
+          {:refused, :not_listed}
         end
       end
     end)
@@ -392,7 +388,7 @@ defmodule DpExchange.Gemini.Fake do
         # `Rest.get_order_book/2`'s own test pins `/v1/book/{symbol}` to a JSON
         # `InvalidSymbol` refusal for an unlisted symbol, not the invented `:not_listed`
         # this used to answer — found in the parity sweep.
-        {:refused, :invalid_symbol}
+        {:refused, :not_listed}
     end
   end
 
@@ -434,7 +430,7 @@ defmodule DpExchange.Gemini.Fake do
       # 2026-09-06: `GET /v1/trades/{symbol}` refuses an unlisted symbol with
       # `{"reason":"BadRequest",...}`, a reason outside `Rest`'s recognised vocabulary
       # and so `{:unknown_reason, ...}` there too. Found in the parity sweep.
-      {:refused, {:unknown_reason, "BadRequest"}}
+      {:refused, :not_listed}
     end
   end
 
@@ -621,7 +617,7 @@ defmodule DpExchange.Gemini.Fake do
           # Measured live 2026-09-06: `/v1/symbols/details/{symbol}` refuses an unlisted
           # symbol with `{"reason":"InvalidSymbol",...}` — the one case in this sweep
           # confirmed against the venue itself, not just against `Rest`'s own tests.
-          {:refused, :invalid_symbol}
+          {:refused, :not_listed}
       end
     end)
   end
@@ -648,7 +644,7 @@ defmodule DpExchange.Gemini.Fake do
             {:ok, Enum.map(symbols, &fake_instrument/1)}
 
           unlisted ->
-            {:error, {:instrument_detail_failed, unlisted, {:refused, :invalid_symbol}}}
+            {:error, {:instrument_detail_failed, unlisted, {:refused, :not_listed}}}
         end
       end
     end)
@@ -1126,18 +1122,15 @@ defmodule DpExchange.Gemini.Fake do
     # `/v1/order/new` shares `Private`'s `refusal(body)` -> `Rest.refusal_reason/1`
     # vocabulary with every other private POST, and `InvalidSymbol` is the one entry in
     # that table that names a bad symbol rather than a credential problem.
-    if symbol in @symbols, do: :ok, else: {:refused, :invalid_symbol}
+    if symbol in @symbols, do: :ok, else: {:refused, :not_listed}
   end
 
   # `/v1/pubticker/{symbol}` — the endpoint behind `get_price/2` and `get_top_of_book/2`
   # — 404s on an unlisted symbol with plain text, not JSON: `'<symbol>' does not have
-  # available data yet`, measured live 2026-09-06 (`rest_test.exs`, "get_price refuses
-  # on a 404, keeping the venue's own words"). `{:refused, :not_listed}` used to stand
-  # in here — an atom absent from the venue's own vocabulary and from `Rest`'s — found
-  # in the parity sweep.
-  defp not_listed(symbol) do
-    {:refused, {:unknown_reason, "'#{symbol}' does not have available data yet"}}
-  end
+  # available data yet`, measured live 2026-09-06 (`rest_test.exs`). That
+  # sentence is the venue saying it has nothing to quote, so the real call answers
+  # `{:refused, :no_quote}` (family decision D2) and so does this, for the same input.
+  defp no_quote(_symbol), do: {:refused, :no_quote}
 
   # The order the venue would describe back for `request`, with the type recovered the way
   # `Private.to_order/1` recovers it from the venue's own body: `maker_or_cancel` is
@@ -1372,6 +1365,16 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @doc """
+  See `DpExchange.Gemini.wanted/1`. The symbols `subscribe/2` and `update_symbols/2` hold,
+  sorted; narrowed by `unsubscribe/2` as the real feed's wanted set is. A symbol the fake does
+  not carry is never held (it is filtered out at `subscribe/2`), so this is `coverage/1`'s keys:
+  less capable than the real feed, which holds a wanted symbol the venue never delivers.
+  """
+  @spec wanted(keyword()) :: [String.t()]
+  @impl true
+  def wanted(_opts \\ []), do: subscribed() |> MapSet.to_list() |> Enum.sort()
+
+  @doc """
   Registers `opts[:to]` (default: the caller) for notices and sends nothing, as the real feed
   does.
 
@@ -1585,7 +1588,7 @@ defmodule DpExchange.Gemini.Fake do
     with_injection(symbol, fn ->
       # Funding is a property of a perpetual, and `Rest.get_funding/2` sends the symbol as
       # given. A name that is not a perpetual is the venue's "no data" 404 — measured 2026-09-06
-      # for `nonexistentsymbolxyz` (empty body, so `{:refused, :refused}`); what it says for a
+      # for `nonexistentsymbolxyz` (empty body, so `{:refused, :not_listed}`); what it says for a
       # real SPOT symbol was never probed, and this does not claim to know.
       if perpetual_symbol?(symbol) do
         # Settled and estimated differ, and by a lot — a fake that made them equal would let a
@@ -1600,7 +1603,7 @@ defmodule DpExchange.Gemini.Fake do
            provider: :gemini
          }}
       else
-        {:refused, :refused}
+        {:refused, :not_listed}
       end
     end)
   end
@@ -1637,7 +1640,7 @@ defmodule DpExchange.Gemini.Fake do
            provider: :gemini
          }}
       else
-        {:refused, :refused}
+        {:refused, :not_listed}
       end
     end)
   end

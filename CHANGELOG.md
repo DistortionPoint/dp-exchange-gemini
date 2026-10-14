@@ -20,6 +20,58 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING: returned reasons, notice kinds and shapes; facade consistency, tick AD)
+
+- A symbol the venue does not list is `{:refused, :not_listed}` on every single-symbol read,
+  real and `Fake`, with no venue text in the reason. It replaces `{:refused, :invalid_symbol}`,
+  `{:refused, {:invalid_symbol, text}}`, `{:refused, {:unknown_reason, "Supplied value 'X' is
+  not a valid symbol"}}`, `get_trades/2`'s `{:unknown_reason, "BadRequest"}` and the bare
+  `{:refused, :refused}` of an empty 404 (`get_funding/2`, `next_funding_timestamp/2`,
+  `get_contract_stats/2`). `place_order/3`'s `InvalidSymbol` is `:not_listed` too (the table
+  `Private` shares with `Rest`). `{:error, {:invalid_symbol, value}}` is unchanged: it is the
+  local answer for a symbol that is not a non-blank string.
+- `'X' does not have available data yet` (`/v1/pubticker`'s 404: `get_price/2`,
+  `get_top_of_book/2`) is `{:refused, :no_quote}`, not `{:refused, {:unknown_reason, text}}`.
+- A depth sequence gap or restart (`:sequence_gap`, `:sequence_restart`) and an undecodable or
+  unreadable depth update or partial-depth snapshot are `:data_quality` notices, not
+  `:degraded`; `:degraded` stays for `:silent_connection`, `:subscribe_unanswered` and a
+  dropped slow subscriber.
+- A refused subscription's `:refusal` notice carries `details.symbols` (the canonical symbols
+  of the request, `[]` when untracked) and `details.reason: :subscribe_refused`.
+- Every notice's `details.reason` is an atom; the text moved to `details.message`
+  (`:undecodable_depth_update`, `:undecodable_book_ticker`, `:unreadable_book_ticker_level`,
+  `:undecodable_trade`, `:disconnected`, `:socket_crashed`, `:resubscribe_failed`,
+  `:resync_unsubscribe_unanswered`, `:resubscribe_refused`, `:book_not_rebuildable`, ...).
+- A plaintext `:base_url` or `:auth_url` is `{:error, {:insecure_url, :gemini}}`, not
+  `{:insecure_url, :base_url | :auth_url}`.
+- A malformed range is `{:error, {:invalid_range, range}}` for a bad bound as well; the
+  `{:invalid_range, :start | :end, value}` shape is gone.
+
+### Added
+
+- `DpExchange.Gemini.wanted/1` and `Fake.wanted/1`: the symbols the consumer asked to stream
+  (sorted, canonical), against `coverage/1`'s what-arrived. A plain public function; Core's
+  `Venue` behaviour does not declare it at the pinned version.
+- usage-rules.md states that `:credentials_rejected` is never emitted, because no Gemini
+  feed authenticates.
+
+### Fixed
+
+- Vendored websockex re-joined the whole unparsed buffer on every TCP chunk, so a large frame
+  arriving in `n` chunks copied O(n^2) bytes. Chunks now wait in a pending list (O(1) each)
+  until the length the frame's own header declares has arrived and are joined once
+  (`## VENDORED FIX (5)` in `lib/vendor/websockex.ex`; the 16 MiB bound and every other local
+  change are unchanged). A test streams a 2 MiB frame in 1 KiB writes, with a ping behind it
+  in the last write, and requires the frame and the leftover bytes to be read.
+- Hot-path retention (tick AD). `Feed`'s `late_subscribes` set was emptied only by a wire
+  unsubscribe that succeeded, so a symbol whose failed subscribe was later made good stayed in
+  it for the life of the feed (one entry per such symbol) and gave a later failed unsubscribe
+  of the same symbol the "subscribe may still land" treatment on reconnect. It is now narrowed
+  to `unsubscribe_pending` wherever that set is narrowed. A symbol quoted in a `Socket` notice
+  (`noticed/1`) and a `Trade`'s string id are now copied rather than left as sub-binaries of the
+  frame they were decoded from, so a 64-byte symbol or an id no longer keeps a whole depth frame
+  alive in `Feed`'s notice table or a consumer's tape.
+
 ## [0.2.138] - 2026-10-14
 
 Decoder robustness against hostile or malformed venue payloads (tick AC). Every decoder in

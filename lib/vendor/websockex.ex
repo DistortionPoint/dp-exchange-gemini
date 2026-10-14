@@ -94,8 +94,9 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly four things**, each marked `## VENDORED FIX` at its call site below (the fourth,
-  listed last, bounds an unfinished frame and a reassembled message at 16 MiB):
+  **Exactly five things**, each marked `## VENDORED FIX` at its call site below (the fourth
+  bounds an unfinished frame and a reassembled message at 16 MiB; the fifth, listed last,
+  joins a large frame's TCP chunks once instead of once per chunk):
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -125,6 +126,15 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
      (16 MiB). Upstream buffers an unfinished frame without limit, and a header may declare a
      length up to 2^63, so a peer that never finished one grew this process until the node
      ran out of memory.
+  5. `websocket_loop/3` no longer re-joins the whole unparsed buffer on every TCP chunk.
+     Upstream copied the buffer plus the new chunk each time, so a frame arriving in `n`
+     chunks cost O(n^2) bytes copied (a multi-megabyte frame in 1 KB chunks is thousands of
+     multi-megabyte copies). Chunks now wait in `state.pending` (O(1) each) until the length
+     the frame's own header declares has arrived, and are joined in one pass
+     (`add_pending/2`, `flush_ready/1`, `note_frame_need/1`, `frame_size/1`; `read_all_data/3`
+     no longer joins, and `join_bitstrings/1` is gone). A frame's bytes, the parse, the
+     16 MiB bound of item 4 (now counted over buffer plus pending) and every callback are
+     unchanged.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -819,6 +829,9 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
       name: name,
       reply_fun: reply_fun,
       buffer: <<>>,
+      pending: [],
+      pending_size: 0,
+      pending_need: 0,
       fragment: nil
     }
 
@@ -953,6 +966,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
       :incomplete ->
         transport = state.conn.transport
         socket = state.conn.socket
+        state = note_frame_need(state)
 
         receive do
           {:system, from, req} ->
@@ -967,17 +981,25 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
             sync_send(frame, from, parent, debug, state)
 
           {^transport, ^socket, message} ->
-            buffer = read_all_data(transport, socket, [message, state.buffer])
+            chunks = read_all_data(transport, socket, [message])
 
             # ## VENDORED FIX (4 of 4) — an unfinished frame is not buffered without limit.
             # A frame header may declare any length up to 2^63, and `parse_frame/1` answers
             # `:incomplete` until all of it has arrived, so a peer (or a proxy) that never
             # finishes one grew `state.buffer` until the node ran out of memory. Gemini's
             # frames are a few KB; the bound is Core's HTTP body cap.
-            if byte_size(buffer) > @max_message_bytes do
+            #
+            # ## VENDORED FIX (5) — a large frame is joined once, not once per chunk.
+            # Upstream re-joined the whole buffer with every TCP chunk, so a frame of `n`
+            # chunks cost O(n^2) bytes copied. Chunks now wait in `state.pending` until the
+            # frame's declared length (`note_frame_need/1`) has arrived, then are joined in
+            # one pass (`flush_pending/1`).
+            state = add_pending(state, chunks)
+
+            if byte_size(state.buffer) + state.pending_size > @max_message_bytes do
               handle_close({:local, 1009, "message too big"}, parent, debug, state)
             else
-              websocket_loop(parent, debug, %{state | buffer: buffer})
+              websocket_loop(parent, debug, flush_ready(state))
             end
 
           {:tcp_closed, ^socket} ->
@@ -996,27 +1018,59 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
     end
   end
 
-  defp read_all_data(transport, socket, buffer) do
+  # Every chunk already waiting in the mailbox, in arrival order, not joined.
+  defp read_all_data(transport, socket, chunks) do
     receive do
       {^transport, ^socket, message} ->
-        read_all_data(transport, socket, [message | buffer])
+        read_all_data(transport, socket, [message | chunks])
     after
-      0 ->
-        :lists.reverse(buffer)
-        |> join_bitstrings()
+      0 -> :lists.reverse(chunks)
     end
   end
 
-  defp join_bitstrings([a, b]), do: <<a::bitstring, b::bitstring>>
-  defp join_bitstrings([a]), do: a
-  defp join_bitstrings([]), do: <<>>
-
-  defp join_bitstrings(rest) do
-    {a, b} = Enum.split(rest, div(length(rest), 2))
-    a = join_bitstrings(a)
-    b = join_bitstrings(b)
-    <<a::bitstring, b::bitstring>>
+  # ## VENDORED FIX (5) — see "VENDORED FIX (5)" in `websocket_loop/3`.
+  #
+  # `pending` holds chunks newest first, with their total size, so adding one is O(1);
+  # `pending_need` is the byte count the frame being read declares (0 while unknown), the
+  # point at which joining can first make `parse_frame/1` succeed.
+  defp add_pending(state, chunks) do
+    %{
+      state
+      | pending: :lists.reverse(chunks, state.pending),
+        pending_size: state.pending_size + IO.iodata_length(chunks)
+    }
   end
+
+  # Join only once the declared frame can be complete (or while its length is unknown, which
+  # is only ever a few header bytes). One copy of the buffer, however many chunks it took.
+  defp flush_ready(%{pending_need: need} = state) do
+    if need == 0 or byte_size(state.buffer) + state.pending_size >= need,
+      do: flush_pending(state),
+      else: state
+  end
+
+  defp flush_pending(state) do
+    buffer = IO.iodata_to_binary([state.buffer | :lists.reverse(state.pending)])
+    %{state | buffer: buffer, pending: [], pending_size: 0, pending_need: 0}
+  end
+
+  # Records, once per frame, the total size its header declares (RFC 6455 §5.2).
+  defp note_frame_need(%{pending_need: 0} = state),
+    do: %{state | pending_need: frame_size(state.buffer)}
+
+  defp note_frame_need(state), do: state
+
+  # 0 when the header is not all here yet.
+  defp frame_size(<<_fin_opcode, mask::1, 126::7, length::16, _rest::binary>>),
+    do: 4 + mask * 4 + length
+
+  defp frame_size(<<_fin_opcode, mask::1, 127::7, length::64, _rest::binary>>),
+    do: 10 + mask * 4 + length
+
+  defp frame_size(<<_fin_opcode, mask::1, length::7, _rest::binary>>) when length < 126,
+    do: 2 + mask * 4 + length
+
+  defp frame_size(_incomplete_header), do: 0
 
   defp close_loop(reason, parent, debug, %{conn: conn, timer_ref: timer_ref} = state) do
     transport = state.conn.transport
@@ -1355,7 +1409,16 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
     case result do
       {:ok, new_module_state} ->
-        state = Map.merge(state, %{buffer: <<>>, fragment: nil, module_state: new_module_state})
+        state =
+          Map.merge(state, %{
+            buffer: <<>>,
+            pending: [],
+            pending_size: 0,
+            pending_need: 0,
+            fragment: nil,
+            module_state: new_module_state
+          })
+
         websocket_loop(parent, debug, state)
 
       {:"$EXIT", reason} ->

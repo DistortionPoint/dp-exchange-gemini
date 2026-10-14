@@ -203,7 +203,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
                Socket.handle_frame(frame(@diff), state(%{last_depth_update: %{"BTC-USD" => 10}}))
 
       assert new_state.last_depth_update == %{"BTC-USD" => 15}
-      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
     end
 
     test "a sequence GAP is announced, because the local book is already wrong" do
@@ -212,8 +212,8 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert {:ok, _state} =
                Socket.handle_frame(frame(@diff), state(%{last_depth_update: %{"BTC-USD" => 5}}))
 
-      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
-      assert details.reason == "depth sequence gap"
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality, details: details}}
+      assert details.reason == :sequence_gap
       assert details.symbol == "BTC-USD"
     end
 
@@ -228,19 +228,19 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
         state(%{last_depth_update: %{"BTC-USD" => 10, "ETH-USD" => 10}})
 
       assert {:ok, new_state} = Socket.handle_frame(frame(@diff), state)
-      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
       assert new_state.last_depth_update["BTC-USD"] == 15
       assert new_state.last_depth_update["ETH-USD"] == 10
 
       assert {:ok, _state} = Socket.handle_frame(frame(eth_diff), new_state)
 
-      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality, details: details}}
       assert details.symbol == "ETH-USD"
     end
 
     test "the first frame is never a gap" do
       assert {:ok, _state} = Socket.handle_frame(frame(@diff), state())
-      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :data_quality}}
     end
 
     test "a stale or duplicate frame (u <= the last applied) is dropped, not applied (MD9)" do
@@ -324,7 +324,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
     test "a gap resyncs the symbol for a fresh snapshot, and drops every frame until it" do
       {ref, unsubscribing, awaiting} = resync_to_awaiting(resync_start())
 
-      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: :sequence_gap}}}
       refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
 
       assert %{@key => {:unsubscribing, ^ref, _seq}} = unsubscribing.depth_resync
@@ -430,7 +430,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
 
       # Not immediate: the message is due after the rest of the 5s window.
       refute_received {:resync_depth, @key, ^ref}
-      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: :sequence_gap}}}
 
       # Meanwhile the symbol is not delivering and says nothing more.
       assert {:ok, still_waiting} = Socket.handle_frame(frame(@later), waiting)
@@ -452,8 +452,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert {:ok, pending} = Socket.handle_frame(frame(restarted), start)
       assert %{@key => {:pending, _ref}} = pending.depth_resync
 
-      assert_received {:dp_exchange, :gemini,
-                       %Notice{details: %{reason: "depth sequence restart"}}}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: :sequence_restart}}}
 
       refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
 
@@ -572,7 +571,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       refute_received {:resync_depth, _key, _ref}
       refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
 
-      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: :sequence_gap}}}
 
       assert_received {:dp_exchange, :gemini,
                        %Notice{
@@ -580,7 +579,8 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
                          details: %{
                            delivering: false,
                            symbol: "BTC-USD",
-                           reason: "depth book cannot be rebuilt" <> _rest
+                           reason: :book_not_rebuildable,
+                           message: "depth book cannot be rebuilt" <> _rest
                          }
                        }}
 
@@ -617,8 +617,8 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert new_state.last_depth_update == %{"BTC-USD" => 15}
       # The book is now missing this frame's changes and the next frame will show no gap,
       # so the subscriber is told, as it is for a gap. It used to be silence.
-      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
-      assert details.reason == "undecodable depth update"
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality, details: details}}
+      assert details.reason == :undecodable_depth_update
     end
 
     test "a diff whose u is unreadable keeps the last good sequence, so the gap still shows" do
@@ -632,13 +632,13 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
 
         assert kept.last_depth_update == %{"BTC-USD" => 10}
         refute_received {:dp_exchange, :gemini, %Types.OrderBookDelta{}}
-        assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
-        assert details.reason == "undecodable depth update"
+        assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality, details: details}}
+        assert details.reason == :undecodable_depth_update
 
         # The next frame continues from the unreadable one, so it skips ahead of 10: a gap.
         later = %{@diff | "U" => 16, "u" => 17}
         assert {:ok, _state} = Socket.handle_frame(frame(later), kept)
-        assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "depth sequence gap"}}}
+        assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: :sequence_gap}}}
         # The later frame itself is still delivered; take it so the next pass starts clean.
         assert_received {:dp_exchange, :gemini, %Types.OrderBookDelta{sequence: 17}}
       end
@@ -717,8 +717,8 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert {:ok, _state} = Socket.handle_frame(frame(snapshot), claimed)
       refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
 
-      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
-      assert details.reason == "unreadable partial-depth snapshot"
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality, details: details}}
+      assert details.reason == :unreadable_partial_depth_snapshot
     end
 
     test "a snapshot on a connection with no claim raises a notice rather than vanishing" do
@@ -729,8 +729,8 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert {:ok, _state} = Socket.handle_frame(frame(snapshot), state())
       refute_received {:dp_exchange, :gemini, %Types.OrderBook{}}
 
-      assert_received {:dp_exchange, :gemini, %Notice{kind: :degraded, details: details}}
-      assert details.reason == "unattributable partial-depth snapshot"
+      assert_received {:dp_exchange, :gemini, %Notice{kind: :data_quality, details: details}}
+      assert details.reason == :unattributable_partial_depth_snapshot
     end
   end
 
@@ -756,7 +756,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
 
       # `subscribe/3` announces each request before sending it, so the real socket can
       # time out an unanswered one. This stub has no deadline to arm.
-      def handle_info({:awaiting_ack, _id}, state), do: {:noreply, state}
+      def handle_info({:awaiting_ack, _id, _symbols}, state), do: {:noreply, state}
 
       def handle_info({:ack_withdrawn, _id}, state), do: {:noreply, state}
     end

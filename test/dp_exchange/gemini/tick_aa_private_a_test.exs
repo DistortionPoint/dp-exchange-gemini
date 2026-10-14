@@ -228,7 +228,7 @@ defmodule DpExchange.Gemini.TickAAPrivateATest do
   describe "an authenticated call needs a URL it can check" do
     test "a base_url that is not a string is refused before anything is signed" do
       for base_url <- [nil, 123, ~c"https://api.gemini.com"] do
-        assert {:error, {:insecure_url, :base_url}} =
+        assert {:error, {:insecure_url, :gemini}} =
                  Private.get_balances(@credentials,
                    base_url: base_url,
                    plug: exploding(),

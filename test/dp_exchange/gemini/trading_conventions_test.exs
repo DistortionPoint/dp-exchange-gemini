@@ -304,7 +304,7 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
     end
 
     test "a venue refusal and a decided-before-sending error are not unconfirmed" do
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                place(@request, answering(400, ~s({"result":"error","reason":"InvalidSymbol"})))
 
       # Any other 4xx answered to the one attempt is a refusal too (DV6): 405, 409, 415, 422.

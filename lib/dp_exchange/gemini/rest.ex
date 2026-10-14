@@ -137,7 +137,7 @@ defmodule DpExchange.Gemini.Rest do
     "AmbiguousAuthentication" => :ambiguous_authentication,
     "InvalidApiKey" => :invalid_api_key,
     "MissingSecurityHeaders" => :missing_security_headers,
-    "InvalidSymbol" => :invalid_symbol,
+    "InvalidSymbol" => :not_listed,
     "InvalidParameterValue" => :invalid_parameter_value
   }
 
@@ -204,7 +204,7 @@ defmodule DpExchange.Gemini.Rest do
   def get_price(symbol, opts) do
     with :ok <- validate_symbol(symbol),
          native = SymbolFormat.to_exchange_symbol(symbol),
-         {:ok, body} <- get_body("/v1/pubticker/#{segment(native)}", opts),
+         {:ok, body} <- get_symbol_body("/v1/pubticker/#{segment(native)}", opts),
          {:ok, last} <- quoted_price(body),
          {:ok, price} <- required_price(last, :price) do
       # The ticker's `volume` is "the 24 hour volume on the exchange", measured up to its
@@ -248,7 +248,7 @@ defmodule DpExchange.Gemini.Rest do
   def get_top_of_book(symbol, opts) do
     with :ok <- validate_symbol(symbol),
          native = SymbolFormat.to_exchange_symbol(symbol),
-         {:ok, body} <- get_body("/v1/pubticker/#{segment(native)}", opts),
+         {:ok, body} <- get_symbol_body("/v1/pubticker/#{segment(native)}", opts),
          {:ok, body} <- object(body),
          :ok <- ticker_states_a_side(body),
          # A side the venue stated and this package cannot read is refused, not `nil`:
@@ -343,7 +343,7 @@ defmodule DpExchange.Gemini.Rest do
 
     with {:ok, path, time_frame} <- candles_path(native, timeframe),
          :ok <- range_within_window(timeframe, range),
-         {:ok, body} <- get_body("#{path}/#{segment(native)}/#{time_frame}", opts),
+         {:ok, body} <- get_symbol_body("#{path}/#{segment(native)}/#{time_frame}", opts),
          {:ok, rows} <- list(body),
          {:ok, candles} <- rows_to_candles(rows, canonical, timeframe) do
       {:ok, select_candles(candles, timeframe, range, opts)}
@@ -392,18 +392,16 @@ defmodule DpExchange.Gemini.Rest do
   `DateTime`s, checked without sending anything.
 
   A non-list range raised in `Keyword.get/3`. A non-keyword-list is
-  `{:error, {:invalid_range, range}}`; a bad bound keeps its more specific
-  `{:error, {:invalid_range, :start | :end, value}}`. Exposed so `DpExchange.Gemini.Fake`
-  refuses with this function.
+  `{:error, {:invalid_range, range}}`, and so is a bound that is not a `DateTime` (the
+  family shape; it used to be `{:invalid_range, :start | :end, value}`, which a consumer
+  matching the family shape never saw). Exposed so `DpExchange.Gemini.Fake` refuses with
+  this function.
   """
-  @spec validate_range(term()) ::
-          :ok | {:error, {:invalid_range, term()} | {:invalid_range, :start | :end, term()}}
+  @spec validate_range(term()) :: :ok | {:error, {:invalid_range, term()}}
   def validate_range(range) do
-    if is_list(range) and Keyword.keyword?(range) do
-      case Enum.find([:start, :end], &(not range_bound?(Keyword.get(range, &1)))) do
-        nil -> :ok
-        bad -> {:error, {:invalid_range, bad, Keyword.get(range, bad)}}
-      end
+    if is_list(range) and Keyword.keyword?(range) and
+         Enum.all?([:start, :end], &range_bound?(Keyword.get(range, &1))) do
+      :ok
     else
       {:error, {:invalid_range, range}}
     end
@@ -414,7 +412,7 @@ defmodule DpExchange.Gemini.Rest do
   can answer, checked without sending it.
 
   The width first (`{:error, {:unsupported_timeframe, timeframe}}`), then the range's bounds
-  (`{:error, {:invalid_range, bound, value}}`), then the window itself
+  (`{:error, {:invalid_range, range}}`), then the window itself
   (`{:error, {:range_unavailable, timeframe, earliest: _, requested: _}}`) — the refusals
   `get_historical_prices/4` makes before it reaches the network, in that order. Exposed so
   `DpExchange.Gemini.Fake` refuses with this exact function rather than a second copy of the
@@ -574,7 +572,7 @@ defmodule DpExchange.Gemini.Rest do
   def quantization(symbol, opts) do
     with :ok <- validate_symbol(symbol),
          native = SymbolFormat.to_exchange_symbol(symbol),
-         {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
+         {:ok, raw} <- get_symbol_body("/v1/symbols/details/#{segment(native)}", opts),
          {:ok, body} <- object(raw),
          {:ok, price_increment} <- stated_increment(body, "quote_increment"),
          {:ok, quantity_increment} <- stated_increment(body, "tick_size"),
@@ -697,7 +695,7 @@ defmodule DpExchange.Gemini.Rest do
   defp instrument(symbol, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
-    with {:ok, raw} <- get_body("/v1/symbols/details/#{segment(native)}", opts),
+    with {:ok, raw} <- get_symbol_body("/v1/symbols/details/#{segment(native)}", opts),
          {:ok, body} <- object(raw),
          # Text or absent: a number or an object in a currency code went onto the instrument.
          {:ok, base} <- stated_text(body["base_currency"]),
@@ -754,7 +752,7 @@ defmodule DpExchange.Gemini.Rest do
          native = SymbolFormat.to_exchange_symbol(symbol),
          :ok <- validate_book_opts(opts),
          {:ok, body} <-
-           get_body("/v1/book/#{segment(native)}", Keyword.put(opts, :params, params)),
+           get_symbol_body("/v1/book/#{segment(native)}", Keyword.put(opts, :params, params)),
          :ok <- book_shape(body),
          :ok <- readable_book_side(body["bids"]),
          :ok <- readable_book_side(body["asks"]) do
@@ -900,7 +898,7 @@ defmodule DpExchange.Gemini.Rest do
     # holding that object whole. The vendor's OpenAPI gives this 200 as a bare array, never
     # either.
     with {:ok, rows} <-
-           get_body("/v1/trades/#{segment(native)}", Keyword.put(opts, :params, params)),
+           trades_body("/v1/trades/#{segment(native)}", Keyword.put(opts, :params, params)),
          {:ok, rows} <- list(rows),
          :ok <- check_trade_window(length(rows), opts) do
       rows
@@ -1227,7 +1225,7 @@ defmodule DpExchange.Gemini.Rest do
           {:ok, Funding.t()} | {:error, term()} | {:refused, term()}
   def get_funding(symbol, opts) do
     with :ok <- validate_symbol(symbol),
-         {:ok, raw} <- get_body("/v1/fundingamount/#{segment(symbol)}", opts),
+         {:ok, raw} <- get_symbol_body("/v1/fundingamount/#{segment(symbol)}", opts),
          {:ok, body} <- object(raw),
          {:ok, echoed} <- echoed_symbol(body, symbol),
          # A figure the venue SENT and this package cannot read refuses the reply: `nil` is
@@ -1262,7 +1260,7 @@ defmodule DpExchange.Gemini.Rest do
           {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
   def next_funding_timestamp(symbol, opts) do
     with :ok <- validate_symbol(symbol),
-         {:ok, body} <- get_body("/v1/nextfundingtimestamp/#{segment(symbol)}", opts) do
+         {:ok, body} <- get_symbol_body("/v1/nextfundingtimestamp/#{segment(symbol)}", opts) do
       case epoch_ms(body) do
         nil -> {:error, :unexpected_response_shape}
         at -> {:ok, at}
@@ -1289,7 +1287,7 @@ defmodule DpExchange.Gemini.Rest do
           {:ok, ContractStats.t()} | {:error, term()} | {:refused, term()}
   def get_contract_stats(symbol, opts) do
     with :ok <- validate_symbol(symbol),
-         {:ok, raw} <- get_body("/v1/riskstats/#{segment(symbol)}", opts),
+         {:ok, raw} <- get_symbol_body("/v1/riskstats/#{segment(symbol)}", opts),
          {:ok, body} <- object(raw),
          {:ok, echoed} <- echoed_symbol(body, symbol),
          {:ok, product_type} <- stated_text(body["product_type"]),
@@ -1352,7 +1350,24 @@ defmodule DpExchange.Gemini.Rest do
   def list(_other), do: {:error, :unexpected_response_shape}
 
   defp get_body(path, opts) do
-    with {:ok, body, _headers} <- get_with_headers(path, opts), do: {:ok, body}
+    with {:ok, body, _headers} <- get_with_headers(path, opts, :collection), do: {:ok, body}
+  end
+
+  # A read scoped to one symbol: the venue's "not listed" and "listed but nothing to quote"
+  # answers are read into the family reasons `:not_listed` and `:no_quote` (see
+  # `symbol_refusal/2`), with no venue text in the reason.
+  defp get_symbol_body(path, opts) do
+    with {:ok, body, _headers} <- get_with_headers(path, opts, :symbol), do: {:ok, body}
+  end
+
+  # `GET /v1/trades/{symbol}` refuses an unlisted symbol with `{"reason":"BadRequest"}`
+  # (measured live 2026-09-06). Its parameters are validated locally before the request, so
+  # on this route the word names the symbol.
+  defp trades_body(path, opts) do
+    case get_symbol_body(path, opts) do
+      {:refused, {:unknown_reason, "BadRequest"}} -> {:refused, :not_listed}
+      other -> other
+    end
   end
 
   # Everything goes through `request/5` rather than `get/3`, for two reasons that both
@@ -1371,7 +1386,7 @@ defmodule DpExchange.Gemini.Rest do
   # one shape the family reserves for a possibly-transient failure — so a permanently
   # unlisted symbol looked retryable forever. Every symbol-scoped GET in this module
   # shares this clause, so the fix is here rather than at each call site.
-  defp get_with_headers(path, opts) do
+  defp get_with_headers(path, opts, scope) do
     url = base_url(opts) <> path <> query(opts)
 
     case HttpClient.request(:get, url, [], nil, request_opts(opts)) do
@@ -1379,7 +1394,7 @@ defmodule DpExchange.Gemini.Rest do
         with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, headers}
 
       {:ok, %{status: status, body: body}} when status in [400, 404] ->
-        {:refused, refusal(body)}
+        {:refused, refusal(scope, status, body)}
 
       # Quoted bounded, as Core and `Private` do: a CDN error page is not an error message.
       {:ok, %{status: status, body: body}} ->
@@ -1486,7 +1501,29 @@ defmodule DpExchange.Gemini.Rest do
   # through it. A plain-text refusal body is not an undecodable *response*; it is the
   # venue's answer in the form the venue chose, and refusing it would swap a specific
   # `{:refused, reason}` for a generic error.
-  defp refusal(body), do: refusal_reason(body)
+  defp refusal(:collection, _status, body), do: refusal_reason(body)
+  defp refusal(:symbol, status, body), do: status |> symbol_refusal(refusal_reason(body))
+
+  # ## A symbol-scoped read answers in the family's reasons, never the venue's text
+  #
+  #   * `{:refused, :not_listed}` — the venue does not list the symbol: a JSON `InvalidSymbol`
+  #     (already `:not_listed` after `classify/2`), the plain-text `Supplied value 'X' is not a
+  #     valid symbol` of `/v2/candles`, or an empty 404 (`/v1/fundingamount`).
+  #   * `{:refused, :no_quote}` — `'X' does not have available data yet`, the plain-text 404 of
+  #     `/v1/pubticker` (measured live 2026-09-06): the venue has nothing to quote.
+  #
+  # The venue's wording is not stable across venues, so it does not ride in the reason.
+  defp symbol_refusal(404, :refused), do: :not_listed
+  defp symbol_refusal(_status, {:unknown_reason, text}), do: unknown_symbol_text(text)
+  defp symbol_refusal(_status, reason), do: reason
+
+  defp unknown_symbol_text(text) do
+    cond do
+      String.contains?(text, "does not have available data yet") -> :no_quote
+      String.contains?(text, "is not a valid symbol") -> :not_listed
+      true -> {:unknown_reason, text}
+    end
+  end
 
   # Shared with `DpExchange.Gemini.Private`, which refuses on the same venue vocabulary.
   # One implementation rather than two copies that can drift apart on a security fix.
@@ -1592,6 +1629,8 @@ defmodule DpExchange.Gemini.Rest do
   # atom already says what the word would have.
   defp classify(reason, message) do
     case Map.fetch(@refusal_reasons, reason) do
+      # The family reason carries no venue text (D1): `InvalidSymbol` is `:not_listed`.
+      {:ok, :not_listed} -> :not_listed
       {:ok, known} when is_binary(message) -> {known, message}
       {:ok, known} -> known
       :error -> {:unknown_reason, bounded_text(reason)}

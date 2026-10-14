@@ -99,28 +99,34 @@ defmodule DpExchange.Gemini.FakeParityTest do
   end
 
   describe "per-endpoint symbol refusal — each shape is a specific measurement, not one atom" do
-    test "get_price/2 and get_top_of_book/2: the ticker's plain-text 404" do
-      # Measured live 2026-09-06 (`rest_test.exs`, \"get_price refuses on a 404, keeping
-      # the venue's own words\"): `/v1/pubticker/{symbol}` answers plain text, not JSON.
-      assert Fake.get_price("NOPE-USD") ==
-               {:refused, {:unknown_reason, "'NOPE-USD' does not have available data yet"}}
-
-      assert Fake.get_top_of_book("NOPE-USD") ==
-               {:refused, {:unknown_reason, "'NOPE-USD' does not have available data yet"}}
+    test "get_price/2 and get_top_of_book/2: the ticker's plain-text 404 is :no_quote" do
+      # Measured live 2026-09-06 (`rest_test.exs`): `/v1/pubticker/{symbol}` answers plain
+      # text, `'X' does not have available data yet`, which `Rest` reads as `:no_quote`.
+      assert Fake.get_price("NOPE-USD") == {:refused, :no_quote}
+      assert Fake.get_top_of_book("NOPE-USD") == {:refused, :no_quote}
     end
 
-    test "get_order_book/2 and quantization/1: the JSON InvalidSymbol reason" do
-      assert Fake.get_order_book("NOPE-USD") == {:refused, :invalid_symbol}
-      assert Fake.quantization("NOPE-USD") == {:refused, :invalid_symbol}
+    test "get_order_book/2 and quantization/1: the JSON InvalidSymbol reason is :not_listed" do
+      assert Fake.get_order_book("NOPE-USD") == {:refused, :not_listed}
+      assert Fake.quantization("NOPE-USD") == {:refused, :not_listed}
     end
 
-    test "get_historical_prices/4: the candles endpoint's own plain-text 400" do
-      assert Fake.get_historical_prices("NOPE-USD", "1d") ==
-               {:refused, {:unknown_reason, "Supplied value 'NOPE-USD' is not a valid symbol"}}
+    test "get_historical_prices/4: the candles endpoint's plain-text 400 is :not_listed" do
+      assert Fake.get_historical_prices("NOPE-USD", "1d") == {:refused, :not_listed}
     end
 
-    test "get_trades/2: refuses at all, which it used to not do regardless of shape" do
-      assert {:refused, _reason} = Fake.get_trades("NOPE-USD")
+    test "get_trades/2: refuses an unlisted symbol with :not_listed" do
+      assert Fake.get_trades("NOPE-USD") == {:refused, :not_listed}
+    end
+
+    test "list_instruments/1 names the unlisted symbol inside a :not_listed refusal" do
+      assert Fake.list_instruments(symbols: ["NOPE-USD"]) ==
+               {:error, {:instrument_detail_failed, "NOPE-USD", {:refused, :not_listed}}}
+    end
+
+    test "get_funding/2 and get_contract_stats/2 refuse a non-perpetual as :not_listed" do
+      assert Fake.get_funding("BTC-USD") == {:refused, :not_listed}
+      assert Fake.get_contract_stats("BTC-USD") == {:refused, :not_listed}
     end
 
     test "place_order/3: the same InvalidSymbol reason every other private POST shares" do
@@ -135,7 +141,7 @@ defmodule DpExchange.Gemini.FakeParityTest do
         time_in_force: :gtc
       }
 
-      assert {:refused, :invalid_symbol} = Fake.place_order(credentials, base, [])
+      assert {:refused, :not_listed} = Fake.place_order(credentials, base, [])
     end
   end
 

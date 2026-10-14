@@ -77,7 +77,7 @@ defmodule DpExchange.Gemini.TickZSecurityTest do
 
   describe "an authenticated call is never sent over cleartext" do
     test "a signed POST to an http:// base_url is refused before it is signed or sent" do
-      assert {:error, {:insecure_url, :base_url}} =
+      assert {:error, {:insecure_url, :gemini}} =
                Private.get_balances(@credentials,
                  base_url: "http://api.gemini.example",
                  plug: exploding(),
@@ -86,7 +86,7 @@ defmodule DpExchange.Gemini.TickZSecurityTest do
     end
 
     test "a signed GET to an http:// base_url is refused" do
-      assert {:error, {:insecure_url, :base_url}} =
+      assert {:error, {:insecure_url, :gemini}} =
                Private.list_networks("BTC",
                  credentials: @credentials,
                  base_url: "http://api.gemini.example",
@@ -96,7 +96,7 @@ defmodule DpExchange.Gemini.TickZSecurityTest do
     end
 
     test "the token refresh, which carries a refresh token and a client secret, is https only" do
-      assert {:error, {:insecure_url, :auth_url}} =
+      assert {:error, {:insecure_url, :gemini}} =
                Private.refresh_access_token("client-1", "old-refresh",
                  auth_url: "http://exchange.gemini.example",
                  client_secret: "test-secret-not-real",

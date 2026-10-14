@@ -401,6 +401,33 @@ defmodule DpExchange.Gemini.FeedTest do
     end
   end
 
+  describe "wanted/1 — what was asked for, not what arrived" do
+    test "lists the subscribed symbols sorted, whether or not anything was delivered" do
+      feed = start_feed()
+      assert Feed.wanted(feed) == []
+
+      :ok = Feed.subscribe(feed, ["ETH-USD", "BTC-USD"], to: self())
+
+      assert Feed.wanted(feed) == ["BTC-USD", "ETH-USD"]
+      # Nothing has arrived: coverage is empty while wanted is not.
+      assert Feed.coverage(feed) == %{}
+
+      :ok = Feed.unsubscribe(feed, ["BTC-USD"])
+      assert Feed.wanted(feed) == ["ETH-USD"]
+    end
+
+    test "the facade reads it from the feed it is pointed at" do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["ETH-USD", "BTC-USD"], to: self())
+
+      assert DpExchange.Gemini.wanted(feed: feed) == ["BTC-USD", "ETH-USD"]
+    end
+
+    test "the facade answers [] with no feed running" do
+      assert DpExchange.Gemini.wanted(feed: :no_such_gemini_feed_for_wanted) == []
+    end
+  end
+
   describe "coverage_by_kind/1" do
     test "with nothing delivered, every declared kind is present and empty" do
       # Every kind key always appears, even with no data yet — an absent key would read
@@ -777,7 +804,8 @@ defmodule DpExchange.Gemini.FeedTest do
       # happen — found by running the full suite repeatedly, not any one test alone.
       assert_receive {:dp_exchange, :gemini, %Notice{kind: :coverage_change} = notice}, 5_000
       assert notice.severity == :warning
-      assert notice.details.reason =~ "send_timeout"
+      assert notice.details.reason == :resubscribe_failed
+      assert notice.details.message =~ "send_timeout"
 
       # Two more failing cycles with the same socket must not re-emit — the notice fires
       # once on the transition INTO failure, never once per tick while it continues.
@@ -1542,8 +1570,12 @@ defmodule DpExchange.Gemini.FeedTest do
       feed = start_feed()
       :ok = Feed.subscribe_notices(feed, to: self())
 
+      # The shape `Socket` raises: one atom reason for every status, so the status must be
+      # what keeps a 400 and a 429 apart.
       refusal = fn status ->
-        Notice.new(:refusal, :gemini, details: %{subscribe_status: status})
+        Notice.new(:refusal, :gemini,
+          details: %{reason: :subscribe_refused, subscribe_status: status, symbols: ["BTC-USD"]}
+        )
       end
 
       send(feed, {:dp_exchange, :gemini, refusal.(400)})

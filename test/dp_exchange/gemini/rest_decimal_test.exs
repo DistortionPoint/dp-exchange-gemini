@@ -122,13 +122,21 @@ defmodule DpExchange.Gemini.RestDecimalTest do
              Rest.get_historical_prices("BTC-USD", "1m", [], plug: raw(body), retry_attempts: 0)
   end
 
-  test "a plain-text refusal still keeps the venue's words" do
+  test "a plain-text refusal is still read, as :not_listed for an invalid symbol" do
     # With `decode_body: false` every 4xx body reaches `refusal/1` as bytes.
     text = "Supplied value 'X' is not a valid symbol"
 
-    assert {:refused, {:unknown_reason, ^text}} =
+    assert {:refused, :not_listed} =
              Rest.get_historical_prices("BTC-USD", "1m", [],
                plug: raw(text, 400),
+               retry_attempts: 0
+             )
+
+    other = "Something else entirely"
+
+    assert {:refused, {:unknown_reason, ^other}} =
+             Rest.get_historical_prices("BTC-USD", "1m", [],
+               plug: raw(other, 400),
                retry_attempts: 0
              )
   end
@@ -136,7 +144,7 @@ defmodule DpExchange.Gemini.RestDecimalTest do
   test "a JSON refusal body is still classified" do
     body = ~s({"result": "error", "reason": "InvalidSymbol", "message": "no such symbol"})
 
-    assert {:refused, {:invalid_symbol, "no such symbol"}} =
+    assert {:refused, :not_listed} =
              Rest.get_price("BTC-USD", plug: raw(body, 400), retry_attempts: 0)
   end
 

@@ -178,13 +178,13 @@ defmodule DpExchange.Gemini.RestTest do
       assert quote_struct.venue_time == nil
     end
 
-    test "a 400 is a REFUSAL carrying the venue's own reason AND its message" do
-      # Permanent versus transient is what a caller acts on. Gemini names its reason, so the
-      # refusal carries it rather than flattening to a generic atom — and it carries the
-      # venue's sentence too, which is the half this used to throw away.
+    test "a 400 InvalidSymbol is :not_listed, and the venue's sentence does not ride in it" do
+      # Permanent versus transient is what a caller acts on. The family reason for a symbol
+      # the venue does not list is `:not_listed` with no venue text (decision D1): the
+      # sentence is not stable across venues. It was `{:invalid_symbol, "no such symbol"}`.
       body = %{"result" => "error", "reason" => "InvalidSymbol", "message" => "no such symbol"}
 
-      assert {:refused, {:invalid_symbol, "no such symbol"}} =
+      assert {:refused, :not_listed} =
                Rest.get_price("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
     end
 
@@ -220,14 +220,14 @@ defmodule DpExchange.Gemini.RestTest do
       # literally and must stay shape-identical to the real venue.
       body = %{"result" => "error", "reason" => "InvalidSymbol"}
 
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                Rest.get_price("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
     end
 
     test "a blank message counts as no message, not as an empty one" do
       body = %{"result" => "error", "reason" => "InvalidSymbol", "message" => "   "}
 
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                Rest.get_price("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
     end
 
@@ -302,7 +302,7 @@ defmodule DpExchange.Gemini.RestTest do
             {"AmbiguousAuthentication", :ambiguous_authentication},
             {"InvalidApiKey", :invalid_api_key},
             {"MissingSecurityHeaders", :missing_security_headers},
-            {"InvalidSymbol", :invalid_symbol},
+            {"InvalidSymbol", :not_listed},
             {"InvalidParameterValue", :invalid_parameter_value}
           ] do
         body = %{"result" => "error", "reason" => sent}
@@ -854,7 +854,7 @@ defmodule DpExchange.Gemini.RestTest do
     test "quantization refuses an unlisted symbol rather than erroring" do
       body = %{"result" => "error", "reason" => "InvalidSymbol"}
 
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                Rest.quantization("NOPE-USD",
                  plug: responding(body, status: 400),
                  retry_attempts: 0
@@ -876,7 +876,7 @@ defmodule DpExchange.Gemini.RestTest do
     test "a candle request for an unlisted symbol is refused" do
       body = %{"result" => "error", "reason" => "InvalidSymbol"}
 
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                Rest.get_historical_prices("NOPE-USD", "1d", [],
                  plug: responding(body, status: 400),
                  retry_attempts: 0
@@ -886,7 +886,7 @@ defmodule DpExchange.Gemini.RestTest do
     test "an order book request for an unlisted symbol is refused" do
       body = %{"result" => "error", "reason" => "InvalidSymbol"}
 
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                Rest.get_order_book("NOPE-USD",
                  plug: responding(body, status: 400),
                  retry_attempts: 0
@@ -909,26 +909,41 @@ defmodule DpExchange.Gemini.RestTest do
       end
     end
 
-    test "get_price refuses on a 404, keeping the venue's own words" do
+    test "get_price on a 404 'does not have available data yet' is {:refused, :no_quote}" do
       body = "'nonexistentsymbolxyz' does not have available data yet"
 
-      assert {:refused, {:unknown_reason, ^body}} =
+      assert {:refused, :no_quote} =
                Rest.get_price("NOPE-USD", plug: responding_text(body, 404), retry_attempts: 0)
     end
 
     test "get_top_of_book refuses on a 404 the same way" do
       body = "'nonexistentsymbolxyz' does not have available data yet"
 
-      assert {:refused, {:unknown_reason, ^body}} =
+      assert {:refused, :no_quote} =
                Rest.get_top_of_book("NOPE-USD",
                  plug: responding_text(body, 404),
                  retry_attempts: 0
                )
     end
 
-    test "an empty 404 body (measured on /v1/fundingamount) is still a plain refusal" do
-      assert {:refused, :refused} =
+    test "an empty 404 body (measured on /v1/fundingamount) is {:refused, :not_listed}" do
+      assert {:refused, :not_listed} =
+               Rest.get_funding("PERP-USD", plug: responding_text("", 404), retry_attempts: 0)
+
+      assert {:refused, :not_listed} =
                Rest.get_price("NOPE-USD", plug: responding_text("", 404), retry_attempts: 0)
+    end
+
+    test "a collection read's empty 404 is not read as an unlisted symbol" do
+      assert {:refused, :refused} =
+               Rest.get_symbols(plug: responding_text("", 404), retry_attempts: 0)
+    end
+
+    test "get_trades' BadRequest refusal is :not_listed" do
+      body = %{"result" => "error", "reason" => "BadRequest", "message" => "bad"}
+
+      assert {:refused, :not_listed} =
+               Rest.get_trades("NOPE-USD", plug: responding(body, status: 400), retry_attempts: 0)
     end
   end
 
@@ -939,7 +954,7 @@ defmodule DpExchange.Gemini.RestTest do
     # collapses unparseable JSON to `%{}` — right for a 2xx body, wrong for a refusal one,
     # where it used to discard the venue's only stated reason before `refusal_reason/1`
     # ever saw it.
-    test "a plain-text 400 becomes {:unknown_reason, text}, not a bare :refused" do
+    test "a plain-text 400 naming an invalid symbol is :not_listed, not a bare :refused" do
       body = "Supplied value 'NOPE-USD' is not a valid symbol"
 
       plug = fn conn ->
@@ -949,8 +964,22 @@ defmodule DpExchange.Gemini.RestTest do
         |> Plug.Conn.send_resp(400, body)
       end
 
-      assert {:refused, {:unknown_reason, ^body}} =
+      assert {:refused, :not_listed} =
                Rest.get_historical_prices("NOPE-USD", "1m", [], plug: plug, retry_attempts: 0)
+    end
+
+    test "any other plain-text refusal keeps the venue's text as {:unknown_reason, text}" do
+      body = "Something the venue made up"
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Plug.Conn.put_resp_content_type("text/plain")
+        |> Plug.Conn.send_resp(400, body)
+      end
+
+      assert {:refused, {:unknown_reason, ^body}} =
+               Rest.get_price("NOPE-USD", plug: plug, retry_attempts: 0)
     end
 
     test "a body that arrives as a raw string but IS valid JSON with a reason still reads it" do
@@ -965,7 +994,7 @@ defmodule DpExchange.Gemini.RestTest do
         |> Plug.Conn.send_resp(400, ~s({"result":"error","reason":"InvalidSymbol"}))
       end
 
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                Rest.get_price("NOPE-USD", plug: plug, retry_attempts: 0)
     end
 

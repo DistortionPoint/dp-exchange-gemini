@@ -137,9 +137,9 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
       # live 2026-09-06, `GET /v1/pubticker/nonexistentsymbolxyz` returns 404 with the
       # venue naming exactly the condition, `'nonexistentsymbolxyz' does not have
       # available data yet`. `Rest.get_with_headers/2` now treats 404 the same as 400 on
-      # every symbol-scoped GET. A body with no reason at all still degrades to a plain
-      # refusal rather than inventing one.
-      assert {:refused, :refused} =
+      # every symbol-scoped GET. A 404 whose body names no reason is the venue not listing
+      # the symbol: `{:refused, :not_listed}` (family decision D1).
+      assert {:refused, :not_listed} =
                Rest.get_price("BTC-USD", plug: json(%{}, 404), retry_attempts: 0)
     end
 

@@ -103,12 +103,17 @@ defmodule DpExchange.Gemini.FamilyConventionsTest do
       end
     end
 
-    test "a bound that is not a DateTime keeps its more specific tag" do
+    test "a bound that is not a DateTime is invalid_range with the whole range (D9)" do
       assert Rest.get_historical_prices("BTC-USD", "1d", [start: "x"], real_opts()) ==
-               {:error, {:invalid_range, :start, "x"}}
+               {:error, {:invalid_range, [start: "x"]}}
 
       assert Fake.get_historical_prices("BTC-USD", "1d", end: 5) ==
-               {:error, {:invalid_range, :end, 5}}
+               {:error, {:invalid_range, [end: 5]}}
+
+      assert Rest.validate_range(start: ~U[2026-01-01 00:00:00Z], end: :later) ==
+               {:error, {:invalid_range, [start: ~U[2026-01-01 00:00:00Z], end: :later]}}
+
+      assert Rest.validate_range(start: ~U[2026-01-01 00:00:00Z]) == :ok
     end
   end
 

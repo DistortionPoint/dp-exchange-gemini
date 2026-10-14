@@ -972,6 +972,21 @@ defmodule DpExchange.Gemini do
   end
 
   @doc """
+  The symbols the consumer asked to stream, sorted and canonical: what was *requested*, as
+  opposed to `coverage/1`, which is what is observed delivering.
+
+  Answers `[]` when no feed is running or the feed cannot be reached. A symbol in this list
+  that is absent from `coverage/1` is one the venue has not (yet) delivered for. Not part of
+  Core's `Venue` behaviour at the pinned Core version, so it carries no `@impl`.
+  """
+  @spec wanted(keyword()) :: [String.t()]
+  @impl true
+  def wanted(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
+  end
+
+  @doc """
   Subscribes the calling process to this venue's notices (for example `:data_quality`).
 
   With no feed running it answers `{:error, :feed_not_started}`. See

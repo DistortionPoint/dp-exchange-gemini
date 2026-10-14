@@ -366,7 +366,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       assert {:error, {:missing_field, :price}} =
                Fake.place_order(credentials, Map.delete(base, :price), [])
 
-      assert {:refused, :invalid_symbol} =
+      assert {:refused, :not_listed} =
                Fake.place_order(credentials, Map.put(base, :symbol, "NOPE-USD"), [])
 
       assert {:error, {:missing_credentials, :gemini}} = Fake.place_order(%{}, base, [])
@@ -427,8 +427,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
     end
 
     test "an unlisted symbol is refused for historical prices too" do
-      assert Fake.get_historical_prices("NOPE-USD", "1d") ==
-               {:refused, {:unknown_reason, "Supplied value 'NOPE-USD' is not a valid symbol"}}
+      assert Fake.get_historical_prices("NOPE-USD", "1d") == {:refused, :not_listed}
     end
 
     test "update_symbols narrows what coverage reports" do

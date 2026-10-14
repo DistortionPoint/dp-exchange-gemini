@@ -58,9 +58,10 @@ reset that memory. A consumer counting on "one `Quote` per `bookTicker` frame th
 
 A `bookTicker` frame this package cannot read is not dropped in silence: a bid or ask the
 venue stated but that is unreadable (or negative) raises a `:data_quality` `Core.Notice`
-(`details.reason` `"unreadable bookTicker level"`, with the symbol) and no `TopOfBook` is
+(`details.reason` `:unreadable_book_ticker_level`, with the symbol) and no `TopOfBook` is
 delivered; a frame whose symbol is absent, blank or not text raises `:data_quality` with
-`details.reason` `"undecodable book ticker"`. A side priced `0` is no resting order (`nil`),
+`details.reason` `:undecodable_book_ticker`. Every notice's `details.reason` is an atom;
+the words are in `details.message`. A side priced `0` is no resting order (`nil`),
 with its size.
 
 ## An order book is sorted, so `hd(bids)` is the best bid
@@ -74,7 +75,7 @@ Two consequences:
 
 * **A snapshot with a row this package cannot read is refused whole**, not delivered with
   the row dropped or kept as `{price, nil}`. `get_order_book/2` answers
-  `{:error, :unexpected_response_shape}`; a streamed snapshot raises a `:degraded` notice
+  `{:error, :unexpected_response_shape}`; a streamed snapshot raises a `:data_quality` notice
   and is not delivered. A damaged book that looks complete is worse than no book, and
   diffs already refused the same way. A side the venue states as absent is still empty.
 * **A streamed DELTA is the exception and is deliberately unsorted.** `OrderBookDelta` is
@@ -342,8 +343,9 @@ behind its). The bar that is still forming
 call** (`Core.Types.Candle` has no flag for it). Before, the forming bar was always returned,
 indistinguishable from a closed one. `include_partial` must be a boolean
 (`{:error, {:invalid_option, :include_partial, value}}`). `range` must be a keyword list whose
-`:start`/`:end` are `DateTime`s: a non-keyword `range` is `{:error, {:invalid_range, range}}`
-and a bad bound `{:error, {:invalid_range, :start | :end, value}}`. A blank or non-string
+`:start`/`:end` are `DateTime`s: a non-keyword `range`, or a bound that is not a `DateTime`,
+is `{:error, {:invalid_range, range}}` (the whole range; it was
+`{:invalid_range, :start | :end, value}` for a bad bound, BREAKING). A blank or non-string
 symbol is `{:error, {:invalid_symbol, symbol}}`, decided before anything is sent. Bars come
 back oldest first.
 
@@ -408,10 +410,22 @@ Measured live 2026-09-06: `GET /v1/pubticker/{symbol}` and `GET
 same fact: `{:refused, reason}`, permanent for the symbol as given, not
 `{:error, {:exchange_error, …}}`, which this family reserves for a failure worth retrying.
 
-Where the venue's refusal body is not JSON at all — measured on `/v2/candles`'s 400,
-plain text rather than the usual `{"reason": …}` shape — the text itself is the reason:
-`{:refused, {:unknown_reason, "Supplied value 'X' is not a valid symbol"}}`, not a bare
-`{:refused, :refused}` that throws the venue's own words away.
+**The reason is the family's, never the venue's text** (BREAKING, a changed returned reason):
+
+* `{:refused, :not_listed}` — the venue does not list the symbol. This is what a JSON
+  `InvalidSymbol` (`get_order_book/2`, `quantization/1`, `list_instruments/1`'s
+  `{:instrument_detail_failed, symbol, {:refused, :not_listed}}`, `place_order/3`), the
+  plain-text 400 of `/v2/candles` (`Supplied value 'X' is not a valid symbol`), `get_trades/2`'s
+  `BadRequest` and an empty 404 (`/v1/fundingamount`) all become. It replaces
+  `{:refused, :invalid_symbol}`, `{:refused, {:invalid_symbol, text}}`, a bare
+  `{:refused, :refused}` and `{:refused, {:unknown_reason, "Supplied value …"}}`. It is not
+  `{:error, {:invalid_symbol, value}}`, which stays the local, before-any-request answer for
+  a symbol that is not a non-blank string.
+* `{:refused, :no_quote}` — `'X' does not have available data yet`, `/v1/pubticker`'s 404
+  (`get_price/2`, `get_top_of_book/2`): the venue has nothing to quote. It replaces
+  `{:refused, {:unknown_reason, "'X' does not have available data yet"}}`.
+
+`Fake` answers the same reasons for the same inputs.
 
 **Private (authenticated) calls refuse on every 4xx but a 429** (BREAKING, tick R: a 405,
 409, 413, 415 or 422 was a bare `{:error, {:exchange_error, :gemini, "HTTP 4xx: …"}}`, which
@@ -421,7 +435,7 @@ the request as sent, never the retryable `{:error, {:exchange_error, …}}` shap
 call's 404 whose JSON body names a reason other than `EndpointNotFound` is
 `{:refused, :not_found}` (what the venue's body is for a truly unknown order is UNMEASURED; a
 retired path or wrong host stays an ordinary refusal carrying the venue's words). A refusal
-with an empty body, such as `/v1/fundingamount`'s 404, is a bare `{:refused, :refused}`. A 429
+with an empty body is a bare `{:refused, :refused}`. A 429
 and a 5xx stay plain errors (an order write answers `:order_unconfirmed` for the 5xx).
 
 `get_historical_prices/4` and `get_trades/2` return the **canonical** symbol (`"BTC-USD"`)
@@ -447,7 +461,7 @@ Three shapes, and each means something different:
 
 ```elixir
 {:refused, {:invalid_nonce, "Nonce '1757…' has not increased since your last call"}}
-{:refused, :invalid_symbol}
+{:refused, :invalid_api_key}
 {:refused, {:unknown_reason, "SomethingNewGeminiAdded"}}
 ```
 
@@ -1081,8 +1095,8 @@ addressed by a pid on another node (it cannot be checked from here).
 `next_funding_timestamp/2` answer `{:error, {:invalid_symbol, value}}` for `nil`, an atom, an
 integer, `""` or whitespace, before any request. They used to raise `FunctionClauseError`
 (and `""` sent `GET /v1/pubticker/` with an empty path). `get_historical_prices/4` likewise
-answers `{:error, {:invalid_range, range}}` for a `range` that is not a keyword list, and
-`{:error, {:invalid_range, :start | :end, value}}` for a bound that is not a `DateTime`.
+answers `{:error, {:invalid_range, range}}` for a `range` that is not a keyword list or whose
+bound is not a `DateTime`.
 `DpExchange.Gemini.Fake` answers the same.
 
 ## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded
@@ -1105,10 +1119,38 @@ the shared feed process sees it. `DpExchange.Gemini.Fake` answers the same.
 
 `:data_quality`, `:refusal` and `:degraded` notices that arrive per frame (an unreadable
 bookTicker level, a refused subscribe, a depth gap) are forwarded once per
-`{kind, reason, symbol}` per 30 seconds (a refused subscribe states no reason, so the venue's
-status stands in for it: a 400 and a 429 are separate keys). The first one after the window
-carries `details.suppressed`, the number it covers. Lifecycle notices (`:link_up`, `:link_down`,
-`:coverage_change`) are never throttled.
+`{kind, reason, symbol}` per 30 seconds (a refused subscribe's reason is the one atom
+`:subscribe_refused`, so the venue's status stands in for it: a 400 and a 429 are separate
+keys). The first one after the window carries `details.suppressed`, the number it covers.
+Lifecycle notices (`:link_up`, `:link_down`, `:coverage_change`) are never throttled.
+
+## Notice shapes: kinds, `details.reason`, `details.symbols`
+
+* **`:data_quality`** is a sequence gap (`:sequence_gap`, `:sequence_restart`) or data this
+  package cannot decode (`:undecodable_depth_update`, `:unreadable_partial_depth_snapshot`,
+  `:unattributable_partial_depth_snapshot`, `:undecodable_book_ticker`,
+  `:unreadable_book_ticker_level`, `:undecodable_trade`). **`:degraded`** stays for "a slower
+  path is in use or the link is not serving" (`:silent_connection`, `:subscribe_unanswered`,
+  a dropped slow subscriber). This moved: a gap and an undecodable depth update were
+  `:degraded` (BREAKING for a consumer matching the kind).
+* **`:refusal`** is the venue declining a subscription. It carries `details.symbols` (a list
+  of canonical symbols of the request it answers, `[]` when the request is not one this
+  package tracked), `details.subscribe_status` and `details.reason: :subscribe_refused`.
+* **`details.reason` is always an atom.** Free text, where there is any, is in
+  `details.message`. A `:link_down` from the socket is `reason: :disconnected` and a socket
+  crash `:socket_crashed`; a failed periodic resubscribe `:resubscribe_failed`; each carries
+  the bounded text of the underlying reason in `details.message`. They were strings
+  (BREAKING).
+* **`:credentials_rejected` is never emitted, because no Gemini feed authenticates.** The
+  streams are public (`bookTicker`, `trade`, depth), and a private channel is refused at
+  `Socket.subscribe/3` with `{:error, {:credential_required, channel}}` before anything is
+  sent. A rejected key surfaces on the private REST calls, as `{:refused, reason}`.
+* **`wanted/1`** answers the symbols you asked the feed to stream, sorted and canonical, as
+  opposed to `coverage/1`, which is what has arrived. `[]` with no feed running.
+  `DpExchange.Gemini.Fake.wanted/1` answers the same.
+* **A plaintext `:base_url` or `:auth_url` is `{:error, {:insecure_url, :gemini}}`** (the
+  venue, not the option name; it was `{:insecure_url, :base_url | :auth_url}`, BREAKING),
+  refused before anything is signed. Loopback over `http` stays allowed.
 
 ## Two session behaviours this package deliberately leaves to you
 
@@ -1519,7 +1561,8 @@ by accident, and it is equally usable for a proxy.
 ## A depth sequence gap raises one notice, and it will not repeat
 
 When a `depthUpdate` frame skips ahead of the last applied update, the socket raises a
-single `:degraded` notice (`details.reason: "depth sequence gap"`, with the `symbol`).
+single `:data_quality` notice (`details.reason: :sequence_gap`, with the `symbol`; the words
+are in `details.message`). `:degraded` is kept for "a slower path is in use".
 **Act on that notice**: discard your local book for that symbol. Waiting for a repeat leaves
 you applying diffs to a book that is wrong from the gap onward, with every price real.
 
@@ -1541,8 +1584,8 @@ is all you get and the gapped frame is delivered as before.
 **On a connection started without that parameter, a gap stops the symbol instead.** The
 parameter is per connection (it cannot be asked for per subscribe), so a resubscribe there
 brings diffs only and no book can be rebuilt from it. The socket raises a `:coverage_change`
-notice (`details.delivering: false`, `details.reason: "depth book cannot be rebuilt on a
-connection without the snapshot parameter"`) and drops every frame for that symbol until you
+notice (`details.delivering: false`, `details.reason: :book_not_rebuildable`, the words in
+`details.message`) and drops every frame for that symbol until you
 subscribe it again, when you rebuild from `get_order_book/2` or move to a connection started
 with the depth channels in `:channels`. Unsubscribing or a reconnect clears the stop.
 
@@ -1555,7 +1598,8 @@ with the depth channels in `:channels`. Unsubscribing or a reconnect clears the 
   socket's `depth_streams`. Depth is not a `coverage/1` kind, so this notice is the
   not-delivering signal.
 - **A sequence that goes backwards** by more than one frame's span (`u + (u - U + 1) <` the
-  last applied) is a counter restart: `"depth sequence restart"`, resynced like a gap. A
+  last applied) is a counter restart: `details.reason: :sequence_restart`, resynced like a
+  gap. A
   duplicate or a frame only just behind (`u` at or before the last applied, within a span)
   is dropped silently, never applied.
 - **Answers are matched by id.** Every subscribe and unsubscribe this socket sends carries
@@ -1568,15 +1612,15 @@ with the depth channels in `:channels`. Unsubscribing or a reconnect clears the 
   deadline would close the connection, loudly.
 
 A `depthUpdate` whose `u` is missing or not an integer is the exception: its sequence cannot
-be stated, so the socket does **not** advance past it. It raises `"undecodable depth update"`
-and keeps the last good `u`, so the frame after it is judged against that and the missing
+be stated, so the socket does **not** advance past it. It raises a `:data_quality` notice,
+`details.reason: :undecodable_depth_update`, and keeps the last good `u`, so the frame after it is judged against that and the missing
 changes are announced as the gap they are (previously the unreadable frame reset the symbol
 to "nothing applied yet", which can never be a gap).
 
 Likewise an undecodable trade frame raises a `:data_quality` notice
-(`details.reason: "undecodable trade"`) instead of vanishing, as does a bookTicker frame
-whose symbol is absent, blank or not text (`"undecodable book ticker"`) and a level that
-cannot be read (`"unreadable bookTicker level"`). The socket raises one per frame; `Feed`
+(`details.reason: :undecodable_trade`) instead of vanishing, as does a bookTicker frame
+whose symbol is absent, blank or not text (`:undecodable_book_ticker`) and a level that
+cannot be read (`:unreadable_book_ticker_level`). The socket raises one per frame; `Feed`
 forwards one per `{kind, reason, symbol}` per 30 seconds (see above).
 
 Two more `:degraded` notices close the connection and reconnect it: `details.reason:

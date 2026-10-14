@@ -78,7 +78,8 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down, details: details}},
                    10_000
 
-    assert details.reason =~ "invalid_close_code"
+    assert details.reason == :disconnected
+    assert details.message =~ "invalid_close_code"
     assert Process.alive?(socket_pid)
   end
 
@@ -94,7 +95,7 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down, details: details}},
                    10_000
 
-    assert details.reason =~ "message too big"
+    assert details.message =~ "message too big"
     assert Process.alive?(socket_pid)
   end
 
@@ -110,7 +111,7 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert_receive {:dp_exchange, :gemini, %Notice{kind: :link_down, details: details}},
                    10_000
 
-    assert details.reason =~ "message too big"
+    assert details.message =~ "message too big"
     assert Process.alive?(socket_pid)
   end
 
@@ -138,6 +139,36 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     assert_receive {:client_reply, {:ok, <<138, _rest::binary>>}}, 10_000
     # No window: a close would have been announced before the client could answer the ping
     # that produced the pong above, so the notice would already be in the mailbox.
+    refute_received {:dp_exchange, :gemini, %Notice{kind: :link_down}}
+    assert Process.alive?(socket_pid)
+  end
+
+  test "a large frame that arrives in many small TCP chunks is joined once and delivered" do
+    # 2 MiB in 1 KiB writes with a pause every eighth, so it reaches the client in many
+    # chunks. Upstream re-joined the whole buffer per chunk (quadratic); this joins once the
+    # header's declared length has arrived. The last write also carries the start of a ping,
+    # so the bytes left over after the frame must survive the single join: the pong only
+    # comes back if they did. Correctness, not timing, is asserted.
+    test_pid = self()
+    {listen_socket, port} = listen()
+
+    serve(listen_socket, [
+      fn socket ->
+        upgrade(socket)
+        :ok = :inet.setopts(socket, nodelay: true)
+        padding = :binary.copy("a", 2_097_152)
+        body = ~s({"type":"heartbeat","pad":"#{padding}"})
+        frame = IO.iodata_to_binary([<<129, 127, byte_size(body)::64>>, body, <<137, 0>>])
+        :ok = send_in_chunks(socket, frame, 1_024, 1)
+        send(test_pid, {:client_reply, :gen_tcp.recv(socket, 0, 10_000)})
+        hold(socket)
+      end
+    ])
+
+    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    assert_receive {:client_reply, {:ok, <<138, _rest::binary>>}}, 20_000
     refute_received {:dp_exchange, :gemini, %Notice{kind: :link_down}}
     assert Process.alive?(socket_pid)
   end
@@ -365,6 +396,16 @@ defmodule DpExchange.Gemini.SocketVendoredWebSockexTest do
     _sent = :gen_tcp.send(socket, [<<128, 127, byte_size(part)::64>>, part])
     _client_closed = :gen_tcp.recv(socket, 0, 5_000)
     :gen_tcp.close(socket)
+  end
+
+  defp send_in_chunks(_socket, <<>>, _size, _count), do: :ok
+
+  defp send_in_chunks(socket, data, size, count) do
+    take = min(size, byte_size(data))
+    <<chunk::binary-size(take), rest::binary>> = data
+    :ok = :gen_tcp.send(socket, chunk)
+    if rem(count, 8) == 0, do: Process.sleep(1)
+    send_in_chunks(socket, rest, size, count + 1)
   end
 
   defp stream_filler(_socket, 0), do: :ok
