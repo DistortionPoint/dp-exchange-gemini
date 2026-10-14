@@ -24,12 +24,11 @@ defmodule DpExchange.Gemini.Fake do
   A fake where everything works proves half the contract. This one refuses:
 
     * a symbol it does not carry, with **the real reason for that endpoint**: the family's
-      `{:refused, :not_listed}` wherever the real call answers it (a JSON `InvalidSymbol`
+      `{:refused, :not_listed}`, as the real call answers it (a JSON `InvalidSymbol`
       on `get_order_book/2`, `quantization/1` and `place_order/3`, the plain-text 400 of
-      `get_historical_prices/4`, `get_trades/2`'s `BadRequest`, and the empty 404s of the
-      funding and risk reads), and `{:refused, :no_quote}` for `get_price/2` and
-      `get_top_of_book/2`, where `/v1/pubticker` answers `'X' does not have available data
-      yet`. No venue text rides in either reason;
+      `get_historical_prices/4`, `get_trades/2`'s `BadRequest`, the empty 404s of the
+      funding and risk reads, and `/v1/pubticker`'s `'X' does not have available data yet`
+      behind `get_price/2` and `get_top_of_book/2`). No venue text rides in the reason;
     * a timeframe Gemini does not serve, including `2h`, `4h` and `12h`, which the shared
       vocabulary models and this venue does not;
     * a range reaching **before the venue's fixed window**, with `{:range_unavailable,
@@ -159,7 +158,7 @@ defmodule DpExchange.Gemini.Fake do
          }}
 
       :error ->
-        no_quote(symbol)
+        unlisted_ticker(symbol)
     end
   end
 
@@ -196,7 +195,7 @@ defmodule DpExchange.Gemini.Fake do
          }}
 
       :error ->
-        no_quote(symbol)
+        unlisted_ticker(symbol)
     end
   end
 
@@ -1127,10 +1126,10 @@ defmodule DpExchange.Gemini.Fake do
 
   # `/v1/pubticker/{symbol}` — the endpoint behind `get_price/2` and `get_top_of_book/2`
   # — 404s on an unlisted symbol with plain text, not JSON: `'<symbol>' does not have
-  # available data yet`, measured live 2026-09-06 (`rest_test.exs`). That
-  # sentence is the venue saying it has nothing to quote, so the real call answers
-  # `{:refused, :no_quote}` (family decision D2) and so does this, for the same input.
-  defp no_quote(_symbol), do: {:refused, :no_quote}
+  # available data yet`, measured live 2026-09-06 (`rest_test.exs`) for a symbol that does not
+  # exist. What was measured is an unlisted symbol, so the real call answers
+  # `{:refused, :not_listed}` and so does this, for the same input (conformance group 41).
+  defp unlisted_ticker(_symbol), do: {:refused, :not_listed}
 
   # The order the venue would describe back for `request`, with the type recovered the way
   # `Private.to_order/1` recovers it from the venue's own body: `maker_or_cancel` is

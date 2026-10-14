@@ -51,7 +51,7 @@ defmodule DpExchange.Gemini.FakeTest do
     test "an unlisted symbol is a refusal, not an error" do
       # Each shape mirrors the specific endpoint behind it — see `Fake`'s own moduledoc —
       # rather than one invented atom standing in for all three.
-      assert Fake.get_price("NOPE-USD") == {:refused, :no_quote}
+      assert Fake.get_price("NOPE-USD") == {:refused, :not_listed}
 
       assert Fake.get_order_book("NOPE-USD") == {:refused, :not_listed}
       assert Fake.quantization("NOPE-USD") == {:refused, :not_listed}

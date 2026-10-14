@@ -1353,9 +1353,8 @@ defmodule DpExchange.Gemini.Rest do
     with {:ok, body, _headers} <- get_with_headers(path, opts, :collection), do: {:ok, body}
   end
 
-  # A read scoped to one symbol: the venue's "not listed" and "listed but nothing to quote"
-  # answers are read into the family reasons `:not_listed` and `:no_quote` (see
-  # `symbol_refusal/2`), with no venue text in the reason.
+  # A read scoped to one symbol: the venue's "not listed" answers are read into the family
+  # reason `:not_listed` (see `symbol_refusal/2`), with no venue text in the reason.
   defp get_symbol_body(path, opts) do
     with {:ok, body, _headers} <- get_with_headers(path, opts, :symbol), do: {:ok, body}
   end
@@ -1509,8 +1508,11 @@ defmodule DpExchange.Gemini.Rest do
   #   * `{:refused, :not_listed}` — the venue does not list the symbol: a JSON `InvalidSymbol`
   #     (already `:not_listed` after `classify/2`), the plain-text `Supplied value 'X' is not a
   #     valid symbol` of `/v2/candles`, or an empty 404 (`/v1/fundingamount`).
-  #   * `{:refused, :no_quote}` — `'X' does not have available data yet`, the plain-text 404 of
-  #     `/v1/pubticker` (measured live 2026-09-06): the venue has nothing to quote.
+  #     Also `'X' does not have available data yet`, the plain-text 404 of `/v1/pubticker`:
+  #     measured live 2026-09-06 for a symbol that does not exist (`nonexistentsymbolxyz`),
+  #     so what was measured is an unlisted symbol. The design first read it as
+  #     `:no_quote`; the measurement wins. No listed-but-unquoted answer has been observed
+  #     on this venue, so `:no_quote` is never returned here.
   #
   # The venue's wording is not stable across venues, so it does not ride in the reason.
   defp symbol_refusal(404, :refused), do: :not_listed
@@ -1519,7 +1521,7 @@ defmodule DpExchange.Gemini.Rest do
 
   defp unknown_symbol_text(text) do
     cond do
-      String.contains?(text, "does not have available data yet") -> :no_quote
+      String.contains?(text, "does not have available data yet") -> :not_listed
       String.contains?(text, "is not a valid symbol") -> :not_listed
       true -> {:unknown_reason, text}
     end

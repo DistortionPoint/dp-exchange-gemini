@@ -909,17 +909,17 @@ defmodule DpExchange.Gemini.RestTest do
       end
     end
 
-    test "get_price on a 404 'does not have available data yet' is {:refused, :no_quote}" do
+    test "get_price on a 404 'does not have available data yet' is {:refused, :not_listed} (measured for an unlisted symbol)" do
       body = "'nonexistentsymbolxyz' does not have available data yet"
 
-      assert {:refused, :no_quote} =
+      assert {:refused, :not_listed} =
                Rest.get_price("NOPE-USD", plug: responding_text(body, 404), retry_attempts: 0)
     end
 
     test "get_top_of_book refuses on a 404 the same way" do
       body = "'nonexistentsymbolxyz' does not have available data yet"
 
-      assert {:refused, :no_quote} =
+      assert {:refused, :not_listed} =
                Rest.get_top_of_book("NOPE-USD",
                  plug: responding_text(body, 404),
                  retry_attempts: 0

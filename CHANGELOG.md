@@ -20,6 +20,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **`get_price/2` and `get_top_of_book/2` answer `{:refused, :not_listed}` for an unlisted
+  symbol, not `{:refused, :no_quote}`.** `/v1/pubticker`'s plain-text 404, `'X' does not have
+  available data yet`, was measured live (2026-09-06) for a symbol that does not exist, so
+  what it names is an unlisted symbol. 0.2.139 read it as `:no_quote`, following the family
+  design's first reading; Core's conformance group 41, opted into here, caught it. Real path
+  and `Fake` alike. This venue never answers `:no_quote`.
+
+### Added
+
+- The conformance suite runs group 41 (family reasons) with `unlisted_symbol:` and
+  `padded_credentials:`. `dp_exchange_core` 0.3.94.
+
 ## [0.2.139] - 2026-10-14
 
 ### Changed (BREAKING: returned reasons, notice kinds and shapes; facade consistency, tick AD)

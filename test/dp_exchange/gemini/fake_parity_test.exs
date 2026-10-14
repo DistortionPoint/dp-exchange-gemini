@@ -99,11 +99,11 @@ defmodule DpExchange.Gemini.FakeParityTest do
   end
 
   describe "per-endpoint symbol refusal — each shape is a specific measurement, not one atom" do
-    test "get_price/2 and get_top_of_book/2: the ticker's plain-text 404 is :no_quote" do
+    test "get_price/2 and get_top_of_book/2: the ticker's plain-text 404 is :not_listed" do
       # Measured live 2026-09-06 (`rest_test.exs`): `/v1/pubticker/{symbol}` answers plain
-      # text, `'X' does not have available data yet`, which `Rest` reads as `:no_quote`.
-      assert Fake.get_price("NOPE-USD") == {:refused, :no_quote}
-      assert Fake.get_top_of_book("NOPE-USD") == {:refused, :no_quote}
+      # text, `'X' does not have available data yet`, which `Rest` reads as `:not_listed`.
+      assert Fake.get_price("NOPE-USD") == {:refused, :not_listed}
+      assert Fake.get_top_of_book("NOPE-USD") == {:refused, :not_listed}
     end
 
     test "get_order_book/2 and quantization/1: the JSON InvalidSymbol reason is :not_listed" do

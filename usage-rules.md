@@ -421,9 +421,12 @@ same fact: `{:refused, reason}`, permanent for the symbol as given, not
   `{:refused, :refused}` and `{:refused, {:unknown_reason, "Supplied value …"}}`. It is not
   `{:error, {:invalid_symbol, value}}`, which stays the local, before-any-request answer for
   a symbol that is not a non-blank string.
-* `{:refused, :no_quote}` — `'X' does not have available data yet`, `/v1/pubticker`'s 404
-  (`get_price/2`, `get_top_of_book/2`): the venue has nothing to quote. It replaces
-  `{:refused, {:unknown_reason, "'X' does not have available data yet"}}`.
+* `'X' does not have available data yet`, `/v1/pubticker`'s 404 (`get_price/2`,
+  `get_top_of_book/2`), is `{:refused, :not_listed}` too: it was measured live (2026-09-06)
+  for a symbol that does not exist. It replaces
+  `{:refused, {:unknown_reason, "'X' does not have available data yet"}}`. This venue never
+  answers the family's `{:refused, :no_quote}`: no listed-but-unquoted answer has been
+  observed on it.
 
 `Fake` answers the same reasons for the same inputs.
 

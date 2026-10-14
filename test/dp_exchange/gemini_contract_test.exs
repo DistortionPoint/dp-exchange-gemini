@@ -10,6 +10,10 @@ defmodule DpExchange.GeminiContractTest do
     fake: DpExchange.Gemini.Fake,
     symbol_format: DpExchange.Gemini.SymbolFormat,
     sample_pairs: ~w(BTC-USD ETH-USD BTC-GUSD SOL-RLUSD),
+    # Conformance group 41 (family reasons, 2026-10-14): a well-formed symbol the fake does
+    # not list, and a credentials map whose first value carries a trailing newline.
+    unlisted_symbol: "NOPE-USD",
+    padded_credentials: %{api_key: "account-test-key\n", api_secret: "test-secret-not-a-real-key"},
     # `lib/vendor/` is third-party code, a patched websockex fork (see
     # `DpExchange.Gemini.Vendor.WebSockex`). The scanning assertions are written for this
     # family's own conventions, so they read `lib/dp_exchange` only, as Webull's do.
