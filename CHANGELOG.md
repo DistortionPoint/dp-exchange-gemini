@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.140] - 2026-10-14
+
 ### Changed (BREAKING)
 
 - **`get_price/2` and `get_top_of_book/2` answer `{:refused, :not_listed}` for an unlisted
