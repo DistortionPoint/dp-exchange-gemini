@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.137] - 2026-10-14
+
 - **A subscribe that failed during a reconnect could land on the new connection unsubscribed
   from nothing.** Its frame waited in the sleeping socket's mailbox and was written to the next
   connection, while the reconnect cleared the unsubscribe the failure had queued. The venue
