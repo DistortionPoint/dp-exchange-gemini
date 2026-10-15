@@ -244,7 +244,11 @@ also subscribes `@trade` for every symbol you subscribe, alongside `@bookTicker`
 current through every path that already keeps `@bookTicker` current — `subscribe/2`,
 `unsubscribe/2`, `update_symbols/2`, the periodic resubscribe, and a reconnect.
 **`:channels` is a supervision-tree option, not a `subscribe/2` option** — it configures
-the one connection this venue's `Feed` holds, so it is passed where you start the tree:
+the one connection this venue's `Feed` holds, so it is passed where you start the tree.
+A `channels:` given to `subscribe/2` is refused, `{:error, {:invalid_option, :channels,
+value}}`, never ignored. `DpExchange.Gemini.Fake` refuses it too, and takes its channels where
+a test can set them (`DpExchange.Core.Config.put_override(:channels, kinds)`, default
+`[:quotes, :top_of_book]`), validated as a feed validates them at start:
 
 ```elixir
 children = [

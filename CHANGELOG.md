@@ -20,6 +20,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **`subscribe/2` refuses a `channels:` option; the Fake no longer takes it per call (tick AF).**
+  `channels:` configures the feed's one connection at start, and the real `subscribe/2`
+  silently ignored it while `Fake.subscribe/2` honoured it, so a consumer's tests passed with
+  per-subscribe channels that production never applied. Both now answer
+  `{:error, {:invalid_option, :channels, value}}` (after the symbol and subscriber checks).
+  The Fake takes its channels from `Config` (`:dp_exchange_gemini`, `:channels`; per process
+  via `Config.put_override/2`; default `[:quotes, :top_of_book]`), validated as `Feed` does at
+  start, and `update_symbols/2` now pushes with them rather than the default. New public
+  `Feed.reject_channels/1`; `Feed.validate_channels!/1` is now public.
+
+- **Socket timers are cancelled when their subject goes away, not only ref-checked (tick AF).**
+  The depth resync's `:pending` wait, its `:timeout` (unanswered unsubscribe) deadline, the
+  refused-resubscribe `:retry` wait and the liveness check were scheduled with
+  `Process.send_after/3` and their refs dropped, so each lived to its full delay after the
+  resync completed, the symbol was unsubscribed or resubscribed, the connection dropped or the
+  socket stopped. They are now held in state (`depth_timers`, `liveness_timer`) and cancelled
+  at each of those points and in `terminate/2`. The ref checks in the handlers stay as defence
+  for a message already in the mailbox.
+- **A snapshot with a price listed twice on one side is refused (tick AF).**
+  `WsDecode.to_order_book/3`, `WsDecode.to_order_book_from_depth_update/3` and
+  `Rest.get_order_book/2` carried both rows into the book as separate levels, leaving no answer
+  to which size rests at that price (`1.0` and `1.00` count as one price). Now
+  `{:error, :unexpected_response_shape}`. A diff is unchanged: its rows are applied in order.
+
 ## [0.2.141] - 2026-10-15
 
 - **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`

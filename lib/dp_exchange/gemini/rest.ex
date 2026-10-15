@@ -1699,10 +1699,20 @@ defmodule DpExchange.Gemini.Rest do
   # looking book. The websocket arm refuses the same way (`WsDecode.to_order_book/3`).
   defp readable_book_side(nil), do: :ok
 
+  #
+  # **A price listed twice on one side is not a book either.** The snapshot's levels are
+  # absolute, one size per price: two rows at one price leave no way to say which size rests
+  # there, and both were carried into the book as separate levels, every value real. `1.0`
+  # and `1.00` are one price. Refused with the other unreadable shapes.
   defp readable_book_side(rows) when is_list(rows) do
-    if Enum.all?(rows, &readable_book_row?/1),
+    if Enum.all?(rows, &readable_book_row?/1) and distinct_book_prices?(rows),
       do: :ok,
       else: {:error, :unexpected_response_shape}
+  end
+
+  defp distinct_book_prices?(rows) do
+    prices = Enum.map(rows, fn row -> row["price"] |> decimal() |> Decimal.normalize() end)
+    length(prices) == length(Enum.uniq(prices))
   end
 
   # A level is a price above zero and a size of zero or more. A price of `0` or `-5` sorted into

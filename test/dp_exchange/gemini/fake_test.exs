@@ -319,8 +319,41 @@ defmodule DpExchange.Gemini.FakeTest do
       refute_received {:dp_exchange, :gemini, %Trade{}}
     end
 
-    test "channels: [:trades] pushes a Trade alongside the streamed Quote" do
-      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:quotes, :top_of_book, :trades])
+    test "a channels: option on subscribe is refused, as the real facade refuses it" do
+      for value <- [[:trades], [:quotes, :top_of_book], [:bogus], "trades"] do
+        assert {:error, {:invalid_option, :channels, ^value}} =
+                 Fake.subscribe(["BTC-USD"], to: self(), channels: value)
+
+        assert {:error, {:invalid_option, :channels, ^value}} =
+                 DpExchange.Gemini.Feed.subscribe(
+                   :no_such_feed_process,
+                   ["BTC-USD"],
+                   to: self(),
+                   channels: value
+                 )
+      end
+
+      refute_received {:dp_exchange, :gemini, _anything}
+      assert Fake.coverage() == %{}
+    end
+
+    test "the invalid-symbols and invalid-subscriber refusals still come before it" do
+      assert {:error, {:invalid_symbols, "BTC-USD"}} =
+               Fake.subscribe("BTC-USD", channels: [:trades])
+
+      assert {:error, {:invalid_subscriber, "x"}} =
+               Fake.subscribe(["BTC-USD"], to: "x", channels: [:trades])
+    end
+
+    test "configured channels outside the streamable kinds raise, as a feed start does" do
+      DpExchange.Core.Config.put_override(:channels, [:bogus])
+
+      assert_raise ArgumentError, fn -> Fake.subscribe(["BTC-USD"], to: self()) end
+    end
+
+    test "configured :trades pushes a Trade alongside the streamed Quote" do
+      DpExchange.Core.Config.put_override(:channels, [:quotes, :top_of_book, :trades])
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
 
       assert_receive {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}
       assert_receive {:dp_exchange, :gemini, %Trade{symbol: "BTC-USD"} = trade}
@@ -336,14 +369,17 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "an unlisted symbol gets no Trade, same as it gets no Quote" do
-      :ok = Fake.subscribe(["NOPE-USD"], to: self(), channels: [:trades])
+      DpExchange.Core.Config.put_override(:channels, [:trades])
+      :ok = Fake.subscribe(["NOPE-USD"], to: self())
 
       refute_received {:dp_exchange, :gemini, _anything}
     end
 
     test "coverage_by_kind/1 tracks trades coverage independently of quotes coverage" do
-      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:quotes, :top_of_book, :trades])
-      :ok = Fake.subscribe(["ETH-USD"], to: self(), channels: [:quotes, :top_of_book])
+      DpExchange.Core.Config.put_override(:channels, [:quotes, :top_of_book, :trades])
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
+      DpExchange.Core.Config.put_override(:channels, [:quotes, :top_of_book])
+      :ok = Fake.subscribe(["ETH-USD"], to: self())
 
       by_kind = Fake.coverage_by_kind()
 
@@ -352,7 +388,8 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "unsubscribing drops the symbol from :trades coverage too" do
-      :ok = Fake.subscribe(["BTC-USD"], to: self(), channels: [:trades])
+      DpExchange.Core.Config.put_override(:channels, [:trades])
+      :ok = Fake.subscribe(["BTC-USD"], to: self())
       assert Fake.coverage_by_kind().trades == %{"BTC-USD" => :stream}
 
       :ok = Fake.unsubscribe(["BTC-USD"])
@@ -361,7 +398,8 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "update_symbols/2 narrows :trades coverage to the new set, same as :quotes" do
-      :ok = Fake.subscribe(["BTC-USD", "ETH-USD"], to: self(), channels: [:trades])
+      DpExchange.Core.Config.put_override(:channels, [:trades])
+      :ok = Fake.subscribe(["BTC-USD", "ETH-USD"], to: self())
       assert Fake.coverage_by_kind().trades == %{"BTC-USD" => :stream, "ETH-USD" => :stream}
 
       :ok = Fake.update_symbols(["BTC-USD"])

@@ -465,9 +465,23 @@ defmodule DpExchange.Gemini.WsDecode do
   defp read_sorted(rows, direction) when is_list(rows) do
     parsed = parsed_levels(rows)
 
-    with :ok <- fully_read?(rows, parsed) do
+    with :ok <- fully_read?(rows, parsed),
+         :ok <- distinct_prices(parsed) do
       {:ok, Enum.sort_by(parsed, fn {price, _qty} -> price end, {direction, Decimal})}
     end
+  end
+
+  # **A price listed twice on one side of an absolute book is refused.** One size per price is
+  # the shape of a snapshot; two rows at one price leave no way to say which size rests there,
+  # and both were carried into the book as separate levels, every value real. `1.0` and `1.00`
+  # are one price. (A DELTA is not checked: its rows are applied in order, so a repeated price
+  # has a defined meaning there.)
+  defp distinct_prices(levels) do
+    prices = Enum.map(levels, fn {price, _qty} -> Decimal.normalize(price) end)
+
+    if length(prices) == length(Enum.uniq(prices)),
+      do: :ok,
+      else: {:error, :unexpected_response_shape}
   end
 
   # A DELTA side: read, and left in the venue's order. `Core.Types.OrderBookDelta` requires

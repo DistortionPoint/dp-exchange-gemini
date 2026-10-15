@@ -856,7 +856,8 @@ defmodule DpExchange.Gemini do
 
   Symbols are upper-cased on the way in. `opts[:feed]` names the feed process (by default
   the one for `opts[:environment]`). Which kinds are delivered is set when the feed starts
-  (its `:channels` option, e.g. `[:book_ticker, :trades]`), not per call.
+  (its `:channels` option, e.g. `[:quotes, :top_of_book, :trades]`), not per call: a
+  `:channels` option here is refused, `{:error, {:invalid_option, :channels, value}}`.
   With no feed running it answers `{:error, :feed_not_started}`. See
   `c:DpExchange.Core.Venue.subscribe/2`.
   """

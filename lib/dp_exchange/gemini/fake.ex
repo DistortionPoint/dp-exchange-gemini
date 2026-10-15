@@ -1171,18 +1171,27 @@ defmodule DpExchange.Gemini.Fake do
   # real venue's first `@bookTicker` frame does from the caller's side — and the caller
   # cannot tell the difference, which is the property the facade exists to hold.
   #
-  # `opts[:channels]` mirrors `DpExchange.Gemini.Feed`'s own `:channels` option — see its
+  # The configured channels mirror `DpExchange.Gemini.Feed`'s own `:channels` option — see its
   # moduledoc's "`channels:`" section — defaulting to the same `[:quotes, :top_of_book]`.
-  # Unlike `Feed`, where it is a `start_link/1`-time choice for the whole connection, here
-  # it is per `subscribe/2` call: this fake has no persistent connection to configure, so
-  # the option is read where it is given. `:trades` in the list pushes a `Types.Trade` for
+  # Like `Feed`, it is a choice for the whole connection, NOT a `subscribe/2` option: a
+  # `channels:` given to `subscribe/2` is refused (`Feed.reject_channels/1`), as the real
+  # facade refuses it. This fake has no start step, so the configured set is read from
+  # `DpExchange.Core.Config` (`:dp_exchange_gemini`, `:channels`; per process through
+  # `Config.put_override/2`) and validated as `Feed` validates it at start.
+  # `:trades` in the list pushes a `Types.Trade` for
   # each valid symbol alongside the streamed `Quote`, consistent with the real decode
   # (`WsDecode.to_trade/2`) — a real `id`, a real `side`, `broken: false` because the
   # socket publishes no bust flag, and a non-nil `timestamp`, never the placeholders a
   # less careful fake would reach for.
   @doc """
-  Pushes a quote (and a top of book, per `opts[:channels]`) for each carried symbol to
-  `opts[:to]` (default: the caller), and records the symbols as covered for this process.
+  Pushes a quote (and a top of book, and a trade, per the configured channels) for each
+  carried symbol to `opts[:to]` (default: the caller), and records the symbols as covered for
+  this process.
+
+  A `channels:` option is refused, `{:error, {:invalid_option, :channels, value}}`, as the real
+  facade refuses it: channels are the feed's, set at start. Here they come from
+  `Config.put_override(:channels, kinds)` (the `:dp_exchange_gemini` app key `:channels`),
+  default `[:quotes, :top_of_book]`.
 
   Not wired to failure injection. See `DpExchange.Gemini.subscribe/2` and
   `c:DpExchange.Core.Venue.subscribe/2`.
@@ -1190,9 +1199,17 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def subscribe(symbols, opts \\ []) do
     with {:ok, symbols} <- Feed.canonical_symbols(symbols),
-         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())) do
+         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
+         :ok <- Feed.reject_channels(opts) do
       do_subscribe(symbols, opts)
     end
+  end
+
+  defp configured_channels do
+    :dp_exchange_gemini
+    |> Config.get(:channels, nil)
+    |> Kernel.||(@default_channels)
+    |> Feed.validate_channels!()
   end
 
   # `Feed.canonical_symbols/1` is what the real feed spells and refuses symbols with —
@@ -1202,7 +1219,7 @@ defmodule DpExchange.Gemini.Fake do
   # delivers `BTC-USD`.
   defp do_subscribe(symbols, opts) do
     target = Config.opt(opts, :to, self())
-    channels = Config.opt(opts, :channels, @default_channels)
+    channels = configured_channels()
     # Coverage is only for what was delivered: a `to:` name nothing holds receives nothing,
     # so no symbol is recorded as covered for it.
     wanted =
@@ -1274,22 +1291,31 @@ defmodule DpExchange.Gemini.Fake do
     # **A symbol this adds is pushed for, as `subscribe/2` pushes.** It used to be put
     # straight into the covered set with nothing sent, so `coverage/1` answered `:stream`
     # for a symbol that had delivered nothing, the intent-for-evidence substitution
-    # `c:DpExchange.Core.Venue.coverage/1` forbids. Pushed to the caller, with the default
-    # channels: the contract's callback takes neither a `to:` nor `:channels`.
+    # `c:DpExchange.Core.Venue.coverage/1` forbids. Pushed to the caller, with the configured
+    # channels, as the real feed carries its own for an added symbol.
+    channels = configured_channels()
     added = wanted |> MapSet.difference(subscribed()) |> MapSet.to_list()
-    push(added, self(), @default_channels)
+    push(added, self(), channels)
 
     Process.put(__MODULE__, wanted)
 
+    top_of_book = if :top_of_book in channels, do: added, else: []
+    trades = if :trades in channels, do: added, else: []
+
     Process.put(
       @top_of_book_key,
-      subscribed_top_of_book() |> MapSet.union(MapSet.new(added)) |> MapSet.intersection(wanted)
+      subscribed_top_of_book()
+      |> MapSet.union(MapSet.new(top_of_book))
+      |> MapSet.intersection(wanted)
     )
 
-    # Narrowed to the new set, never expanded by it — `update_symbols/2` carries no
-    # `:channels` of its own (the contract's callback takes none), so a symbol it adds
-    # cannot be assumed to want trades; one it keeps can only keep what it already had.
-    Process.put(@trades_key, MapSet.intersection(subscribed_trades(), wanted))
+    # Narrowed to the new set; a symbol it adds gains trades only where the configured
+    # channels carry them, and one it keeps keeps what it already had.
+    Process.put(
+      @trades_key,
+      subscribed_trades() |> MapSet.union(MapSet.new(trades)) |> MapSet.intersection(wanted)
+    )
+
     :ok
   end
 
@@ -1340,11 +1366,11 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.coverage_by_kind/1`.
 
   `subscribe/2` pushes a `Types.Quote` for every symbol, a `Types.TopOfBook` when
-  `:top_of_book` is in `opts[:channels]` (the default, as on the real Feed), and
-  `update_symbols/2` pushes both for a symbol it adds. Each kind reads here only for symbols
-  it was actually pushed for.
-  `:trades` is real, not empty: a symbol reads here only for a `subscribe/2` call that
-  named it AND asked for `:trades` in `opts[:channels]` — narrowed the same way
+  `:top_of_book` is in the configured channels (the default, as on the real Feed), and
+  `update_symbols/2` pushes the same for a symbol it adds. Each kind reads here only for
+  symbols it was actually pushed for.
+  `:trades` is real, not empty: a symbol reads here only when `:trades` is in the configured
+  channels (`Config.put_override(:channels, kinds)`) when it is subscribed — narrowed the same way
   `subscribed/0` narrows `:quotes` on `unsubscribe/2` and `update_symbols/2`, so a symbol
   no longer wanted, or one dropped from a later `update_symbols/2` call, stops reading as
   covered here too. **Less capable than the real adapter is allowed; answering a

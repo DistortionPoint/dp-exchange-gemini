@@ -640,6 +640,16 @@ defmodule DpExchange.Gemini.Socket do
     stopped = Map.get(state, :depth_stopped, MapSet.new())
     lifted = Enum.filter(canonical, &MapSet.member?(stopped, &1))
 
+    # A caller's own subscribe supersedes a refused resync's pending retry.
+    state =
+      Enum.reduce(canonical, state, fn symbol, acc ->
+        key = {symbol, channel}
+
+        acc
+        |> cancel_depth_timer(:retry, key)
+        |> Map.update(:depth_retry, %{}, &Map.delete(&1, key))
+      end)
+
     state
     |> Map.put(:depth_streams, MapSet.union(streams, MapSet.new(canonical, &{&1, channel})))
     |> Map.put(:depth_stopped, MapSet.difference(stopped, MapSet.new(lifted)))
@@ -716,6 +726,7 @@ defmodule DpExchange.Gemini.Socket do
 
     sys_replace_state(socket, fn state ->
       state
+      |> cancel_depth_timers(keys)
       |> Map.update(:depth_anchored, MapSet.new(), &MapSet.difference(&1, MapSet.new(canonical)))
       |> Map.update(:last_depth_update, %{}, &Map.drop(&1, canonical))
       |> Map.update(:depth_streams, MapSet.new(), &MapSet.difference(&1, MapSet.new(keys)))
@@ -997,9 +1008,12 @@ defmodule DpExchange.Gemini.Socket do
     # handle. Both fire here because this one event is genuinely both.
     Telemetry.link_up(:gemini)
     if state.connected_once?, do: report_reconnected(state), else: report_connected(state)
+    # Every timer of the connection that just went away is cancelled, not left to fire and be
+    # ref-checked into nothing: the liveness check, the ack deadlines and the depth resync /
+    # retry timers.
+    state = cancel_connection_timers(state)
     liveness = make_ref()
-    schedule_liveness(liveness)
-    cancel_ack_timers(state)
+    liveness_timer = schedule_liveness(liveness)
 
     # `Map.merge/2`, not `%{state | ...}` — the four keys below are self-initialising
     # (`Map.get(state, :key, default)` everywhere they are read) rather than required at
@@ -1012,6 +1026,8 @@ defmodule DpExchange.Gemini.Socket do
        connected_once?: true,
        last_heard_at: now_ms(),
        liveness: liveness,
+       liveness_timer: liveness_timer,
+       depth_timers: %{},
        # A reconnected socket carries no subscriptions (`Feed`'s own moduledoc), so
        # everything below describes a subscription state that no longer exists on the
        # connection that just replaced it:
@@ -1080,10 +1096,10 @@ defmodule DpExchange.Gemini.Socket do
         )
       )
 
-      {:close, %{state | liveness: nil}}
+      {:close, Map.merge(state, %{liveness: nil, liveness_timer: nil})}
     else
-      schedule_liveness(liveness)
-      {:reply, :ping, state}
+      timer = schedule_liveness(liveness)
+      {:reply, :ping, Map.put(state, :liveness_timer, timer)}
     end
   end
 
@@ -1130,15 +1146,17 @@ defmodule DpExchange.Gemini.Socket do
         {:ok, state}
 
       not MapSet.member?(depth_streams(state), key) ->
+        state = fire_depth_timer(state, :pending, key, ref)
         {:ok, put_resync(state, Map.delete(resync, key))}
 
       true ->
         {symbol, channel} = key
         id = next_request_id()
-        Process.send_after(self(), {:resync_timeout, key, ref}, @ack_timeout_ms)
 
         state =
           state
+          |> fire_depth_timer(:pending, key, ref)
+          |> arm_depth_timer(:timeout, key, ref, {:resync_timeout, key, ref}, @ack_timeout_ms)
           |> put_resync(Map.put(resync, key, {:unsubscribing, ref, id}))
           |> Map.update(:depth_resync_at, %{key => now_ms()}, &Map.put(&1, key, now_ms()))
 
@@ -1150,6 +1168,8 @@ defmodule DpExchange.Gemini.Socket do
   # The unsubscribe was never answered. The venue's state is unknown, so start over (the
   # unsubscribe is idempotent), later, and say so.
   def handle_info({:resync_timeout, key, ref}, state) do
+    state = fire_depth_timer(state, :timeout, key, ref)
+
     case Map.get(depth_resync(state), key) do
       {:unsubscribing, ^ref, _id} ->
         {:ok, resync_failed(state, key, :resync_unsubscribe_unanswered)}
@@ -1181,22 +1201,9 @@ defmodule DpExchange.Gemini.Socket do
   def handle_info({:retry_depth, key, ref}, state) do
     retry = Map.get(state, :depth_retry, %{})
 
-    cond do
-      Map.get(retry, key) != ref ->
-        {:ok, state}
-
-      MapSet.member?(depth_streams(state), key) or sibling_depth_stream?(state, key) ->
-        {:ok, Map.put(state, :depth_retry, Map.delete(retry, key))}
-
-      true ->
-        state =
-          state
-          |> Map.put(:depth_retry, Map.delete(retry, key))
-          |> Map.put(:depth_streams, MapSet.put(depth_streams(state), key))
-          |> put_resync(Map.put(depth_resync(state), key, {:subscribing, ref}))
-
-        subscribe_for_resync(state, key, ref)
-    end
+    if Map.get(retry, key) == ref,
+      do: retry_depth(fire_depth_timer(state, :retry, key, ref), key, ref),
+      else: {:ok, state}
   end
 
   # The announced request's frame never went out: that request, by its id, is no longer owed
@@ -1239,6 +1246,88 @@ defmodule DpExchange.Gemini.Socket do
 
   def handle_info(_message, state), do: {:ok, state}
 
+  defp retry_depth(state, key, ref) do
+    retry = Map.get(state, :depth_retry, %{})
+
+    if MapSet.member?(depth_streams(state), key) or sibling_depth_stream?(state, key) do
+      {:ok, Map.put(state, :depth_retry, Map.delete(retry, key))}
+    else
+      state =
+        state
+        |> Map.put(:depth_retry, Map.delete(retry, key))
+        |> Map.put(:depth_streams, MapSet.put(depth_streams(state), key))
+        |> put_resync(Map.put(depth_resync(state), key, {:subscribing, ref}))
+
+      subscribe_for_resync(state, key, ref)
+    end
+  end
+
+  # **Depth timers are kept and cancelled, not only ref-checked.** Each of the resync's
+  # three timers (`:pending` the throttle/backoff wait, `:timeout` the unanswered-unsubscribe
+  # deadline, `:retry` the wait after a refused resubscribe) is held in `depth_timers` as
+  # `{kind, key} => {ref, timer}` and cancelled the moment its subject moves on: the resync
+  # completes, the symbol is unsubscribed or resubscribed, the connection drops, the socket
+  # stops. The ref check in each handler stays as defence for a message already in the
+  # mailbox when the cancel ran (`Process.cancel_timer/1` cannot recall a delivered one).
+  defp depth_timers(state), do: Map.get(state, :depth_timers, %{})
+
+  defp arm_depth_timer(state, kind, key, ref, message, delay) do
+    state = cancel_depth_timer(state, kind, key)
+    timer = Process.send_after(self(), message, delay)
+    Map.put(state, :depth_timers, Map.put(depth_timers(state), {kind, key}, {ref, timer}))
+  end
+
+  defp cancel_depth_timer(state, kind, key) do
+    {entry, timers} = Map.pop(depth_timers(state), {kind, key})
+
+    case entry do
+      {_ref, timer} -> Process.cancel_timer(timer)
+      nil -> :ok
+    end
+
+    Map.put(state, :depth_timers, timers)
+  end
+
+  defp cancel_depth_timers(state, keys) do
+    for kind <- [:pending, :timeout, :retry], key <- keys, reduce: state do
+      acc -> cancel_depth_timer(acc, kind, key)
+    end
+  end
+
+  # The timer for `{kind, key}` just fired with `ref`: forget the handle, but only if it is
+  # that timer's. A stale message must not drop a newer timer's handle.
+  defp fire_depth_timer(state, kind, key, ref) do
+    case Map.get(depth_timers(state), {kind, key}) do
+      {^ref, _timer} ->
+        Map.put(state, :depth_timers, Map.delete(depth_timers(state), {kind, key}))
+
+      _other ->
+        state
+    end
+  end
+
+  defp cancel_connection_timers(state) do
+    cancel_ack_timers(state)
+
+    case Map.get(state, :liveness_timer) do
+      nil -> :ok
+      timer -> Process.cancel_timer(timer)
+    end
+
+    Enum.each(depth_timers(state), fn {_kind_key, {_ref, timer}} ->
+      Process.cancel_timer(timer)
+    end)
+
+    Map.merge(state, %{depth_timers: %{}, liveness_timer: nil})
+  end
+
+  # A stopping socket leaves no live timer behind.
+  @impl true
+  def terminate(_reason, state) do
+    _state = cancel_connection_timers(state)
+    :ok
+  end
+
   defp subscribe_for_resync(state, {symbol, channel} = key, ref) do
     id = next_request_id()
     state = add_ack_request(state, id)
@@ -1271,10 +1360,15 @@ defmodule DpExchange.Gemini.Socket do
   defp schedule_resync(state, key) do
     ref = make_ref()
     delay = resync_delay(state, key)
+    state = cancel_depth_timers(state, [key])
 
-    if delay == 0,
-      do: send(self(), {:resync_depth, key, ref}),
-      else: Process.send_after(self(), {:resync_depth, key, ref}, delay)
+    state =
+      if delay == 0 do
+        send(self(), {:resync_depth, key, ref})
+        state
+      else
+        arm_depth_timer(state, :pending, key, ref, {:resync_depth, key, ref}, delay)
+      end
 
     put_resync(state, Map.put(depth_resync(state), key, {:pending, ref}))
   end
@@ -1389,7 +1483,10 @@ defmodule DpExchange.Gemini.Socket do
 
       [{key, ref} | _none_other] ->
         send(self(), {:resubscribe_depth, key, ref})
-        put_resync(state, Map.put(depth_resync(state), key, {:subscribing, ref}))
+
+        state
+        |> cancel_depth_timer(:timeout, key)
+        |> put_resync(Map.put(depth_resync(state), key, {:subscribing, ref}))
     end
   end
 
@@ -1414,9 +1511,11 @@ defmodule DpExchange.Gemini.Socket do
       Map.update(state, :depth_resync_failures, %{key => failures}, &Map.put(&1, key, failures))
 
     retry_ref = make_ref()
-    Process.send_after(self(), {:retry_depth, key, retry_ref}, resync_delay(state, key))
+    delay = resync_delay(state, key)
 
     state
+    |> cancel_depth_timers([key])
+    |> arm_depth_timer(:retry, key, retry_ref, {:retry_depth, key, retry_ref}, delay)
     |> put_resync(Map.delete(depth_resync(state), key))
     |> Map.put(:depth_streams, MapSet.delete(depth_streams(state), key))
     |> Map.update(:depth_retry, %{key => retry_ref}, &Map.put(&1, key, retry_ref))
@@ -1426,6 +1525,7 @@ defmodule DpExchange.Gemini.Socket do
   @impl true
   def handle_pong(_frame, state), do: {:ok, %{state | last_heard_at: now_ms()}}
 
+  # Returns the timer, which the state keeps so a dropped connection cancels it.
   defp schedule_liveness(liveness),
     do: Process.send_after(self(), {:liveness, liveness}, @ping_every_ms)
 
@@ -1945,6 +2045,7 @@ defmodule DpExchange.Gemini.Socket do
     keys = for {{^symbol, _channel} = key, _entry} <- depth_resync(state), do: key
 
     state
+    |> cancel_depth_timers(keys)
     |> put_resync(Map.drop(depth_resync(state), keys))
     |> Map.update(:depth_resync_failures, %{}, &Map.drop(&1, keys))
     |> Map.update(:last_depth_update, %{}, &Map.delete(&1, symbol))

@@ -373,8 +373,25 @@ defmodule DpExchange.Gemini.Feed do
   @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts) do
     with {:ok, symbols} <- canonical_symbols(symbols),
-         {:ok, subscriber} <- valid_subscriber(Config.opt(opts, :to, self())) do
+         {:ok, subscriber} <- valid_subscriber(Config.opt(opts, :to, self())),
+         :ok <- reject_channels(opts) do
       GenServer.call(feed, {:subscribe, symbols, subscriber}, @call_timeout)
+    end
+  end
+
+  @doc """
+  `:ok`, or `{:error, {:invalid_option, :channels, value}}` when `opts` carries `:channels`.
+
+  **`:channels` configures the one connection this feed holds, at start; it is not a
+  `subscribe/3` option.** It used to be ignored here, so a caller who passed it believed they
+  had asked for the trade tape per subscribe and got the feed's start-time channels, silently.
+  Refused rather than ignored, and `DpExchange.Gemini.Fake` refuses the same way.
+  """
+  @spec reject_channels(keyword()) :: :ok | {:error, {:invalid_option, :channels, term()}}
+  def reject_channels(opts) do
+    case Config.opt(opts, :channels, nil) do
+      nil -> :ok
+      value -> {:error, {:invalid_option, :channels, value}}
     end
   end
 
@@ -1049,7 +1066,13 @@ defmodule DpExchange.Gemini.Feed do
   # what was asked for. See the moduledoc's "`channels:`" section and
   # `dp_exchange_coinbase.Feed`'s identically-shaped `validate_channels!/1`, the family
   # precedent this copies.
-  defp validate_channels!(kinds) when is_list(kinds) and kinds != [] do
+  @doc """
+  The de-duplicated `:channels` list, or `ArgumentError` for an empty list, a non-list or a
+  kind outside `capabilities().streamable`. Exposed so `DpExchange.Gemini.Fake` validates the
+  channels it is configured with exactly as a real feed does at start.
+  """
+  @spec validate_channels!(term()) :: [atom()]
+  def validate_channels!(kinds) when is_list(kinds) and kinds != [] do
     case Enum.reject(kinds, &(&1 in @known_channels)) do
       [] ->
         Enum.uniq(kinds)
@@ -1062,7 +1085,7 @@ defmodule DpExchange.Gemini.Feed do
     end
   end
 
-  defp validate_channels!(value) do
+  def validate_channels!(value) do
     raise ArgumentError,
           "DpExchange.Gemini.Feed :channels must be a non-empty list drawn from " <>
             "#{inspect(@known_channels)}. Got #{inspect(value)}."

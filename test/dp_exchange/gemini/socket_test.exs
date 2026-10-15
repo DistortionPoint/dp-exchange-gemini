@@ -376,7 +376,10 @@ defmodule DpExchange.Gemini.SocketTest do
     test "heard recently: ping, and look again later" do
       {check, live} = checked(0)
 
-      assert {:reply, :ping, ^live} = Socket.handle_info({:liveness, check}, live)
+      assert {:reply, :ping, pinged} = Socket.handle_info({:liveness, check}, live)
+      # The only change is the re-armed check, which is now kept so it can be cancelled.
+      assert Map.delete(pinged, :liveness_timer) == live
+      assert is_reference(pinged.liveness_timer)
       refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
     end
 
