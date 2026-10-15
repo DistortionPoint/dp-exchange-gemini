@@ -93,7 +93,7 @@ before a request is made.
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
 `Core.Types.TopOfBook` has always had. `dp_exchange_core 0.2.1` introduced the fields; this
-package now requires `~> 0.3.65`.
+package now requires `~> 0.3.95`.
 
 ```elixir
 # before
@@ -278,8 +278,22 @@ argument}}` is a `symbols` that is not a list of non-blank strings, and `{:error
 {:invalid_subscriber, term}}` a `:to` that is neither a pid nor a registered name; both are
 refused before the shared feed sees them. Symbols are upper-cased on the way in and held in
 canonical form (`"btcusd"` and `"BTC-USD"` are the same subscription). An `{:error, _}` from
-`subscribe/2` or `update_symbols/2` means nothing was recorded, so retry. Callbacks with no
-credentials argument (`get_positions/1` and its kin) read the credential from `opts[:credentials]`.
+`subscribe/2` or `update_symbols/2` means nothing was recorded, so retry.
+
+**The first `subscribe/2` dials, and a dial never stalls the feed.** The connection is made by
+the socket process itself, not inside the feed. While it is being made `coverage/1`,
+`coverage_by_kind/1` and `subscribe_notices/1` answer at once. `subscribe/2`, `unsubscribe/2`
+and `update_symbols/2` wait for the connection, in arrival order, and then answer as they
+always did: `:ok` once the subscribe frame has gone out, or `{:error, reason}` (the connect's
+own reason, such as a `%WebSockex.ConnError{}`) with nothing recorded. The wait is bounded by
+the connect and receive timeouts (3 s and 2 s unless you pass `:socket_connect_timeout` /
+`:socket_recv_timeout`). At most 1_000 such calls are held at once; one more is refused with
+`{:error, :dial_backlog_full}`. A first connect that fails raises no `:link_down` notice,
+since there was no link to lose; the next periodic resubscribe (60 s) dials again, and a
+failed attempt there is the usual one-shot `:coverage_change` notice.
+
+Callbacks with no credentials argument (`get_positions/1` and its kin) read the credential
+from `opts[:credentials]`.
 
 ## Nine candle widths, and the venue's own documentation names three of them wrong
 

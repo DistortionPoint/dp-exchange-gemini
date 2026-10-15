@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`
+  (0.3.93), the conformance group 41 options this package's contract test passes (0.3.94,
+  ignored by an older Core: a silent pass) and the groups that no longer pass vacuously
+  (0.3.95).
+
+### Fixed
+
+- **`Feed` no longer dials the venue inside a callback.** `subscribe/3`'s first connect (up to
+  about 25 s with its frames), the resubscribe tick's redial and the crash redial all ran in
+  `Feed`'s own process, so every other call queued behind them and a caller could exit at the
+  25 s call timeout. The socket now dials in its own process (`Socket.start_link/1` gained
+  `async: true`, which reports `{:dp_exchange, :gemini, :connected, pid}` on the first connect
+  and exits `{:error, reason}` when it fails; `Socket.dial_budget_ms/1` is new). While a dial
+  is open `coverage/1`, `coverage_by_kind/1`, `wanted/1` and `subscribe_notices/1` answer at
+  once, and `subscribe/3`, `unsubscribe/2` and `update_symbols/2` are held and replayed in
+  arrival order, so their return values are unchanged. A failed dial answers every held
+  `subscribe/3` `{:error, reason}` with nothing registered, and is not reported as a socket
+  crash.
+- A `{:dial_timeout, ref}` net ends a dial that neither connects nor exits.
+- The periodic resubscribe timer is a ref-checked chain of one: a stray `:resubscribe`
+  message used to re-arm a second timer beside the first, doubling the tick for the life of
+  the feed. A hand-sent `:resubscribe` now does the work of a tick without touching the timer.
+- A redial timer still pending when a socket is dialled by another path is cancelled.
+
+### Added
+
+- `{:error, :dial_backlog_full}` when more than 1_000 calls are already held behind one dial.
+
 ## [0.2.140] - 2026-10-14
 
 ### Changed (BREAKING)

@@ -94,7 +94,7 @@ defmodule DpExchange.Gemini.Feed do
 
   ## A crashed socket is `Feed`'s crash too, unless `Feed` catches it — and now it does
 
-  `ensure_socket/1` calls `Socket.start_link/1` from inside `Feed`'s own callback, which
+  `start_dial/1` calls `Socket.start_link/1` from inside `Feed`'s own callback, which
   links the new socket to `Feed` the way `start_link` always does — this is not a
   supervised sibling `Feed` could lose independently, it is a linked child. Before this
   fix `Feed` never called `Process.flag(:trap_exit, true)`, so a socket that exited
@@ -103,7 +103,7 @@ defmodule DpExchange.Gemini.Feed do
   `Feed` too — every subscriber, the whole `wanted` set, gone, restarted by
   `DpExchange.Gemini.Supervisor` from the STATIC `opts` it was given at tree-start, which
   never carry a consumer's later `subscribe/3` calls. Proven by linking a real process
-  into a running `Feed` the way `ensure_socket/1` does and killing it with
+  into a running `Feed` the way `start_dial/1` does and killing it with
   `Process.exit(pid, :kill)` — `:normal` would not have proven anything, since a
   non-trapping process ignores a peer's normal exit.
 
@@ -153,14 +153,37 @@ defmodule DpExchange.Gemini.Feed do
   lasts" log behaviour; only a consumer-visible `Notice` is new, and it is deliberately
   quieter than the log beside it.
 
-  ## `ensure_socket/1` connects inside `handle_call` — its timeout budget is chosen, not inherited
+  ## A dial never blocks this process — and its timeout budget is chosen, not inherited
 
-  `ensure_socket/1` calls `Socket.start_link/1` synchronously inside `handle_call`, and
-  `Feed`/`SandboxFeed` are named, shared processes: the whole blocking window that connect
-  can take is borne by every other consumer's `subscribe/3`, `unsubscribe/2` and
-  `coverage/1` queued behind it, not only the caller that happened to trigger it — the
-  `Feed` process itself is stuck, so the caller's own `@call_timeout` cannot help any of
-  them.
+  **The dial used to run inside `handle_call`.** `Socket.start_link/1` was called
+  synchronously there, and `Feed`/`SandboxFeed` are named, shared processes: the whole
+  blocking window that connect could take (up to about 25s in the worst case, with the
+  frame sends that followed) was borne by every other consumer's `unsubscribe/2`,
+  `coverage/1` and `wanted/1` queued behind it — the `Feed` process itself was stuck, so
+  the caller's own `@call_timeout` could not help any of them, and a caller of a read that
+  waited past it exited. The same dial ran inside the resubscribe tick and the crash redial.
+
+  **Now the socket dials in its own process** (`Socket.start_link/1` with `async: true`),
+  linked to and parented by `Feed` as before, and `Feed` returns to its mailbox at once.
+  The socket reports `{:dp_exchange, :gemini, :connected, pid}` when the first connect
+  succeeds, or exits `{:error, reason}` when it fails. Meanwhile:
+
+  * `subscribe/3` (non-empty), `unsubscribe/2` and `update_symbols/2` are HELD, with their
+    `from`, and replayed in arrival order once the socket is connected (so the caller's
+    return is what it always was: `:ok` after the frame went out, `{:error, reason}`
+    otherwise). A failed dial answers every held `subscribe/3` `{:error, reason}` — the same
+    reason a synchronous dial returned — having registered nothing. At most 1_000 calls are
+    held; past that a caller gets `{:error, :dial_backlog_full}`.
+  * Everything that touches no wire — `coverage/1`, `coverage_by_kind/1`, `wanted/1`,
+    `subscribe_notices/2`, `subscribe([])` — is answered at once.
+  * A resubscribe (tick or redial) that finds a dial in progress folds into it: the whole
+    `wanted` set is sent when it connects.
+  * A first connect that fails is not a socket crash: no `:link_down` notice, no crash-run
+    backoff. A dial that resubscribe started reports it as the failed periodic reconnect it
+    is (the latched `:coverage_change` notice). The vendored socket exits with a crash
+    report for a failed first connect, so a venue that is down logs one report per attempt.
+  * `{:dial_timeout, ref}` is the net under a dial that neither connected nor exited (the
+    socket's own handshake deadline, connect plus recv, normally ends it first).
 
   **The connect was never unbounded — that was the wrong diagnosis.** `websockex`'s own
   `WebSockex.Conn` bounds it already: measured from the vendored dependency,
@@ -286,6 +309,15 @@ defmodule DpExchange.Gemini.Feed do
   # section.
   @default_channels [:quotes, :top_of_book]
 
+  # What a dial may wait on past the socket's own handshake deadline (connect + recv) before
+  # `Feed` gives up on it. A net: the handshake deadline is enforced inside the socket and
+  # ends the dial first.
+  @dial_grace_ms 5_000
+
+  # The most calls held behind one dial. A dial lasts seconds, so reaching this takes a
+  # thousand concurrent callers; past it a caller is refused rather than queued without bound.
+  @max_dial_waiters 1_000
+
   # The kinds this feed can be asked to carry. Not read from `DpExchange.Gemini.
   # capabilities().streamable` itself — `dp_exchange_coinbase`'s `Feed` sets the family
   # precedent of a local, literal list here rather than a dependency back onto the
@@ -325,6 +357,13 @@ defmodule DpExchange.Gemini.Feed do
   "error" reasonably gave up on the symbols and then received them. Now the registration is
   undone, and a symbol whose frame may have landed is queued for a wire unsubscribe so the
   venue stops streaming it. A caller that wants the symbols retries.
+
+  **A first subscribe waits for the connection, not the feed.** With no socket yet, the socket
+  dials in its own process and this call is held until it connects (bounded by the connect and
+  receive timeouts), while every other call the feed serves is answered meanwhile. A failed
+  dial answers `{:error, reason}` with nothing recorded; more than 1_000 calls held behind one
+  dial answer `{:error, :dial_backlog_full}`. See the moduledoc's "A dial never blocks this
+  process".
 
   Refuses what it cannot hold in the caller, before the shared feed process sees it:
   `{:error, {:invalid_symbols, term}}` (see `canonical_symbols/1`) and
@@ -483,13 +522,12 @@ defmodule DpExchange.Gemini.Feed do
 
   @impl true
   def init(opts) do
-    # `ensure_socket/1` calls `Socket.start_link/1` from inside a `Feed` callback, which
+    # `start_dial/1` calls `Socket.start_link/1` from inside a `Feed` callback, which
     # links the socket to `Feed` — see the moduledoc's "A crashed socket is Feed's crash
     # too" section. Without this flag an abnormal socket exit crashes `Feed` itself,
     # discarding every subscriber and the whole `wanted` set; `handle_info({:EXIT, _,
     # _}, _)` below is what this flag makes reachable at all.
     Process.flag(:trap_exit, true)
-    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
 
     channels = (Keyword.get(opts, :channels) || @default_channels) |> validate_channels!()
 
@@ -512,6 +550,13 @@ defmodule DpExchange.Gemini.Feed do
        # dials its own on first subscribe; it is set on reconnect, and by tests that need
        # the socket-bearing branches without reaching a venue.
        socket: Keyword.get(opts, :socket),
+       # The dial in progress, or nil. A first connect is made
+       # by the socket process itself and never inside a callback here. See the moduledoc's
+       # "A dial never blocks this process" section and `start_dial/1`.
+       dial: nil,
+       # The one live periodic-resubscribe timer, `{ref, timer}`. A tick whose ref is not this
+       # one is stale and does nothing, so a second tick message can never start a second chain.
+       resubscribe_timer: schedule_tick(),
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
@@ -575,6 +620,22 @@ defmodule DpExchange.Gemini.Feed do
   def format_status(status), do: status
 
   @impl true
+  # **While a dial is in progress, every call that touches the wire waits its turn.** The
+  # socket is not connected yet, so a send would fail, and answering `unsubscribe` or
+  # `update_symbols` ahead of a queued `subscribe` would reorder the caller's own requests.
+  # They are held, with their `from`, and replayed in arrival order by `dial_connected/1` (or
+  # answered by `dial_failed/2`). Everything else — `coverage`, `wanted`, `subscribe_notices`,
+  # `subscribe([])` — touches no wire and is answered at once. The queue is capped
+  # (`@max_dial_waiters`) so a stuck dial cannot grow it.
+  def handle_call({:subscribe, [_first | _rest], _subscriber} = call, from, %{dial: %{}} = state),
+    do: wait_for_dial(state, from, call)
+
+  def handle_call({:unsubscribe, _symbols} = call, from, %{dial: %{}} = state),
+    do: wait_for_dial(state, from, call)
+
+  def handle_call({:update_symbols, _symbols} = call, from, %{dial: %{}} = state),
+    do: wait_for_dial(state, from, call)
+
   # `{:error, _}` leaves nothing registered — see `subscribe/3`. A failure to connect undoes
   # the registration. A failure to send undoes it too, keeps the socket this call dialled, and
   # queues the new symbols for a wire unsubscribe (`settle_subscribe/5`).
@@ -590,6 +651,17 @@ defmodule DpExchange.Gemini.Feed do
      }}
   end
 
+  # No socket: dial one, and hold this call until it is connected. NOTHING is registered yet,
+  # so a failed dial has nothing to undo — `dial_failed/2` answers `{:error, reason}` and the
+  # state is exactly as the caller found it. The registration happens when the call is
+  # replayed against the connected socket (`dial_connected/1`).
+  def handle_call({:subscribe, _symbols, _subscriber} = call, from, %{socket: nil} = state) do
+    case start_dial(state) do
+      {:ok, dialing} -> wait_for_dial(dialing, from, call)
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:subscribe, symbols, subscriber}, _from, state) do
     registered = %{
       state
@@ -598,14 +670,8 @@ defmodule DpExchange.Gemini.Feed do
         wanted: MapSet.union(state.wanted, MapSet.new(symbols))
     }
 
-    case ensure_socket(registered) do
-      {:ok, connected} ->
-        sent = when_linked(connected, &subscribe_channels(&1, symbols, connected))
-        {:reply, sent, settle_subscribe(sent, connected, state, subscriber, symbols)}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, undo_registration(registered, state, subscriber, symbols)}
-    end
+    sent = when_linked(registered, &subscribe_channels(&1, symbols, registered))
+    {:reply, sent, settle_subscribe(sent, registered, state, subscriber, symbols)}
   end
 
   def handle_call({:unsubscribe, symbols}, _from, %{socket: nil} = state) do
@@ -743,9 +809,44 @@ defmodule DpExchange.Gemini.Feed do
     end
   end
 
-  def handle_info(:resubscribe, state) do
-    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+  # The periodic tick. Only the tick the state names is honoured, and it re-arms exactly one
+  # successor, so the timer chain stays a chain of one however many ticks are sent.
+  def handle_info({:resubscribe_tick, ref}, %{resubscribe_timer: {ref, _timer}} = state) do
+    state = %{state | resubscribe_timer: schedule_tick()}
     {:noreply, resubscribe(state)}
+  end
+
+  def handle_info({:resubscribe_tick, _stale}, state), do: {:noreply, state}
+
+  # A resubscribe asked for by hand (a test, or `send/2` from a host): the work of a tick
+  # without the timer. It used to re-arm the timer as well, so each such message started a
+  # second chain beside the first.
+  def handle_info(:resubscribe, state), do: {:noreply, resubscribe(state)}
+
+  # The socket this feed dialled has finished connecting. See "A dial never blocks this
+  # process" in the moduledoc. A report from any other socket falls through to the catch-all.
+  def handle_info({:dp_exchange, :gemini, :connected, socket}, %{dial: %{socket: s}} = state)
+      when socket == s do
+    {:noreply, dial_connected(state)}
+  end
+
+  # The safety net under a dial that neither connected nor exited. The vendored handshake
+  # deadline normally ends it first, with an `EXIT` below. A ref that is not the dial's is
+  # stale — the dial finished first — and does nothing.
+  def handle_info({:dial_timeout, ref}, %{dial: %{ref: ref, socket: socket}} = state) do
+    Process.exit(socket, :kill)
+    {:noreply, dial_failed(state, :dial_timeout)}
+  end
+
+  def handle_info({:dial_timeout, _stale}, state), do: {:noreply, state}
+
+  # The socket this feed was dialling exited before it connected: the connect failed. An
+  # asynchronous start ends with `{:error, reason}`, the reason a synchronous `start_link/1`
+  # used to return, so it is unwrapped to that. This is NOT a socket crash — there was no
+  # connection to lose — so no `:link_down` notice and no crash-run backoff: the callers
+  # waiting on the dial are told, and the periodic tick tries again.
+  def handle_info({:EXIT, pid, reason}, %{dial: %{socket: pid}} = state) do
+    {:noreply, dial_failed(state, dial_exit_reason(reason))}
   end
 
   # The live socket reconnected, and it carries no subscriptions now — see the moduledoc's
@@ -816,6 +917,12 @@ defmodule DpExchange.Gemini.Feed do
   # (cleared by `isolate_crashed_socket/2`) actually recover instead of sitting `nil`
   # forever, since a socket this module never dialled has nothing for `Process.alive?/1`
   # to even check.
+  #
+  # A dial already in progress has not connected, so there is nothing to resend to yet. The
+  # tick is not lost: the dial is told to resubscribe the whole `wanted` set the moment it
+  # connects (`dial_connected/1`), or to report the failure if it does not (`dial_failed/2`).
+  defp resubscribe(%{dial: %{} = dial} = state), do: %{state | dial: %{dial | resubscribe?: true}}
+
   defp resubscribe(%{socket: socket} = state) when is_pid(socket) do
     state = retry_unsubscribe(socket, state)
 
@@ -837,18 +944,19 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   # `state.socket` is `nil` and something is still `wanted` — either nothing has ever
-  # subscribed (ordinary boot, `ensure_socket/1` has never run), or a socket crashed and
+  # subscribed (ordinary boot, `start_dial/1` has never run), or a socket crashed and
   # `isolate_crashed_socket/2` cleared it. Only the second case has anything to recover;
   # dialling in the first case costs nothing (the venue gets a connection with no
   # subscription frame, since `Socket.start_link/1` opens without one) but is not the
-  # ordinary path — `ensure_socket/1` from `subscribe/3` normally wins the race. Recurses
-  # into the `is_pid(socket)` clause above once a socket exists, so the actual `Socket.
-  # subscribe/2` call — and the recovery/failure latch — only ever happens in one place.
+  # ordinary path — a `subscribe/3` normally dials first. The dial is asynchronous: this
+  # clause only starts it and marks it `resubscribe?`, and `dial_connected/1` then runs the
+  # `is_pid(socket)` clause above, so the actual `Socket.subscribe/2` call — and the
+  # recovery/failure latch — still only ever happens in one place.
   defp resubscribe(%{socket: nil} = state) do
     if MapSet.size(state.wanted) > 0 do
-      case ensure_socket(state) do
-        {:ok, state} ->
-          resubscribe(state)
+      case start_dial(state) do
+        {:ok, %{dial: dial} = dialing} ->
+          %{dialing | dial: %{dial | resubscribe?: true}}
 
         {:error, reason} ->
           Logger.warning("[Gemini Feed] periodic reconnect failed: #{reason_text(reason)}")
@@ -971,13 +1079,101 @@ defmodule DpExchange.Gemini.Feed do
   # whole into every notice subscriber and every log line.
   defp reason_text(reason), do: inspect(reason, limit: 50, printable_limit: 1_024)
 
-  defp ensure_socket(%{socket: socket} = state) when is_pid(socket), do: {:ok, state}
+  # Starts a socket that dials INSIDE ITS OWN PROCESS (`Socket.start_link/1`'s `:async`) and
+  # returns at once, so nothing here waits out a connect. `Feed` is the starter, so the link
+  # and the socket's `parent` are `Feed`, exactly as when the dial was synchronous: stopping
+  # `Feed` still stops the socket, and a crashed socket is still an `EXIT` here. The socket
+  # reports `:connected` (`dial_connected/1`) or exits (`dial_failed/2`); `{:dial_timeout, ref}`
+  # is the net under both. Only a synchronous refusal (an unparseable URL, a trust store that
+  # cannot be loaded) is an `{:error, _}` from here.
+  defp start_dial(state) do
+    opts = state.socket_opts |> Keyword.put(:subscriber, self()) |> Keyword.put(:async, true)
 
-  defp ensure_socket(state) do
-    case Socket.start_link(Keyword.put(state.socket_opts, :subscriber, self())) do
-      {:ok, socket} -> {:ok, %{state | socket: socket}}
-      {:error, reason} -> {:error, reason}
+    case Socket.start_link(opts) do
+      {:ok, socket} ->
+        ref = make_ref()
+        budget = Socket.dial_budget_ms(opts) + @dial_grace_ms
+        timer = Process.send_after(self(), {:dial_timeout, ref}, budget)
+
+        dial = %{
+          socket: socket,
+          ref: ref,
+          timer: timer,
+          waiters: [],
+          waiting: 0,
+          resubscribe?: false
+        }
+
+        # A redial still pending is moot: a socket is being dialled now.
+        {:ok, cancel_redial(%{state | socket: socket, dial: dial})}
+
+      {:error, reason} ->
+        {:error, reason}
     end
+  end
+
+  # Holds a call that needs a connected socket until the dial settles. Capped, and past the
+  # cap the caller is told so rather than the queue growing: `{:error, :dial_backlog_full}`.
+  defp wait_for_dial(%{dial: dial} = state, from, call) do
+    if dial.waiting >= @max_dial_waiters do
+      {:reply, {:error, :dial_backlog_full}, state}
+    else
+      waiting = %{dial | waiters: [{from, call} | dial.waiters], waiting: dial.waiting + 1}
+      {:noreply, %{state | dial: waiting}}
+    end
+  end
+
+  # The dial connected. The held calls are replayed, in arrival order, against the now-live
+  # socket by the very `handle_call/3` clauses a synchronous caller would have hit, so their
+  # registration, their undo-on-failure and their replies are unchanged. A resubscribe that
+  # was asked for meanwhile goes first, because it describes what was wanted before them.
+  defp dial_connected(%{dial: dial} = state) do
+    Process.cancel_timer(dial.timer)
+    state = %{state | dial: nil}
+    state = if dial.resubscribe?, do: resubscribe(state), else: state
+
+    dial.waiters |> Enum.reverse() |> Enum.reduce(state, &replay_waiter/2)
+  end
+
+  defp replay_waiter({from, call}, state) do
+    {:reply, reply, state} = handle_call(call, from, state)
+    GenServer.reply(from, reply)
+    state
+  end
+
+  # The dial did not connect. A held `subscribe` is refused with the reason and, because
+  # nothing was registered for it, there is nothing to take back. A held `unsubscribe` or
+  # `update_symbols` is replayed against the now-socketless state, which is what it would have
+  # met had it arrived after the failure. A resubscribe that was waiting on the dial is the
+  # failed periodic reconnect it would have been when the dial was synchronous.
+  defp dial_failed(%{dial: dial} = state, reason) do
+    Process.cancel_timer(dial.timer)
+    state = %{state | socket: nil, dial: nil}
+
+    state =
+      if dial.resubscribe? do
+        Logger.warning("[Gemini Feed] periodic reconnect failed: #{reason_text(reason)}")
+        resubscribe_failed(state, reason)
+      else
+        state
+      end
+
+    dial.waiters |> Enum.reverse() |> Enum.reduce(state, &refuse_waiter(&1, &2, reason))
+  end
+
+  defp refuse_waiter({from, {:subscribe, _symbols, _subscriber}}, state, reason) do
+    GenServer.reply(from, {:error, reason})
+    state
+  end
+
+  defp refuse_waiter(waiter, state, _reason), do: replay_waiter(waiter, state)
+
+  defp dial_exit_reason({:error, reason}), do: reason
+  defp dial_exit_reason(reason), do: reason
+
+  defp schedule_tick do
+    ref = make_ref()
+    {ref, Process.send_after(self(), {:resubscribe_tick, ref}, @resubscribe_interval_ms)}
   end
 
   # See the moduledoc's "A crashed socket is Feed's crash too" section and `handle_info(

@@ -539,6 +539,29 @@ defmodule DpExchange.Gemini.SocketTest do
       assert_received {:dp_exchange, :gemini, :reconnected, ^me}
     end
 
+    test "the FIRST connect is reported only by a socket that dialled asynchronously" do
+      # `Feed` dials with `async: true` and has no other way to learn the connect finished.
+      assert {:ok, _first} = Socket.handle_connect(:conn, state())
+      refute_received {:dp_exchange, :gemini, :connected, _pid}
+
+      asynchronous = Map.put(state(), :report_connect?, true)
+      assert {:ok, again} = Socket.handle_connect(:conn, asynchronous)
+      me = self()
+      assert_received {:dp_exchange, :gemini, :connected, ^me}
+
+      # Only the first: a re-connect is `:reconnected`, never `:connected` again.
+      assert {:ok, _third} = Socket.handle_connect(:conn, again)
+      refute_received {:dp_exchange, :gemini, :connected, _pid}
+      assert_received {:dp_exchange, :gemini, :reconnected, ^me}
+    end
+
+    test "the dial budget is the connect timeout plus the recv timeout, and overridable" do
+      assert Socket.dial_budget_ms([]) == 5_000
+
+      assert Socket.dial_budget_ms(socket_connect_timeout: 7_000, socket_recv_timeout: 1_000) ==
+               8_000
+    end
+
     test "connecting raises link_up" do
       assert {:ok, _state} = Socket.handle_connect(:conn, state())
 

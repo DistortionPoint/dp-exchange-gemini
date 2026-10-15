@@ -203,11 +203,11 @@ defmodule DpExchange.Gemini.Socket do
   # Chosen against `Feed.@call_timeout` (25s: five 5s frame windows), not inherited from
   # `websockex`'s own general-purpose defaults (6s connect + 5s recv — measured from
   # `deps/websockex/lib/websockex/conn.ex:10-11`, which `start_link/1` used to pass no
-  # opts at all and so accepted by accident). `ensure_socket/1` connects synchronously
-  # inside a `Feed`/`SandboxFeed` `handle_call`, and one `send_frame` for the subscribe
-  # that follows (`@frame_window_ms`, 5s; two with `:trades` on) rides the same call:
-  # 3s + 2s + 5s = 10s (15s with two frames), leaving the rest of `@call_timeout` for
-  # everything else in that call. See `Feed`'s moduledoc.
+  # opts at all and so accepted by accident). `Feed` dials asynchronously now, so a slow
+  # connect no longer holds its mailbox, but the CALLER of `subscribe/3` still waits for the
+  # connect and then one `send_frame` for the subscribe (`@frame_window_ms`, 5s; two with
+  # `:trades` on): 3s + 2s + 5s = 10s (15s with two frames), inside the caller's
+  # `@call_timeout`. See `Feed`'s moduledoc.
   @socket_connect_timeout_ms 3_000
   @socket_recv_timeout_ms 2_000
 
@@ -410,6 +410,13 @@ defmodule DpExchange.Gemini.Socket do
   of its own, and this is a one-time hint made before the socket ever connects, because the
   parameter cannot be added after the WebSocket upgrade. Omit it, or leave `:depth` and
   `:depth_fast` out of it, and this socket behaves exactly as it always has.
+
+  **`async: true` returns `{:ok, pid}` at once and dials inside the socket process.** This is
+  how `Feed` dials, so that no `Feed` callback waits out a connect. The first successful
+  connect is then reported to the subscriber as `{:dp_exchange, :gemini, :connected, pid}`
+  (a re-connect is `:reconnected`, as ever), and a first connect that fails ends the process
+  with exit reason `{:error, reason}`, which the linked starter sees as an `EXIT`. Without it
+  `start_link/1` blocks until connected and answers `{:error, reason}` itself.
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
@@ -424,8 +431,14 @@ defmodule DpExchange.Gemini.Socket do
         explicit -> explicit
       end
 
+    async? = Keyword.get(opts, :async, false) == true
+
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
+      # Whether the FIRST connect is reported to the subscriber as `{:dp_exchange, :gemini,
+      # :connected, pid}`. Set exactly when this socket dials asynchronously: `Feed` then has
+      # no other way to learn the connect finished. See `start_link/1`'s `:async`.
+      report_connect?: async?,
       # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
       # the link to it is how this socket learns it was stopped, and a backoff has to keep
       # listening for that.
@@ -447,8 +460,22 @@ defmodule DpExchange.Gemini.Socket do
     }
 
     with {:ok, connect} <- tls_connect_opts(url, opts) do
+      connect = if async?, do: Keyword.put(connect, :async, true), else: connect
       VendoredWebSockex.start_link(url, __MODULE__, state, connect)
     end
+  end
+
+  @doc """
+  The longest a first connect can legitimately take: `:socket_connect_timeout` plus
+  `:socket_recv_timeout`, which is the vendored handshake deadline (see `connect_opts/1`).
+
+  `Feed` arms its own timer from this, as a net under an asynchronous dial that never reports.
+  """
+  @spec dial_budget_ms(keyword()) :: pos_integer()
+  def dial_budget_ms(opts) do
+    timeouts = timeout_opts(opts)
+    connect = Keyword.fetch!(timeouts, :socket_connect_timeout)
+    connect + Keyword.fetch!(timeouts, :socket_recv_timeout)
   end
 
   # The venue's own endpoint, unless the application config names another with
@@ -969,7 +996,7 @@ defmodule DpExchange.Gemini.Socket do
     # droppable, and one that graphed notices would be graphing something it is meant to
     # handle. Both fire here because this one event is genuinely both.
     Telemetry.link_up(:gemini)
-    if state.connected_once?, do: report_reconnected(state)
+    if state.connected_once?, do: report_reconnected(state), else: report_connected(state)
     liveness = make_ref()
     schedule_liveness(liveness)
     cancel_ack_timers(state)
@@ -1420,6 +1447,18 @@ defmodule DpExchange.Gemini.Socket do
   # the guard only meant a registered-name subscriber would hear `:link_up` and never this.
   defp report_reconnected(%{subscriber: subscriber}) do
     send(subscriber, {:dp_exchange, :gemini, :reconnected, self()})
+    :ok
+  end
+
+  # The FIRST connect, reported only by a socket that dialled asynchronously (`start_link/1`'s
+  # `:async`): its starter was not waiting on `start_link/1`, so this is how it learns the
+  # connect is done and a subscribe frame can go out. A synchronously-dialled socket's starter
+  # already knows, and a report would only be a message nobody reads. `Map.get/3`: a bare
+  # test-built state has no such key.
+  defp report_connected(state) do
+    if Map.get(state, :report_connect?, false),
+      do: send(state.subscriber, {:dp_exchange, :gemini, :connected, self()})
+
     :ok
   end
 
