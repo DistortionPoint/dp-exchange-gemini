@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.142] - 2026-10-15
+
 - **`subscribe/2` refuses a `channels:` option; the Fake no longer takes it per call (tick AF).**
   `channels:` configures the feed's one connection at start, and the real `subscribe/2`
   silently ignored it while `Fake.subscribe/2` honoured it, so a consumer's tests passed with
