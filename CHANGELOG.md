@@ -20,6 +20,11 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `dp_exchange_core ~> 0.3.98`; the conformance suite now runs group 42 (an ambiguous
+  `place_order/3` is `:order_unconfirmed`) against the real path.
+
 ## [0.2.145] - 2026-10-16
 
 ### Changed
