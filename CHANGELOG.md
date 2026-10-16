@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.146] - 2026-10-16
+
 ### Changed
 
 - Requires `dp_exchange_core ~> 0.3.98`; the conformance suite now runs group 42 (an ambiguous
