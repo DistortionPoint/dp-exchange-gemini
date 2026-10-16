@@ -20,6 +20,10 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.144] - 2026-10-16
+
+_No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
+
 ## [0.2.143] - 2026-10-16
 
 - **The last subscriber dying releases the feed's wanted set (tick AG).** `wanted` is one set
