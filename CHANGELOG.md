@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.145] - 2026-10-16
+
 ### Changed
 
 - Private reads (all POSTs) and `withdraw/6` now request three attempts explicitly instead of
