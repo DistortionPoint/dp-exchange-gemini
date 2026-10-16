@@ -566,11 +566,36 @@ defmodule DpExchange.Gemini.FakeTest do
                Fake.cancel_all_orders(@credentials, scope: :everything)
     end
 
-    test "either scope answers with the venue's two lists" do
-      assert {:ok, %{cancelled: [_id], rejected: []}} =
+    test "either scope answers with the venue's two lists, empty when nothing is open" do
+      assert {:ok, %{cancelled: [], rejected: []}} =
                Fake.cancel_all_orders(@credentials, scope: :session)
 
-      assert {:ok, %{cancelled: [_id2], rejected: []}} =
+      assert {:ok, %{cancelled: [], rejected: []}} =
+               Fake.cancel_all_orders(@credentials, scope: :account)
+    end
+
+    test "it cancels the orders this process placed, and names them" do
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
+        quantity: "1",
+        price: "100"
+      }
+
+      assert {:ok, first} = Fake.place_order(@credentials, request, [])
+      assert {:ok, second} = Fake.place_order(@credentials, request, [])
+      assert {:ok, [_one, _two]} = Fake.get_orders(@credentials, [])
+
+      assert {:ok, %{cancelled: cancelled, rejected: []}} =
+               Fake.cancel_all_orders(@credentials, scope: :session)
+
+      assert Enum.sort(cancelled) == Enum.sort([first.id, second.id])
+      assert Fake.get_orders(@credentials, []) == {:ok, []}
+      assert {:ok, %{status: :cancelled}} = Fake.get_order(@credentials, first.id, [])
+
+      assert {:ok, %{cancelled: [], rejected: []}} =
                Fake.cancel_all_orders(@credentials, scope: :account)
     end
 

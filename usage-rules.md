@@ -1132,6 +1132,12 @@ caller that gave up on them received them anyway.
 `unsubscribe/2` is the other way round on purpose: it stops delivery at once even when the
 wire send fails, answers the error, and retries the wire unsubscribe on the tick.
 
+**The feed keeps one wanted set, not one per subscriber.** When the last subscriber that is a
+pid dies, everything wanted is released as an `unsubscribe/2` of all of it would (the wire
+unsubscribe is retried on the tick if it fails). A subscriber registered by name is never
+monitored, so one of those keeps the set alive. While at least one subscriber remains, a
+subscriber's death releases nothing: the symbols are shared, so unsubscribe them yourself.
+
 `to:` must be a pid or a registered name. Anything else (`to: "consumer"`, `to: true`) is
 `{:error, {:invalid_subscriber, value}}` from `subscribe/2` and `subscribe_notices/1`, before
 the shared feed process sees it. `DpExchange.Gemini.Fake` answers the same.
@@ -1485,7 +1491,9 @@ read `:not_found` from a cancel as "never existed": an order that already filled
 same, so check `get_order/3` before placing again. `cancel_order/3` is sent once.
 `DpExchange.Gemini.Fake` answers the same for all of this: each placement gets its own numeric id,
 an id it did not issue in the calling process is `{:refused, :not_found}`, and the order carries
-the side as `:buy` / `:sell` whatever case you passed.
+the side as `:buy` / `:sell` whatever case you passed. `Fake.cancel_all_orders/2` (either scope)
+cancels the orders that process placed and answers their ids in `cancelled`; with none open both
+lists are empty.
 
 ## Error shapes that mean "do not act on this answer"
 

@@ -985,7 +985,13 @@ defmodule DpExchange.Gemini.Fake do
       # for it. This asked for the credential first.
       with {:ok, _path} <- Private.cancel_scope(Keyword.get(opts, :scope)),
            :ok <- authenticated(credentials, opts) do
-        {:ok, %{cancelled: ["fake-gemini-order-1"], rejected: []}}
+        # **Cancels what this process placed, and says which.** It answered one invented id
+        # ("fake-gemini-order-1") whatever was open and touched nothing, so a consumer's test
+        # saw an order it never placed cancelled and the orders it had placed still resting.
+        # The ids are the real ones; with nothing open both lists are empty, as the venue's are.
+        open = open_orders()
+        Enum.each(open, &remember_order(%{&1 | status: :cancelled}))
+        {:ok, %{cancelled: Enum.map(open, & &1.id), rejected: []}}
       end
     end)
   end

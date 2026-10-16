@@ -20,6 +20,23 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **The last subscriber dying releases the feed's wanted set (tick AG).** `wanted` is one set
+  for the whole feed, and a symbol outlived every consumer that asked for it: the venue went on
+  streaming it, the tick and every reconnect resent it, and each frame went to nobody. When the
+  last pid subscriber is `:DOWN` (a registered-name subscriber is never monitored and keeps the
+  set alive) everything wanted is dropped as an `unsubscribe/2` drops it, and the wire
+  unsubscribe is retried on the tick if it fails. A dial still open is not sent to.
+- **`Fake.cancel_all_orders/2` cancels what the process placed (tick AG).** It answered one
+  invented id (`"fake-gemini-order-1"`) and touched nothing, so orders a test had placed kept
+  resting and `get_orders/2` still listed them. It now cancels the open placed orders and names
+  them in `cancelled`; with none open both lists are empty.
+- **A failed `update_symbols/2` no longer resurrects the symbols it removed (tick AG).** When
+  the unsubscribe half went out and the subscribe half failed, the previous wanted set was
+  restored whole, so the removed symbols were wanted again though the venue had stopped them,
+  and the next tick resubscribed them. Now only the removed symbols are dropped from `wanted`
+  (the error is still returned and the added symbols are still queued for a wire unsubscribe).
+  A failure of the unsubscribe half itself still leaves `wanted` unchanged.
+
 ## [0.2.142] - 2026-10-15
 
 - **`subscribe/2` refuses a `channels:` option; the Fake no longer takes it per call (tick AF).**

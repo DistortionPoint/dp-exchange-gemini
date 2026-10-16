@@ -715,8 +715,14 @@ defmodule DpExchange.Gemini.Feed do
       :ok ->
         {:reply, :ok, updated}
 
-      {:error, _reason} = error ->
-        {:reply, error, queue_unsubscribe(%{updated | wanted: state.wanted}, added)}
+      # The unsubscribe half went out, so the removed symbols are no longer on the wire: they
+      # are not wanted, and a tick must not resend them. Only the subscribe half failed.
+      {:error, reason, :subscribe} ->
+        kept = MapSet.difference(state.wanted, MapSet.new(removed))
+        {:reply, {:error, reason}, queue_unsubscribe(%{updated | wanted: kept}, added)}
+
+      {:error, reason, :unsubscribe} ->
+        {:reply, {:error, reason}, queue_unsubscribe(%{updated | wanted: state.wanted}, added)}
     end
   end
 
@@ -784,7 +790,17 @@ defmodule DpExchange.Gemini.Feed do
   # `Core.Fanout.watch/2` — because a name outlives the process holding it, and pruning on
   # its holder's death would silently unsubscribe a consumer its supervisor is about to
   # restart under the same name.
+  #
+  # **The last data subscriber going releases what was wanted.** `wanted` is one set for the
+  # whole feed, with no record of who asked for what, so a symbol outlived every consumer that
+  # wanted it: the venue kept streaming it to this connection, `resubscribe/1` kept resending
+  # it on every tick and after every reconnect, and each frame was fanned out to nobody for
+  # the life of the feed. With no data subscriber left (a registered-name one keeps the set
+  # alive, as it is never monitored) `wanted` is dropped through the same path an
+  # `unsubscribe/2` takes, and the wire unsubscribe is retried on the tick if it fails.
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    was_subscriber? = MapSet.member?(state.subscribers, pid)
+
     state = %{
       state
       | subscribers: MapSet.delete(state.subscribers, pid),
@@ -792,7 +808,9 @@ defmodule DpExchange.Gemini.Feed do
         monitors: Fanout.forget(pid, state.monitors)
     }
 
-    {:noreply, state}
+    if was_subscriber? and MapSet.size(state.subscribers) == 0,
+      do: {:noreply, release_wanted(state)},
+      else: {:noreply, state}
   end
 
   @impl true
@@ -1023,10 +1041,14 @@ defmodule DpExchange.Gemini.Feed do
   defp apply_delta(%{link_down?: true}, _added, _removed), do: :ok
 
   defp apply_delta(state, added, removed) do
-    with :ok <- unsubscribe_channels(state.socket, removed, state) do
-      subscribe_channels(state.socket, added, state)
+    case unsubscribe_channels(state.socket, removed, state) do
+      :ok -> tag_stage(subscribe_channels(state.socket, added, state), :subscribe)
+      error -> tag_stage(error, :unsubscribe)
     end
   end
+
+  defp tag_stage(:ok, _stage), do: :ok
+  defp tag_stage({:error, reason}, stage), do: {:error, reason, stage}
 
   # Every `Socket` channel this feed currently carries — `@bookTicker` always, and
   # `@trade` too when `:trades` is in `state.channels`. See the moduledoc's "`channels:`"
@@ -1488,6 +1510,23 @@ defmodule DpExchange.Gemini.Feed do
           end)
     }
   end
+
+  # Everything wanted, taken back because nobody is left to receive it. A dial still open has
+  # no subscriptions to undo, and no socket has none either, so only a connected socket is sent
+  # to; a failed send leaves the symbols queued for the tick, as `unsubscribe/2` does.
+  defp release_wanted(state) do
+    case MapSet.to_list(state.wanted) do
+      [] -> state
+      symbols -> release_symbols(state, symbols)
+    end
+  end
+
+  defp release_symbols(%{socket: socket, dial: nil} = state, symbols) when is_pid(socket) do
+    result = when_linked(state, &unsubscribe_channels(&1, symbols, state))
+    state |> drop(symbols) |> unsubscribe_later(result, symbols)
+  end
+
+  defp release_symbols(state, symbols), do: drop(state, symbols)
 
   defp narrow_delivery(state, symbols) do
     Map.new(state.delivering_by_kind, fn {kind, by_symbol} ->
