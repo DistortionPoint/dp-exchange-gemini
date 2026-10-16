@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.143] - 2026-10-16
+
 - **The last subscriber dying releases the feed's wanted set (tick AG).** `wanted` is one set
   for the whole feed, and a symbol outlived every consumer that asked for it: the venue went on
   streaming it, the tick and every reconnect resent it, and each frame went to nobody. When the
