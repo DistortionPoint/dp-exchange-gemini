@@ -153,7 +153,7 @@ defmodule DpExchange.Gemini.TickAGFeedTest do
 
       assert state.wanted == MapSet.new()
       assert state.unsubscribe_pending == MapSet.new()
-      refute_receive {:frame_sent, _frame}, 50
+      refute_receive {:frame_sent, _frame}, 500
     end
   end
 
@@ -191,7 +191,7 @@ defmodule DpExchange.Gemini.TickAGFeedTest do
       _state = pid_down(feed, leaving)
 
       assert Feed.wanted(feed) == ["BTC-USD", "ETH-USD"]
-      refute_receive {:frame_sent, %{"method" => "unsubscribe"}}, 50
+      refute_receive {:frame_sent, %{"method" => "unsubscribe"}}, 500
     end
 
     test "a registered-name subscriber, never monitored, keeps the set alive" do

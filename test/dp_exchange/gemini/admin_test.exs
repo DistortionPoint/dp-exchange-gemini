@@ -288,7 +288,7 @@ defmodule DpExchange.Gemini.AdminTest do
         Plug.Conn.resp(conn, 503, "unavailable")
       end
 
-      # No `:retry_attempts` passed: the default would be three attempts.
+      # No `:retry_attempts` passed: the refresh forces a single attempt itself.
       assert {:error, _reason} =
                Private.refresh_access_token("client-1", "old-refresh", plug: plug)
 

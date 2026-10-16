@@ -20,6 +20,13 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- Private reads (all POSTs) and `withdraw/6` now request three attempts explicitly instead of
+  relying on Core's default, which becomes one attempt for a POST. A retry is signed afresh
+  (new nonce); `withdraw/6` retries on its `clientTransferId`. Keyless writes are still sent
+  once. A caller's `:retry_attempts` still wins.
+
 ## [0.2.144] - 2026-10-16
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

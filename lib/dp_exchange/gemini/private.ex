@@ -1271,7 +1271,7 @@ defmodule DpExchange.Gemini.Private do
     headers = wrap.(signer(scheme, path, stringify(params), credentials, opts))
     url = base_url(opts) <> path
 
-    case HttpClient.request(:post, url, headers, "", request_opts(opts)) do
+    case HttpClient.request(:post, url, headers, "", request_opts(post_retries(opts))) do
       {:ok, %{status: status, body: body, headers: response_headers}}
       when status in 200..299 ->
         with {:ok, decoded} <- decoded_body(body), do: {:ok, decoded, response_headers}
@@ -1296,6 +1296,19 @@ defmodule DpExchange.Gemini.Private do
 
       {:error, reason} ->
         transport_error(reason)
+    end
+  end
+
+  # Core sends a POST once by default. Every private READ here is a POST, and retrying one is
+  # safe: `signer/5` signs each attempt afresh, so a retry carries a new nonce instead of
+  # resending a used one. `withdraw/6` also reaches here and retries safely because its
+  # `clientTransferId` is an idempotency key the venue honours. Every write without such a key
+  # goes through `post_once/5`, which sets `:retry_attempts` to 1 first, so it is left alone
+  # here; a caller's own value (even a lower one) wins.
+  defp post_retries(opts) do
+    case Keyword.get(opts, :retry_attempts) do
+      nil -> Keyword.put(opts, :retry_attempts, 3)
+      _explicit -> opts
     end
   end
 

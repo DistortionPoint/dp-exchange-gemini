@@ -1386,7 +1386,7 @@ defmodule DpExchange.Gemini.FeedTest do
       assert {:error, {:invalid_symbols, [""]}} = Feed.update_symbols(feed, [""])
       assert {:error, {:invalid_symbols, [1]}} = Feed.unsubscribe(feed, [1])
 
-      refute_receive {:DOWN, ^monitor, :process, _pid, _reason}, 50
+      refute_receive {:DOWN, ^monitor, :process, _pid, _reason}, 500
       assert :sys.get_state(feed).wanted == MapSet.new(["BTC-USD"])
     end
 
@@ -1495,7 +1495,7 @@ defmodule DpExchange.Gemini.FeedTest do
         assert {:error, {:invalid_subscriber, ^bad}} = Feed.subscribe_notices(feed, to: bad)
       end
 
-      refute_receive {:DOWN, ^monitor, :process, _pid, _reason}, 50
+      refute_receive {:DOWN, ^monitor, :process, _pid, _reason}, 500
 
       state = :sys.get_state(feed)
       assert state.subscribers == MapSet.new()

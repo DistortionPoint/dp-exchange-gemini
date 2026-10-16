@@ -601,7 +601,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert length(rows) == 1
       assert_receive {:payload, payload}
       assert payload["limit"] == 10
-      refute_receive {:payload, _second_request}
+      refute_receive {:payload, _second_request}, 500
     end
 
     test "a token the venue echoes back unchanged is refused, never followed forever" do
@@ -636,7 +636,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert_receive {:payload, _first}
       assert_receive {:payload, second}
       assert second["continuation_token"] == "tok-1"
-      refute_receive {:payload, _third}
+      refute_receive {:payload, _third}, 500
     end
   end
 
@@ -797,7 +797,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       )
 
       assert_receive :attempt, 5_000
-      refute_receive :attempt, 200
+      refute_receive :attempt, 500
     end
 
     test "a staking write is sent once too" do
@@ -818,7 +818,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       )
 
       assert_receive :attempt, 5_000
-      refute_receive :attempt, 200
+      refute_receive :attempt, 500
     end
 
     test "a read still retries, because re-asking a question repeats nothing" do
@@ -963,7 +963,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                )
 
       assert Enum.sort(missing) == [:amount, :price]
-      refute_receive {:payload, _payload, _path}, 100
+      refute_receive {:payload, _payload, _path}, 500
     end
   end
 end
