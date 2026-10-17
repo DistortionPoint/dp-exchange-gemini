@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.148] - 2026-10-17
+
 ### Fixed
 
 - `get_symbols/1` refuses (`{:error, :unexpected_response_shape}`) a `/v1/symbols` array that
