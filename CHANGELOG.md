@@ -34,6 +34,21 @@ acceptable changelog line.
 
 ### Changed — BREAKING
 
+- **An option a facade call does not read is refused, not ignored.** Every
+  `DpExchange.Gemini` function that takes `opts` answers `{:error, {:unknown_option, key}}`
+  for the first key it does not read and `{:error, {:invalid_options, opts}}` for options
+  that are not a keyword list, before anything is sent and before the credential is read. A
+  misspelt `limt:` or `sinse:` used to be dropped and answered a different question from the
+  one asked. `coverage/1`, `coverage_by_kind/1`, `wanted/1` and `live?/1` have no error
+  channel and raise `ArgumentError`. `DpExchange.Gemini.Fake` answers identically (same
+  table, `DpExchange.Gemini.OptionKeys`), so conformance group 43 passes. A call the venue
+  does not serve still answers `:not_supported` whatever the options. Requires
+  `dp_exchange_core ~> 0.3.101`. A funding payment report (`funding_payment_report/1`,
+  `funding_payment_report_file/1`) no longer accepts, and silently drops, a shared `:symbol`;
+  `rename_account/3` no longer accepts `:account` or `:name` (its arguments), and
+  `transfer_internal/4` refuses an unknown key in its `[from:, to:, client_transfer_id:]`
+  terms. The per-function keys are in `usage-rules.md`.
+
 Present-but-unreadable no longer becomes `nil` (family rule: unreadable refuses, never
 substitutes). Absent or `null` is still `nil` where the vendor's schema marks the field
 optional (checked in `rest.yaml`: none of these is `required`). Each is now

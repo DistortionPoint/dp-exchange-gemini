@@ -1143,6 +1143,76 @@ answers `{:error, {:invalid_range, range}}` for a `range` that is not a keyword 
 bound is not a `DateTime`.
 `DpExchange.Gemini.Fake` answers the same.
 
+## An option a call does not read is refused, not ignored (BREAKING)
+
+A misspelt `limt:` or `sinse:` used to be dropped, and the call answered a different question
+from the one you asked. Every facade function that takes `opts` now answers
+`{:error, {:unknown_option, key}}` for the first key it does not read, and
+`{:error, {:invalid_options, opts}}` for options that are not a keyword list, **before
+anything is sent** and before the credential is read. A key holding `nil` counts (`limt: nil`
+is refused too). `DpExchange.Gemini.Fake` answers the same, from the same table. A call this
+venue does not serve (`{:error, :not_supported}`) keeps answering that, whatever the options.
+`coverage/1`, `coverage_by_kind/1`, `wanted/1` and `live?/1` return a plain value with no
+room for an error, so they raise `ArgumentError` instead. Requires `dp_exchange_core
+~> 0.3.101`.
+
+Order of checks: a market-data symbol first (`{:invalid_symbol, _}`), then the options, then
+the credential. `subscribe/2`, `unsubscribe/2` and `update_symbols/2` check the symbols
+first. `transfer_internal/4` checks its `[from:, to:, client_transfer_id:]` terms, then
+`opts`.
+
+**Every call accepts** the transport keys `:credentials :environment :base_url :plug
+:adapter :req_adapter :limiter :rate_limit_blocking :weight :timeout :retry_attempts
+:retry_delay :max_retry_after_s :max_body_bytes :log_requests`. A signed call also accepts
+`:nonce_mode :auth_scheme :account`; `create_account/1`, `rename_account/3`,
+`list_accounts/1` and `get_roles/1` act on the key or the group and do not accept `:account`.
+
+**The rest, per function** (the single source is `DpExchange.Gemini.OptionKeys`, which
+`allowed/1` answers from):
+
+| Function | Its own keys |
+|---|---|
+| `get_price/2`, `get_top_of_book/2`, `get_symbols/1`, `get_market_overview/1`, `list_fee_promos/1`, `get_staking_rates/1`, `get_funding/2`, `get_contract_stats/2`, `next_funding_timestamp/2`, `market_status/1` | none |
+| `get_historical_prices/4` | `:include_partial`, `:limit` (`:limit` is `{:unsupported_option, :limit}`) |
+| `get_order_book/2` | `:depth`; `:limit` is answered `{:unsupported_option, :limit}` (depth is `:depth`) |
+| `get_trades/2` | `:since`, `:since_tid`, `:limit`, `:include_broken` |
+| `list_instruments/1` | `:symbols` |
+| `subscribe/2` | `:to`, `:feed`, `:channels` (`:channels` is `{:invalid_option, :channels, _}`) |
+| `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `coverage_by_kind/1`, `wanted/1` | `:feed` |
+| `subscribe_notices/1` | `:to`, `:feed` |
+| `live?/1` | none (`:environment` is a transport key) |
+| `get_balances/2`, `get_accounts/2`, `place_order/3`, `cancel_order/3`, `get_order/3`, `test_connection/2`, `get_notional_balances/3`, `get_trade_volume/2`, `get_fx_rate/3`, `list_payment_methods/2`, `transfer_internal/4`, `remove_approved_address/3`, `get_staking_balances/1`, `get_positions/1`, `get_margin_rates/1`, `preview_margin_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`, `confirm_clearing_order/3` | none |
+| `get_fees/2` | `:symbol` |
+| `get_transfers/2` | `:limit_transfers`, `:currency`, `:network`, `:timestamp` |
+| `get_orders/2` | `:history`, `:symbol`, `:limit`, `:since` |
+| `get_trade_history/2` | `:symbol`, `:limit`, `:since` |
+| `cancel_all_orders/2` | `:scope` |
+| `get_transactions/2`, `list_custody_fees/2` | `:since`, `:limit` |
+| `list_networks/2`, `list_approved_addresses/1` | `:network` |
+| `get_deposit_address/3` | `:label`, `:legacy` |
+| `estimate_withdrawal_fee/4` | `:address` |
+| `withdraw/5` | `:memo`, `:memo_required`, `:client_transfer_id` |
+| `add_payment_method/2` | `:country` |
+| `request_approved_address/4` | `:memo` |
+| `get_staking_rewards/1` | `:since`, `:until`, `:provider_id` |
+| `get_staking_history/1` | `:limit`, `:since`, `:until`, `:provider_id` |
+| `stake/3`, `unstake/3` | `:provider_id` |
+| `quote_conversion/4`, `convert/4` | `:symbol`, `:side` |
+| `commit_conversion/2` | `:symbol`, `:side`, `:amount`, `:price`, `:fee` |
+| `get_account_margin/1`, `get_margin_account/1` | `:symbol` |
+| `list_funding_payments/1` | `:since`, `:to` |
+| `funding_payment_report/1`, `funding_payment_report_file/1`, `funding_amount_report/2` | `:from`, `:to`, `:rows` (no `:symbol`: a payment report takes none and a stray one used to be dropped; the amount report's symbol is its argument) |
+| `create_clearing_order/2` | `:counterparty_id`, `:expires_in_hrs` |
+| `create_broker_clearing_order/2` | `:source_counterparty_id`, `:target_counterparty_id`, `:expires_in_hrs` |
+| `list_clearing_orders/1` | `:symbol`, `:counterparty`, `:side`, `:expiration_start`, `:expiration_end`, `:submission_start`, `:submission_end` |
+| `list_clearing_brokers/1` | `:symbol`, `:expiration_start`, `:expiration_end` |
+| `list_clearing_trades/1` | `:symbol`, `:limit`, `:since_nanos` |
+| `create_account/1` | `:name`, `:type` |
+| `rename_account/3` | `:shortname` (`id` and `name` are arguments) |
+| `list_accounts/1` | `:limit`, `:since` |
+| `refresh_access_token/3` | `:client_secret`, `:auth_url` |
+| `revoke_access_token/1` | `:account` |
+
 ## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded
 
 If `subscribe/2` answers `{:error, _}` (the connection could not be dialled, or the frame

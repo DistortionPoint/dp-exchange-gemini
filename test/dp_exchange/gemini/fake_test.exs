@@ -1313,11 +1313,9 @@ defmodule DpExchange.Gemini.FakeTest do
     # The real facade upper-cases symbols on the way in. The fake has to give the same
     # answer, or a consumer's tier-1 tests certify silence where the venue delivers.
     test "is delivered under the canonical symbol, as the real package does" do
-      opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
-
-      assert :ok = DpExchange.Gemini.Fake.subscribe(["btc-usd"], opts)
+      assert :ok = DpExchange.Gemini.Fake.subscribe(["btc-usd"], to: self())
       assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 5_000
-      assert Map.has_key?(DpExchange.Gemini.Fake.coverage(opts), "BTC-USD")
+      assert Map.has_key?(DpExchange.Gemini.Fake.coverage(), "BTC-USD")
     end
   end
 

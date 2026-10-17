@@ -782,12 +782,16 @@ defmodule DpExchange.Gemini.Rest do
   its prose that `0` is allowed; which is true is unmeasured, and `0` is passed through rather
   than refused on a guess.) Exposed so `DpExchange.Gemini.Fake` refuses with this function.
   """
-  @spec validate_book_opts(keyword()) :: :ok | {:error, {:invalid_option, :depth, term()}}
+  @spec validate_book_opts(keyword()) ::
+          :ok | {:error, {:invalid_option, :depth, term()} | {:unsupported_option, :limit}}
   def validate_book_opts(opts) do
-    case Config.opt(opts, :depth, nil) do
-      nil -> :ok
-      depth when is_integer(depth) and depth >= 0 -> :ok
-      other -> {:error, {:invalid_option, :depth, other}}
+    # `:limit` is the family's spelling of a count some venues honour; here the count is
+    # `:depth`, so `:limit` is named as unsupported rather than ignored or called unknown.
+    case {Config.opt(opts, :limit, nil), Config.opt(opts, :depth, nil)} do
+      {limit, _depth} when limit != nil -> {:error, {:unsupported_option, :limit}}
+      {nil, nil} -> :ok
+      {nil, depth} when is_integer(depth) and depth >= 0 -> :ok
+      {nil, other} -> {:error, {:invalid_option, :depth, other}}
     end
   end
 

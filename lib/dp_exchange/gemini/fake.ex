@@ -57,7 +57,7 @@ defmodule DpExchange.Gemini.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Config, FakeInjection, Fanout, Timeframe, Types, Venue}
-  alias DpExchange.Gemini.{Auth, Environment, Feed, Private, Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Auth, Environment, Feed, OptionKeys, Private, Rest, SymbolFormat}
 
   @symbols ~w(BTC-USD BTC-GUSD ETH-USD SOL-RLUSD)
 
@@ -131,8 +131,10 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.get_price/2` and `c:DpExchange.Core.Venue.get_price/2`.
   """
   @impl true
-  def get_price(symbol, _opts \\ []) do
-    with :ok <- Rest.validate_symbol(symbol) do
+  def get_price(symbol, opts \\ []) do
+    # The real facade's order: the symbol, then an option it does not read, then the answer.
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_price, opts) do
       symbol = canonical(symbol)
       with_injection(symbol, fn -> fake_quote(symbol) end)
     end
@@ -168,8 +170,9 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.get_top_of_book/2` and `c:DpExchange.Core.Venue.get_top_of_book/2`.
   """
   @impl true
-  def get_top_of_book(symbol, _opts \\ []) do
-    with :ok <- Rest.validate_symbol(symbol) do
+  def get_top_of_book(symbol, opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_top_of_book, opts) do
       symbol = canonical(symbol)
       with_injection(symbol, fn -> fake_top_of_book(symbol) end)
     end
@@ -211,6 +214,7 @@ defmodule DpExchange.Gemini.Fake do
     # The real call's own order: the symbol, then the options it cannot honour (`:limit`,
     # a non-boolean `:include_partial`), then the width and the range.
     with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_historical_prices, opts),
          :ok <- Rest.validate_candle_opts(opts) do
       fake_candles(canonical(symbol), timeframe, range, opts)
     end
@@ -304,8 +308,10 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.get_symbols/1` and `c:DpExchange.Core.Venue.get_symbols/1`.
   """
   @impl true
-  def get_symbols(_opts \\ []) do
-    with_injection(fn -> {:ok, @symbols} end)
+  def get_symbols(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_symbols, opts) do
+      with_injection(fn -> {:ok, @symbols} end)
+    end
   end
 
   @doc """
@@ -317,6 +323,7 @@ defmodule DpExchange.Gemini.Fake do
   @impl true
   def get_order_book(symbol, opts \\ []) do
     with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_order_book, opts),
          :ok <- Rest.validate_book_opts(opts) do
       symbol = canonical(symbol)
       # The depth was checked above by the real call's own `Rest.validate_book_opts/1`, after
@@ -402,6 +409,7 @@ defmodule DpExchange.Gemini.Fake do
     # The real call's own checks, before the venue is asked: a symbol that is not a
     # non-blank string, then a `:since`, `:since_tid` or `:limit` it cannot send.
     with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_trades, opts),
          :ok <- Rest.validate_trade_opts(opts) do
       symbol = canonical(symbol)
       with_injection(symbol, fn -> fake_tape(symbol, opts) end)
@@ -497,6 +505,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_fx_rate(pair, at, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_fx_rate, opts), do: do_get_fx_rate(pair, at, opts)
+  end
+
+  defp do_get_fx_rate(pair, at, opts) do
     with_injection(fn ->
       # The fourteen pairs the venue serves, refused by the real function and BEFORE the
       # credential: `Private.get_fx_rate/3` refuses an unsupported pair (its 404 reads the
@@ -533,6 +545,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def list_networks(asset, opts \\ []) do
+    with :ok <- OptionKeys.check(:list_networks, opts), do: do_list_networks(asset, opts)
+  end
+
+  defp do_list_networks(asset, opts) do
     with_injection(fn ->
       # Refused first by the function the real call builds its path with: a blank or
       # non-string asset or network is an error there before anything is signed.
@@ -570,8 +586,10 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.list_fee_promos/1` and `c:DpExchange.Core.Venue.list_fee_promos/1`.
   """
   @impl true
-  def list_fee_promos(_opts \\ []) do
-    with_injection(fn -> {:ok, [%{"symbol" => "btcusd"}]} end)
+  def list_fee_promos(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_fee_promos, opts) do
+      with_injection(fn -> {:ok, [%{"symbol" => "btcusd"}]} end)
+    end
   end
 
   @doc """
@@ -581,7 +599,11 @@ defmodule DpExchange.Gemini.Fake do
   `c:DpExchange.Core.Venue.get_market_overview/1`.
   """
   @impl true
-  def get_market_overview(_opts \\ []) do
+  def get_market_overview(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_market_overview, opts), do: do_get_market_overview()
+  end
+
+  defp do_get_market_overview do
     with_injection(fn ->
       {:ok,
        Map.new(@symbols, fn symbol ->
@@ -632,6 +654,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def list_instruments(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_instruments, opts), do: do_list_instruments(opts)
+  end
+
+  defp do_list_instruments(opts) do
     with_injection(fn ->
       # The real function's own reading of `:symbols`: canonical spellings, each once, and
       # a value that is not a list of strings refused rather than raised on.
@@ -688,6 +714,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_balances(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_balances, opts), do: do_get_balances(credentials, opts)
+  end
+
+  defp do_get_balances(credentials, opts) do
     with_injection(fn ->
       with :ok <- authenticated(credentials, opts) do
         {:ok,
@@ -720,6 +750,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_accounts(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_accounts, opts), do: do_get_accounts(credentials, opts)
+  end
+
+  defp do_get_accounts(credentials, opts) do
     with_injection(fn ->
       with :ok <- authenticated(credentials, opts) do
         {:ok, [%{"account" => "primary", "type" => "exchange"}]}
@@ -735,6 +769,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_fees(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_fees, opts), do: do_get_fees(credentials, opts)
+  end
+
+  defp do_get_fees(credentials, opts) do
     with_injection(fn ->
       # The `:symbol` is refused by the real function's own check, before the credential.
       with {:ok, _params} <- Private.fees_params(opts),
@@ -752,6 +790,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_transfers(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_transfers, opts), do: do_get_transfers(credentials, opts)
+  end
+
+  defp do_get_transfers(credentials, opts) do
     with_injection(fn ->
       # The window and page options are refused by the real function, before the credential:
       # `Private.get_transfers/2` signs nothing for a `limit_transfers: 0`.
@@ -769,6 +811,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def place_order(credentials, request, opts \\ []) do
+    with :ok <- OptionKeys.check(:place_order, opts),
+         do: do_place_order(credentials, request, opts)
+  end
+
+  defp do_place_order(credentials, request, opts) do
     with_injection(fn ->
       # The refusals matter more than the success. A fake where every order works proves
       # only that the happy path compiles. `Private.validate_order/2` is the SAME function
@@ -864,6 +911,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def cancel_order(credentials, order_id, opts \\ []) do
+    with :ok <- OptionKeys.check(:cancel_order, opts),
+         do: do_cancel_order(credentials, order_id, opts)
+  end
+
+  defp do_cancel_order(credentials, order_id, opts) do
     with_injection(fn ->
       # The id is checked BEFORE the credential, as `Private.cancel_order/3` does, through
       # the same `Private.order_id_param/1`, so the fake cannot be the more permissive one.
@@ -886,6 +938,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_order(credentials, order_id, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_order, opts),
+         do: do_get_order(credentials, order_id, opts)
+  end
+
+  defp do_get_order(credentials, order_id, opts) do
     with_injection(fn ->
       with {:ok, wire_id} <- Private.order_id_param(order_id),
            :ok <- authenticated(credentials, opts) do
@@ -902,6 +959,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_orders(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_orders, opts), do: do_get_orders(credentials, opts)
+  end
+
+  defp do_get_orders(credentials, opts) do
     with_injection(fn ->
       # Open and historical are two endpoints on this venue, not one with a filter, and the
       # fake says so rather than answering the same empty list to both.
@@ -977,6 +1038,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def cancel_all_orders(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:cancel_all_orders, opts),
+         do: do_cancel_all_orders(credentials, opts)
+  end
+
+  defp do_cancel_all_orders(credentials, opts) do
     with_injection(fn ->
       # The fake enforces the contract's rule, so a consumer's suite cannot go green on a
       # bulk cancel that never said which orders it meant. `Private.cancel_scope/1` is the
@@ -1004,6 +1070,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_trade_history(credentials, opts) do
+    with :ok <- OptionKeys.check(:get_trade_history, opts),
+         do: do_get_trade_history(credentials, opts)
+  end
+
+  defp do_get_trade_history(credentials, opts) do
     with_injection(fn ->
       # `opts[:symbol]` is optional on the real endpoint — `MyTradesRequest`
       # (`rest.yaml:8294-8298`) names only `request` and `nonce` as required — so the fake
@@ -1204,7 +1275,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def subscribe(symbols, opts \\ []) do
+    # The real facade's order: the symbols, then an option this call does not read, then the
+    # subscriber and `:channels`.
     with {:ok, symbols} <- Feed.canonical_symbols(symbols),
+         :ok <- OptionKeys.check(:subscribe, opts),
          {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
          :ok <- Feed.reject_channels(opts) do
       do_subscribe(symbols, opts)
@@ -1269,8 +1343,9 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.unsubscribe/2` and `c:DpExchange.Core.Venue.unsubscribe/2`.
   """
   @impl true
-  def unsubscribe(symbols, _opts \\ []) do
-    with {:ok, symbols} <- Feed.canonical_symbols(symbols) do
+  def unsubscribe(symbols, opts \\ []) do
+    with {:ok, symbols} <- Feed.canonical_symbols(symbols),
+         :ok <- OptionKeys.check(:unsubscribe, opts) do
       dropped = MapSet.new(symbols)
       Process.put(__MODULE__, MapSet.difference(subscribed(), dropped))
       Process.put(@trades_key, MapSet.difference(subscribed_trades(), dropped))
@@ -1285,8 +1360,9 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.update_symbols/2` and `c:DpExchange.Core.Venue.update_symbols/2`.
   """
   @impl true
-  def update_symbols(symbols, _opts \\ []) do
-    with {:ok, symbols} <- Feed.canonical_symbols(symbols) do
+  def update_symbols(symbols, opts \\ []) do
+    with {:ok, symbols} <- Feed.canonical_symbols(symbols),
+         :ok <- OptionKeys.check(:update_symbols, opts) do
       do_update_symbols(symbols)
     end
   end
@@ -1366,7 +1442,11 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.coverage/1` and `c:DpExchange.Core.Venue.coverage/1`.
   """
   @impl true
-  def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
+  def coverage(opts \\ []) do
+    # As the real call: a map has no room for an error, so an option it does not read raises.
+    OptionKeys.check!(:coverage, opts)
+    Map.new(subscribed(), &{&1, :stream})
+  end
 
   @doc """
   See `DpExchange.Gemini.coverage_by_kind/1`.
@@ -1387,7 +1467,9 @@ defmodule DpExchange.Gemini.Fake do
   @spec coverage_by_kind(keyword()) :: %{
           Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
         }
-  def coverage_by_kind(_opts \\ []) do
+  def coverage_by_kind(opts \\ []) do
+    OptionKeys.check!(:coverage_by_kind, opts)
+
     %{
       quotes: Map.new(subscribed(), &{&1, :stream}),
       top_of_book: Map.new(subscribed_top_of_book(), &{&1, :stream}),
@@ -1403,7 +1485,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec wanted(keyword()) :: [String.t()]
   @impl true
-  def wanted(_opts \\ []), do: subscribed() |> MapSet.to_list() |> Enum.sort()
+  def wanted(opts \\ []) do
+    OptionKeys.check!(:wanted, opts)
+    subscribed() |> MapSet.to_list() |> Enum.sort()
+  end
 
   @doc """
   Registers `opts[:to]` (default: the caller) for notices and sends nothing, as the real feed
@@ -1417,7 +1502,9 @@ defmodule DpExchange.Gemini.Fake do
     # Registers, and sends nothing: the real Feed answers `:ok` and notifies on the next
     # event, so a `:link_up` here was a notice a consumer's test saw that production never
     # sends. Found 2026-10-10.
-    with {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())), do: :ok
+    with :ok <- OptionKeys.check(:subscribe_notices, opts),
+         {:ok, _subscriber} <- Feed.valid_subscriber(Config.opt(opts, :to, self())),
+         do: :ok
   end
 
   @doc """
@@ -1428,6 +1515,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def test_connection(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:test_connection, opts),
+         do: do_test_connection(credentials, opts)
+  end
+
+  defp do_test_connection(credentials, opts) do
     with_injection(fn ->
       # The same three keys `Private.test_connection/2` answers, with the venue's own
       # heartbeat body (`{"result": "ok"}`, rest.yaml `/v1/heartbeat`).
@@ -1455,8 +1547,10 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.market_status/1` and `c:DpExchange.Core.Venue.market_status/1`.
   """
   @impl true
-  def market_status(_opts) do
-    with_injection(fn -> {:ok, :open} end)
+  def market_status(opts) do
+    with :ok <- OptionKeys.check(:market_status, opts) do
+      with_injection(fn -> {:ok, :open} end)
+    end
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
@@ -1578,6 +1672,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_positions(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_positions, opts), do: do_get_positions(opts)
+  end
+
+  defp do_get_positions(opts) do
     with_injection(fn ->
       with :ok <- authenticated(fake_credentials(opts), opts) do
         # A short, because the short is where the sign convention bites: the venue sends a
@@ -1611,8 +1709,10 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.get_funding/2` and `c:DpExchange.Core.Venue.get_funding/2`.
   """
   @impl true
-  def get_funding(symbol, _opts \\ []) do
-    with :ok <- Rest.validate_symbol(symbol), do: fake_funding(symbol)
+  def get_funding(symbol, opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_funding, opts),
+         do: fake_funding(symbol)
   end
 
   defp fake_funding(symbol) do
@@ -1648,8 +1748,10 @@ defmodule DpExchange.Gemini.Fake do
   `c:DpExchange.Core.Venue.get_contract_stats/2`.
   """
   @impl true
-  def get_contract_stats(symbol, _opts \\ []) do
-    with :ok <- Rest.validate_symbol(symbol), do: fake_contract_stats(symbol)
+  def get_contract_stats(symbol, opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:get_contract_stats, opts),
+         do: fake_contract_stats(symbol)
   end
 
   defp fake_contract_stats(symbol) do
@@ -1683,7 +1785,11 @@ defmodule DpExchange.Gemini.Fake do
   `c:DpExchange.Core.Venue.get_staking_rates/1`.
   """
   @impl true
-  def get_staking_rates(_opts \\ []) do
+  def get_staking_rates(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_staking_rates, opts), do: do_get_staking_rates()
+  end
+
+  defp do_get_staking_rates do
     with_injection(fn ->
       # Two providers for one asset, at different rates. One rate would hide the reason
       # `provider_id` is required on stake/3 and unstake/3.
@@ -1716,6 +1822,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_staking_balances(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_staking_balances, opts), do: do_get_staking_balances(opts)
+  end
+
+  defp do_get_staking_balances(opts) do
     with_injection(fn ->
       with :ok <- authenticated(fake_credentials(opts), opts) do
         # The whole position redeemable and none of it tradable — the real shape that breaks
@@ -1746,6 +1856,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_staking_rewards(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_staking_rewards, opts), do: do_get_staking_rewards(opts)
+  end
+
+  defp do_get_staking_rewards(opts) do
     with_injection(fn ->
       # `since` is required at the venue (`rest.yaml:6885`, in the request schema's
       # `required` list) — the fake refuses its absence the same way
@@ -1796,6 +1910,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_staking_history(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_staking_history, opts), do: do_get_staking_history(opts)
+  end
+
+  defp do_get_staking_history(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_history_opts(:staking_history, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -1855,6 +1973,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def stake(asset, amount, opts \\ []) do
+    with :ok <- OptionKeys.check(:stake, opts), do: do_stake(asset, amount, opts)
+  end
+
+  defp do_stake(asset, amount, opts) do
     with_injection(fn ->
       with {:ok, provider_id} <- fake_provider_id(opts),
            {:ok, _currency, wire_amount} <- Private.validate_staking_terms(asset, amount),
@@ -1888,6 +2010,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def unstake(asset, amount, opts \\ []) do
+    with :ok <- OptionKeys.check(:unstake, opts), do: do_unstake(asset, amount, opts)
+  end
+
+  defp do_unstake(asset, amount, opts) do
     with_injection(fn ->
       with {:ok, provider_id} <- fake_provider_id(opts),
            {:ok, _currency, wire_amount} <- Private.validate_staking_terms(asset, amount),
@@ -1928,6 +2054,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def quote_conversion(from, to, amount, opts \\ []) do
+    with :ok <- OptionKeys.check(:quote_conversion, opts),
+         do: do_quote_conversion(from, to, amount, opts)
+  end
+
+  defp do_quote_conversion(from, to, amount, opts) do
     with_injection(fn ->
       # The fake refuses the ambiguous direction the real package refuses, with the real
       # function (`Private.instant_pair/3`) and before the credential, as the real path does:
@@ -1971,6 +2102,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def commit_conversion(id, opts \\ []) do
+    with :ok <- OptionKeys.check(:commit_conversion, opts), do: do_commit_conversion(id, opts)
+  end
+
+  defp do_commit_conversion(id, opts) do
     with_injection(fn ->
       # The venue's execute call needs the terms it quoted against, not the id alone —
       # `:symbol`, `:side`, `:amount`, `:price` and `:fee` (the venue requires the last and
@@ -2031,6 +2166,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def convert(from, to, amount, opts \\ []) do
+    with :ok <- OptionKeys.check(:convert, opts), do: do_convert(from, to, amount, opts)
+  end
+
+  defp do_convert(from, to, amount, opts) do
     with_injection(fn ->
       # One step and already settled — no rate was held, which is the whole difference from
       # quote_conversion/4.
@@ -2065,6 +2204,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_trade_volume(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_trade_volume, opts),
+         do: do_get_trade_volume(credentials, opts)
+  end
+
+  defp do_get_trade_volume(credentials, opts) do
     with_injection(fn ->
       with :ok <- authenticated(credentials, opts) do
         {:ok,
@@ -2096,6 +2240,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_deposit_address(asset, network, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_deposit_address, opts),
+         do: do_get_deposit_address(asset, network, opts)
+  end
+
+  defp do_get_deposit_address(asset, network, opts) do
     with_injection(fn ->
       # The network first, as `Private.get_deposit_address/4` builds its path from it before it
       # signs anything, then the asset it names the address for.
@@ -2126,6 +2275,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def list_approved_addresses(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_approved_addresses, opts),
+         do: do_list_approved_addresses(opts)
+  end
+
+  defp do_list_approved_addresses(opts) do
     with_injection(fn ->
       # The network is named before the credential is asked for, as
       # `Private.list_approved_addresses/2` does: there is no all-networks variant, and a
@@ -2177,6 +2331,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def estimate_withdrawal_fee(asset, network, amount, opts \\ []) do
+    with :ok <- OptionKeys.check(:estimate_withdrawal_fee, opts),
+         do: do_estimate_withdrawal_fee(asset, network, amount, opts)
+  end
+
+  defp do_estimate_withdrawal_fee(asset, network, amount, opts) do
     with_injection(fn ->
       # The destination, asset, network and amount first, by the function the real call uses,
       # then the credential — `Private.estimate_withdrawal_fee/5` refuses all of them before it
@@ -2202,6 +2361,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def withdraw(asset, network, amount, address, opts \\ []) do
+    with :ok <- OptionKeys.check(:withdraw, opts),
+         do: do_withdraw(asset, network, amount, address, opts)
+  end
+
+  defp do_withdraw(asset, network, amount, address, opts) do
     with_injection(fn ->
       # The request first (memo rule, destination, amount, transfer id), then the credential:
       # `Private.withdraw/6` refuses a required memo that is missing "here, where nothing has
@@ -2252,6 +2416,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def list_payment_methods(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:list_payment_methods, opts),
+         do: do_list_payment_methods(credentials, opts)
+  end
+
+  defp do_list_payment_methods(credentials, opts) do
     with_injection(fn ->
       with :ok <- authenticated(credentials, opts) do
         # `PaymentMethodsResponse` (`rest.yaml:5454`, schema `:9316-9328`) is
@@ -2289,6 +2458,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def add_payment_method(details, opts \\ []) do
+    with :ok <- OptionKeys.check(:add_payment_method, opts),
+         do: do_add_payment_method(details, opts)
+  end
+
+  defp do_add_payment_method(details, opts) do
     with_injection(fn ->
       # The details, then the country, then the credential — `Private.add_payment_method/3`
       # refuses malformed details, picks the endpoint by country and refuses a country it has
@@ -2316,6 +2490,13 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def transfer_internal(asset, amount, transfer_opts, opts \\ []) do
+    # The terms are a positional argument, so they are checked before `opts`, as on the facade.
+    with :ok <- OptionKeys.check_terms(:transfer_internal, transfer_opts),
+         :ok <- OptionKeys.check(:transfer_internal, opts),
+         do: do_transfer_internal(asset, amount, transfer_opts, opts)
+  end
+
+  defp do_transfer_internal(asset, amount, transfer_opts, opts) do
     with_injection(fn ->
       # `Private.transfer_internal/5` refuses a missing `:from` or `:to` before it signs
       # anything. The account names are checked by the real function (non-blank strings, and
@@ -2351,6 +2532,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def request_approved_address(network, address, label, opts \\ []) do
+    with :ok <- OptionKeys.check(:request_approved_address, opts),
+         do: do_request_approved_address(network, address, label, opts)
+  end
+
+  defp do_request_approved_address(network, address, label, opts) do
     with_injection(fn ->
       # The label before the credential, by the real function: nothing is signed for a call
       # that names no label.
@@ -2378,6 +2564,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def remove_approved_address(network, address, opts \\ []) do
+    with :ok <- OptionKeys.check(:remove_approved_address, opts),
+         do: do_remove_approved_address(network, address, opts)
+  end
+
+  defp do_remove_approved_address(network, address, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_approved_address(network, address),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do
@@ -2395,6 +2586,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_transactions(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_transactions, opts),
+         do: do_get_transactions(credentials, opts)
+  end
+
+  defp do_get_transactions(credentials, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_history_opts(:transactions, opts),
            :ok <- authenticated(credentials, opts) do
@@ -2440,6 +2636,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_notional_balances(credentials, currency, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_notional_balances, opts),
+         do: do_get_notional_balances(credentials, currency, opts)
+  end
+
+  defp do_get_notional_balances(credentials, currency, opts) do
     with_injection(fn ->
       # The currency first, by the real function: nothing is signed for a blank one.
       with :ok <- Private.validate_notional_currency(currency),
@@ -2469,6 +2670,11 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def list_custody_fees(credentials, opts \\ []) do
+    with :ok <- OptionKeys.check(:list_custody_fees, opts),
+         do: do_list_custody_fees(credentials, opts)
+  end
+
+  defp do_list_custody_fees(credentials, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_history_opts(:custody_fees, opts),
            :ok <- authenticated(credentials, opts) do
@@ -2609,6 +2815,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def create_account(opts \\ []) do
+    with :ok <- OptionKeys.check(:create_account, opts), do: do_create_account(opts)
+  end
+
+  defp do_create_account(opts) do
     with_injection(fn ->
       # The name and type are checked by the real call's own function, before the credential.
       with {:ok, params} <- Private.create_account_params(Keyword.get(opts, :name), opts),
@@ -2632,6 +2842,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def rename_account(id, name, opts \\ []) do
+    with :ok <- OptionKeys.check(:rename_account, opts), do: do_rename_account(id, name, opts)
+  end
+
+  defp do_rename_account(id, name, opts) do
     with_injection(fn ->
       # As `DpExchange.Gemini.rename_account/3` hands `Private.rename_account/2` its options:
       # `id` IS the `account` the call is made against, so a master key that names the
@@ -2662,6 +2876,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @impl true
   def get_roles(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_roles, opts), do: do_get_roles(opts)
+  end
+
+  defp do_get_roles(opts) do
     with_injection(fn ->
       with :ok <- authenticated_group(fake_credentials(opts), opts) do
         # Trader and Fund Manager combined, and Auditor false — the combination the venue
@@ -2688,7 +2906,10 @@ defmodule DpExchange.Gemini.Fake do
   See `DpExchange.Gemini.live?/1`.
   """
   @spec live?(keyword()) :: boolean()
-  def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
+  def live?(opts \\ []) do
+    OptionKeys.check!(:live?, opts)
+    opts |> Environment.resolve() |> Environment.live?()
+  end
 
   @doc "The real adapter's `DpExchange.Gemini.venue_does_not_serve/0`, unchanged."
   @spec venue_does_not_serve() :: [{atom(), arity()}]
@@ -2727,8 +2948,9 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec next_funding_timestamp(term(), keyword()) ::
           {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
-  def next_funding_timestamp(symbol, _opts \\ []) do
-    with :ok <- Rest.validate_symbol(symbol) do
+  def next_funding_timestamp(symbol, opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- OptionKeys.check(:next_funding_timestamp, opts) do
       with_injection(symbol, fn ->
         if perpetual_symbol?(symbol),
           do: {:ok, ~U[2026-09-01 19:00:00Z]},
@@ -2762,6 +2984,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec get_account_margin(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_account_margin(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_account_margin, opts), do: do_get_account_margin(opts)
+  end
+
+  defp do_get_account_margin(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_margin_symbol(opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2818,6 +3044,10 @@ defmodule DpExchange.Gemini.Fake do
   @spec list_funding_payments(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_funding_payments(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_funding_payments, opts), do: do_list_funding_payments(opts)
+  end
+
+  defp do_list_funding_payments(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_history_opts(:funding_payments, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2848,6 +3078,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec funding_payment_report(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def funding_payment_report(opts \\ []) do
+    with :ok <- OptionKeys.check(:funding_payment_report, opts),
+         do: do_funding_payment_report(opts)
+  end
+
+  defp do_funding_payment_report(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_funding_payment_report(opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2881,6 +3116,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec funding_amount_report(term(), keyword()) ::
           {:ok, binary()} | {:error, term()} | {:refused, term()}
   def funding_amount_report(symbol, opts \\ []) do
+    with :ok <- OptionKeys.check(:funding_amount_report, opts),
+         do: do_funding_amount_report(symbol, opts)
+  end
+
+  defp do_funding_amount_report(symbol, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_funding_amount_report(symbol, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2897,6 +3137,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec funding_payment_report_file(keyword()) ::
           {:ok, binary()} | {:error, term()} | {:refused, term()}
   def funding_payment_report_file(opts \\ []) do
+    with :ok <- OptionKeys.check(:funding_payment_report_file, opts),
+         do: do_funding_payment_report_file(opts)
+  end
+
+  defp do_funding_payment_report_file(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_funding_payment_report_file(opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2912,6 +3157,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec get_margin_account(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_margin_account(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_margin_account, opts), do: do_get_margin_account(opts)
+  end
+
+  defp do_get_margin_account(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_margin_symbol(opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2927,6 +3176,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec get_margin_rates(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_margin_rates(opts \\ []) do
+    with :ok <- OptionKeys.check(:get_margin_rates, opts), do: do_get_margin_rates(opts)
+  end
+
+  defp do_get_margin_rates(opts) do
     with_injection(fn ->
       with :ok <- authenticated(fake_credentials(opts), opts) do
         {:ok,
@@ -2959,6 +3212,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec preview_margin_order(term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_margin_order(request, opts \\ []) do
+    with :ok <- OptionKeys.check(:preview_margin_order, opts),
+         do: do_preview_margin_order(request, opts)
+  end
+
+  defp do_preview_margin_order(request, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_margin_preview(request),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2977,6 +3235,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec create_clearing_order(term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_clearing_order(request, opts \\ []) do
+    with :ok <- OptionKeys.check(:create_clearing_order, opts),
+         do: do_create_clearing_order(request, opts)
+  end
+
+  defp do_create_clearing_order(request, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_clearing_order(request),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -2994,6 +3257,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec create_broker_clearing_order(term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_broker_clearing_order(request, opts \\ []) do
+    with :ok <- OptionKeys.check(:create_broker_clearing_order, opts),
+         do: do_create_broker_clearing_order(request, opts)
+  end
+
+  defp do_create_broker_clearing_order(request, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_broker_clearing_order(request, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -3010,6 +3278,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec get_clearing_order(term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_clearing_order(clearing_id, opts \\ []) do
+    with :ok <- OptionKeys.check(:get_clearing_order, opts),
+         do: do_get_clearing_order(clearing_id, opts)
+  end
+
+  defp do_get_clearing_order(clearing_id, opts) do
     with_injection(fn ->
       with {:ok, _id} <- Private.validate_clearing_id(clearing_id),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -3026,6 +3299,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec cancel_clearing_order(term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def cancel_clearing_order(clearing_id, opts \\ []) do
+    with :ok <- OptionKeys.check(:cancel_clearing_order, opts),
+         do: do_cancel_clearing_order(clearing_id, opts)
+  end
+
+  defp do_cancel_clearing_order(clearing_id, opts) do
     with_injection(fn ->
       with {:ok, id} <- Private.validate_clearing_id(clearing_id),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -3043,6 +3321,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec confirm_clearing_order(term(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def confirm_clearing_order(clearing_id, request, opts \\ []) do
+    with :ok <- OptionKeys.check(:confirm_clearing_order, opts),
+         do: do_confirm_clearing_order(clearing_id, request, opts)
+  end
+
+  defp do_confirm_clearing_order(clearing_id, request, opts) do
     with_injection(fn ->
       with {:ok, _id} <- Private.validate_clearing_id(clearing_id),
            :ok <- Private.validate_clearing_order(request),
@@ -3085,6 +3368,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec list_clearing_orders(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_orders(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_clearing_orders, opts), do: do_list_clearing_orders(opts)
+  end
+
+  defp do_list_clearing_orders(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_clearing_list(:orders, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -3114,6 +3401,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec list_clearing_brokers(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_brokers(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_clearing_brokers, opts),
+         do: do_list_clearing_brokers(opts)
+  end
+
+  defp do_list_clearing_brokers(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_clearing_list(:brokers, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -3146,6 +3438,10 @@ defmodule DpExchange.Gemini.Fake do
   @spec list_clearing_trades(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_trades(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_clearing_trades, opts), do: do_list_clearing_trades(opts)
+  end
+
+  defp do_list_clearing_trades(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_history_opts(:clearing_trades, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
@@ -3198,6 +3494,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec list_accounts(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_accounts(opts \\ []) do
+    with :ok <- OptionKeys.check(:list_accounts, opts), do: do_list_accounts(opts)
+  end
+
+  defp do_list_accounts(opts) do
     with_injection(fn ->
       with :ok <- Private.validate_history_opts(:accounts, opts),
            :ok <- authenticated_group(fake_credentials(opts), opts) do
@@ -3219,6 +3519,11 @@ defmodule DpExchange.Gemini.Fake do
   @spec refresh_access_token(term(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def refresh_access_token(client_id, refresh_token, opts \\ []) do
+    with :ok <- OptionKeys.check(:refresh_access_token, opts),
+         do: do_refresh_access_token(client_id, refresh_token, opts)
+  end
+
+  defp do_refresh_access_token(client_id, refresh_token, opts) do
     with_injection(fn ->
       with :ok <- Private.validate_refresh_request(client_id, refresh_token, opts) do
         {:ok,
@@ -3240,6 +3545,10 @@ defmodule DpExchange.Gemini.Fake do
   """
   @spec revoke_access_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def revoke_access_token(opts \\ []) do
+    with :ok <- OptionKeys.check(:revoke_access_token, opts), do: do_revoke_access_token(opts)
+  end
+
+  defp do_revoke_access_token(opts) do
     with_injection(fn ->
       case fake_credentials(opts) do
         %{access_token: token} = credentials when is_binary(token) and token != "" ->

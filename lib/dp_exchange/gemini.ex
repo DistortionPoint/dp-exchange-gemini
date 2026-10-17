@@ -115,6 +115,16 @@ defmodule DpExchange.Gemini do
   `DpExchange.Gemini.Auth`). A mismatch fails loudly on
   the first request.
 
+  ## An option a call does not read is refused, not ignored
+
+  A misspelt `limt:` or `sinse:` returned a plausible answer to a different question, so every
+  function here that takes `opts` answers `{:error, {:unknown_option, key}}` for the first key
+  it does not read (`{:error, {:invalid_options, opts}}` when `opts` is not a keyword list),
+  before anything is sent and before the credential is read. `coverage/1`, `coverage_by_kind/1`,
+  `wanted/1` and `live?/1` have no room for an error and raise `ArgumentError`. The keys each
+  function reads are in one table, `DpExchange.Gemini.OptionKeys`, which
+  `DpExchange.Gemini.Fake` shares; `usage-rules.md` lists them.
+
   ## Supervision
 
   Add it to your own tree. Nothing starts on load — a consumer that has not asked for
@@ -129,7 +139,7 @@ defmodule DpExchange.Gemini do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Config, Venue}
-  alias DpExchange.Gemini.{Auth, Environment, Feed, Private, Rest, SymbolFormat}
+  alias DpExchange.Gemini.{Auth, Environment, Feed, OptionKeys, Private, Rest, SymbolFormat}
 
   # Account and trading ARE implemented: credentials arrive as function arguments and are
   # used to sign that one request (§6.0, invariant #2). Credential *storage* is the host's
@@ -449,7 +459,11 @@ defmodule DpExchange.Gemini do
   See `c:DpExchange.Core.Venue.get_price/2` for the contract.
   """
   @impl true
-  def get_price(symbol, opts \\ []), do: Rest.get_price(symbol, with_limiter(opts))
+  def get_price(symbol, opts \\ []),
+    do:
+      checked_symbol(:get_price, symbol, opts, fn ->
+        Rest.get_price(symbol, with_limiter(opts))
+      end)
 
   @doc """
   Candles for `symbol` at `timeframe`, from the public `/v2/candles` endpoint.
@@ -461,7 +475,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []),
-    do: Rest.get_historical_prices(symbol, timeframe, range, with_limiter(opts))
+    do:
+      checked_symbol(:get_historical_prices, symbol, opts, fn ->
+        Rest.get_historical_prices(symbol, timeframe, range, with_limiter(opts))
+      end)
 
   @doc """
   The symbols the venue lists, from the public `/v1/symbols` endpoint, in canonical form.
@@ -469,7 +486,8 @@ defmodule DpExchange.Gemini do
   See `c:DpExchange.Core.Venue.get_symbols/1`.
   """
   @impl true
-  def get_symbols(opts \\ []), do: Rest.get_symbols(with_limiter(opts))
+  def get_symbols(opts \\ []),
+    do: checked(:get_symbols, opts, fn -> Rest.get_symbols(with_limiter(opts)) end)
 
   @doc """
   Best bid and ask for `symbol`, from the public `/v1/pubticker` endpoint.
@@ -477,7 +495,11 @@ defmodule DpExchange.Gemini do
   `venue_time` is always `nil` here. See `c:DpExchange.Core.Venue.get_top_of_book/2`.
   """
   @impl true
-  def get_top_of_book(symbol, opts \\ []), do: Rest.get_top_of_book(symbol, with_limiter(opts))
+  def get_top_of_book(symbol, opts \\ []),
+    do:
+      checked_symbol(:get_top_of_book, symbol, opts, fn ->
+        Rest.get_top_of_book(symbol, with_limiter(opts))
+      end)
 
   @doc """
   The order book for `symbol`, from the public `/v1/book` endpoint.
@@ -486,7 +508,11 @@ defmodule DpExchange.Gemini do
   `c:DpExchange.Core.Venue.get_order_book/2` for the contract.
   """
   @impl true
-  def get_order_book(symbol, opts \\ []), do: Rest.get_order_book(symbol, with_limiter(opts))
+  def get_order_book(symbol, opts \\ []),
+    do:
+      checked_symbol(:get_order_book, symbol, opts, fn ->
+        Rest.get_order_book(symbol, with_limiter(opts))
+      end)
 
   @doc """
   A snapshot of every pair, from the public `/v1/pricefeed` endpoint.
@@ -494,7 +520,11 @@ defmodule DpExchange.Gemini do
   See `c:DpExchange.Core.Venue.get_market_overview/1`.
   """
   @impl true
-  def get_market_overview(opts \\ []), do: Rest.get_market_overview(with_limiter(opts))
+  def get_market_overview(opts \\ []),
+    do:
+      checked(:get_market_overview, opts, fn ->
+        Rest.get_market_overview(with_limiter(opts))
+      end)
 
   @doc """
   The tradable instruments with their trading status.
@@ -504,7 +534,8 @@ defmodule DpExchange.Gemini do
   `DpExchange.Gemini.Rest.list_instruments/1` and `c:DpExchange.Core.Venue.list_instruments/1`.
   """
   @impl true
-  def list_instruments(opts \\ []), do: Rest.list_instruments(with_limiter(opts))
+  def list_instruments(opts \\ []),
+    do: checked(:list_instruments, opts, fn -> Rest.list_instruments(with_limiter(opts)) end)
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`. A crypto book has no auction.
@@ -537,7 +568,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_balances(credentials, opts),
-    do: Private.get_balances(credentials, with_limiter(opts))
+    do:
+      checked(:get_balances, opts, fn ->
+        Private.get_balances(credentials, with_limiter(opts))
+      end)
 
   @doc """
   Recent public trades — the tape.
@@ -546,7 +580,11 @@ defmodule DpExchange.Gemini do
   why broken trades are excluded unless asked for.
   """
   @impl true
-  def get_trades(symbol, opts \\ []), do: Rest.get_trades(symbol, with_limiter(opts))
+  def get_trades(symbol, opts \\ []),
+    do:
+      checked_symbol(:get_trades, symbol, opts, fn ->
+        Rest.get_trades(symbol, with_limiter(opts))
+      end)
 
   @doc """
   A foreign-exchange reference rate for `pair` at `at`.
@@ -556,7 +594,11 @@ defmodule DpExchange.Gemini do
   the venue trades at, with the source carried separately from the provider.
   """
   @impl true
-  def get_fx_rate(pair, at, opts \\ []), do: Private.get_fx_rate(pair, at, with_limiter(opts))
+  def get_fx_rate(pair, at, opts \\ []),
+    do:
+      checked(:get_fx_rate, opts, fn ->
+        Private.get_fx_rate(pair, at, with_limiter(opts))
+      end)
 
   @doc """
   The networks an asset moves over, or the assets a network carries.
@@ -565,7 +607,11 @@ defmodule DpExchange.Gemini do
   direction is scoped to the credential and an empty answer does not describe the network.
   """
   @impl true
-  def list_networks(asset, opts \\ []), do: Private.list_networks(asset, with_limiter(opts))
+  def list_networks(asset, opts \\ []),
+    do:
+      checked(:list_networks, opts, fn ->
+        Private.list_networks(asset, with_limiter(opts))
+      end)
 
   @doc """
   Symbols currently carrying a promotional fee.
@@ -574,7 +620,8 @@ defmodule DpExchange.Gemini do
   applying to a credential.
   """
   @impl true
-  def list_fee_promos(opts \\ []), do: Rest.list_fee_promos(with_limiter(opts))
+  def list_fee_promos(opts \\ []),
+    do: checked(:list_fee_promos, opts, fn -> Rest.list_fee_promos(with_limiter(opts)) end)
 
   @doc """
   A fresh deposit address for `asset` on `network`.
@@ -584,7 +631,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_deposit_address(asset, network, opts \\ []),
-    do: Private.get_deposit_address(asset, network, credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_deposit_address, opts, fn ->
+        Private.get_deposit_address(asset, network, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   The addresses this account may withdraw to on `opts[:network]`.
@@ -594,7 +644,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def list_approved_addresses(opts \\ []),
-    do: Private.list_approved_addresses(credentials(opts), with_limiter(opts))
+    do:
+      checked(:list_approved_addresses, opts, fn ->
+        Private.list_approved_addresses(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   What the venue would charge to withdraw. Requires `opts[:address]`.
@@ -604,13 +657,15 @@ defmodule DpExchange.Gemini do
   @impl true
   def estimate_withdrawal_fee(asset, network, amount, opts \\ []),
     do:
-      Private.estimate_withdrawal_fee(
-        asset,
-        network,
-        amount,
-        credentials(opts),
-        with_limiter(opts)
-      )
+      checked(:estimate_withdrawal_fee, opts, fn ->
+        Private.estimate_withdrawal_fee(
+          asset,
+          network,
+          amount,
+          credentials(opts),
+          with_limiter(opts)
+        )
+      end)
 
   @doc """
   **Moves funds.** Withdraws `amount` of `asset` over `network` to `address`.
@@ -620,12 +675,18 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def withdraw(asset, network, amount, address, opts \\ []),
-    do: Private.withdraw(asset, network, amount, address, credentials(opts), with_limiter(opts))
+    do:
+      checked(:withdraw, opts, fn ->
+        Private.withdraw(asset, network, amount, address, credentials(opts), with_limiter(opts))
+      end)
 
   @doc "The funding sources this account can move fiat through."
   @impl true
   def list_payment_methods(credentials, opts),
-    do: Private.list_payment_methods(credentials, with_limiter(opts))
+    do:
+      checked(:list_payment_methods, opts, fn ->
+        Private.list_payment_methods(credentials, with_limiter(opts))
+      end)
 
   @doc """
   Registers a bank account. `opts[:country]` selects the endpoint — `US` or `CA`.
@@ -635,7 +696,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def add_payment_method(details, opts \\ []),
-    do: Private.add_payment_method(details, credentials(opts), with_limiter(opts))
+    do:
+      checked(:add_payment_method, opts, fn ->
+        Private.add_payment_method(details, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Moves funds between two accounts at this venue. **Not `withdraw/5`.**
@@ -643,15 +707,20 @@ defmodule DpExchange.Gemini do
   `opts[:from]` and `opts[:to]` are required.
   """
   @impl true
-  def transfer_internal(asset, amount, transfer_opts, opts \\ []),
-    do:
-      Private.transfer_internal(
-        asset,
-        amount,
-        transfer_opts,
-        credentials(opts),
-        with_limiter(opts)
-      )
+  def transfer_internal(asset, amount, transfer_opts, opts \\ []) do
+    # The transfer terms are a positional argument, so they are checked before `opts`.
+    with :ok <- OptionKeys.check_terms(:transfer_internal, transfer_opts) do
+      checked(:transfer_internal, opts, fn ->
+        Private.transfer_internal(
+          asset,
+          amount,
+          transfer_opts,
+          credentials(opts),
+          with_limiter(opts)
+        )
+      end)
+    end
+  end
 
   @doc """
   Asks the venue to allowlist `address` on `network`.
@@ -662,18 +731,23 @@ defmodule DpExchange.Gemini do
   @impl true
   def request_approved_address(network, address, label, opts \\ []),
     do:
-      Private.request_approved_address(
-        network,
-        address,
-        label,
-        credentials(opts),
-        with_limiter(opts)
-      )
+      checked(:request_approved_address, opts, fn ->
+        Private.request_approved_address(
+          network,
+          address,
+          label,
+          credentials(opts),
+          with_limiter(opts)
+        )
+      end)
 
   @doc "Removes `address` from the allowlist for `network`."
   @impl true
   def remove_approved_address(network, address, opts \\ []),
-    do: Private.remove_approved_address(network, address, credentials(opts), with_limiter(opts))
+    do:
+      checked(:remove_approved_address, opts, fn ->
+        Private.remove_approved_address(network, address, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Everything that moved on this account — wider than fills and wider than transfers.
@@ -682,7 +756,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_transactions(credentials, opts),
-    do: Private.get_transactions(credentials, with_limiter(opts))
+    do:
+      checked(:get_transactions, opts, fn ->
+        Private.get_transactions(credentials, with_limiter(opts))
+      end)
 
   @doc """
   Every balance, each also valued in one notional currency.
@@ -693,7 +770,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_notional_balances(credentials, currency, opts),
-    do: Private.get_notional_balances(credentials, currency, with_limiter(opts))
+    do:
+      checked(:get_notional_balances, opts, fn ->
+        Private.get_notional_balances(credentials, currency, with_limiter(opts))
+      end)
 
   @doc """
   What Gemini charged this account for holding assets.
@@ -703,7 +783,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def list_custody_fees(credentials, opts),
-    do: Private.list_custody_fees(credentials, with_limiter(opts))
+    do:
+      checked(:list_custody_fees, opts, fn ->
+        Private.list_custody_fees(credentials, with_limiter(opts))
+      end)
 
   @doc """
   Gemini publishes no per-method read.
@@ -722,7 +805,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_accounts(credentials, opts),
-    do: Private.get_accounts(credentials, with_limiter(opts))
+    do:
+      checked(:get_accounts, opts, fn ->
+        Private.get_accounts(credentials, with_limiter(opts))
+      end)
 
   @doc """
   The fee schedule that applies to this credential, from the signed `/v1/notionalvolume`
@@ -731,7 +817,8 @@ defmodule DpExchange.Gemini do
   Not `list_fee_promos/1`. See `c:DpExchange.Core.Venue.get_fees/2`.
   """
   @impl true
-  def get_fees(credentials, opts), do: Private.get_fees(credentials, with_limiter(opts))
+  def get_fees(credentials, opts),
+    do: checked(:get_fees, opts, fn -> Private.get_fees(credentials, with_limiter(opts)) end)
 
   @doc """
   Deposits and withdrawals on the account, from the signed transfers endpoint.
@@ -741,7 +828,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_transfers(credentials, opts),
-    do: Private.get_transfers(credentials, with_limiter(opts))
+    do:
+      checked(:get_transfers, opts, fn ->
+        Private.get_transfers(credentials, with_limiter(opts))
+      end)
 
   @doc """
   Places one order. Nothing is defaulted: `:order_type` is required, and `:time_in_force` on
@@ -751,7 +841,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def place_order(credentials, request, opts \\ []),
-    do: Private.place_order(credentials, request, with_limiter(opts))
+    do:
+      checked(:place_order, opts, fn ->
+        Private.place_order(credentials, request, with_limiter(opts))
+      end)
 
   @doc """
   **Not supported.** Gemini places one order per request.
@@ -810,7 +903,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def cancel_order(credentials, order_id, opts \\ []),
-    do: Private.cancel_order(credentials, order_id, with_limiter(opts))
+    do:
+      checked(:cancel_order, opts, fn ->
+        Private.cancel_order(credentials, order_id, with_limiter(opts))
+      end)
 
   @doc """
   Cancels open orders in bulk. `opts[:scope]` is required — `:session` or `:account`.
@@ -819,7 +915,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def cancel_all_orders(credentials, opts),
-    do: Private.cancel_all_orders(credentials, with_limiter(opts))
+    do:
+      checked(:cancel_all_orders, opts, fn ->
+        Private.cancel_all_orders(credentials, with_limiter(opts))
+      end)
 
   @doc """
   One order's current state. The id is a string of digits; an unknown order is
@@ -827,7 +926,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_order(credentials, order_id, opts \\ []),
-    do: Private.get_order(credentials, order_id, with_limiter(opts))
+    do:
+      checked(:get_order, opts, fn ->
+        Private.get_order(credentials, order_id, with_limiter(opts))
+      end)
 
   @doc """
   Resting orders, or order history with `history: true`, from the signed orders endpoints.
@@ -837,7 +939,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_orders(credentials, opts \\ []),
-    do: Private.get_orders(credentials, with_limiter(opts))
+    do:
+      checked(:get_orders, opts, fn ->
+        Private.get_orders(credentials, with_limiter(opts))
+      end)
 
   @doc """
   The account's own fills, from the signed `/v1/mytrades` endpoint.
@@ -847,7 +952,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_trade_history(credentials, opts),
-    do: Private.get_trade_history(credentials, with_limiter(opts))
+    do:
+      checked(:get_trade_history, opts, fn ->
+        Private.get_trade_history(credentials, with_limiter(opts))
+      end)
 
   # --- streaming ---------------------------------------------------------
 
@@ -862,12 +970,18 @@ defmodule DpExchange.Gemini do
   `c:DpExchange.Core.Venue.subscribe/2`.
   """
   @impl true
-  def subscribe(symbols, opts \\ []),
-    do:
+  def subscribe(symbols, opts \\ []) do
+    # Symbols first (family order), then the options; `Feed.subscribe/3` judges the
+    # subscriber and `:channels`. A key this call does not read is refused here, before the
+    # feed is addressed.
+    with {:ok, _canonical} <- Feed.canonical_symbols(symbols),
+         :ok <- OptionKeys.check(:subscribe, opts) do
       feed_call(
         fn -> Feed.subscribe(feed(opts), canonical_case(symbols), opts) end,
         {:error, :feed_not_started}
       )
+    end
+  end
 
   @doc """
   Stops delivering `symbols`, which are upper-cased on the way in.
@@ -876,8 +990,12 @@ defmodule DpExchange.Gemini do
   `c:DpExchange.Core.Venue.unsubscribe/2`.
   """
   @impl true
-  def unsubscribe(symbols, opts \\ []),
-    do: feed_call(fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols)) end, :ok)
+  def unsubscribe(symbols, opts \\ []) do
+    with {:ok, _canonical} <- Feed.canonical_symbols(symbols),
+         :ok <- OptionKeys.check(:unsubscribe, opts) do
+      feed_call(fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols)) end, :ok)
+    end
+  end
 
   @doc """
   Replaces the live subscription's symbol set with `symbols`, upper-cased on the way in.
@@ -886,12 +1004,15 @@ defmodule DpExchange.Gemini do
   `c:DpExchange.Core.Venue.update_symbols/2`.
   """
   @impl true
-  def update_symbols(symbols, opts \\ []),
-    do:
+  def update_symbols(symbols, opts \\ []) do
+    with {:ok, _canonical} <- Feed.canonical_symbols(symbols),
+         :ok <- OptionKeys.check(:update_symbols, opts) do
       feed_call(
         fn -> Feed.update_symbols(feed(opts), canonical_case(symbols)) end,
         {:error, :feed_not_started}
       )
+    end
+  end
 
   # NOT declarable `:unsupported`: `coverage/1` returns a map, so it has no way to answer
   # `{:error, :not_supported}`. It always answers, and an empty map is the honest answer
@@ -905,6 +1026,8 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def coverage(opts \\ []) do
+    # A map has no room for an error, so a key this does not read raises `ArgumentError`.
+    OptionKeys.check!(:coverage, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.coverage(feed) end, %{}), else: %{}
   end
@@ -968,6 +1091,7 @@ defmodule DpExchange.Gemini do
           Capabilities.data_kind() => %{Venue.symbol() => Venue.route()}
         }
   def coverage_by_kind(opts \\ []) do
+    OptionKeys.check!(:coverage_by_kind, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
   end
@@ -983,6 +1107,7 @@ defmodule DpExchange.Gemini do
   @spec wanted(keyword()) :: [String.t()]
   @impl true
   def wanted(opts \\ []) do
+    OptionKeys.check!(:wanted, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
   end
@@ -995,7 +1120,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def subscribe_notices(opts \\ []),
-    do: feed_call(fn -> Feed.subscribe_notices(feed(opts), opts) end, {:error, :feed_not_started})
+    do:
+      checked(:subscribe_notices, opts, fn ->
+        feed_call(fn -> Feed.subscribe_notices(feed(opts), opts) end, {:error, :feed_not_started})
+      end)
 
   # **The default follows the environment, as the limiter and the REST URL do.** This was the
   # literal `Feed`, so under `environment: :sandbox` (per call, or per process through
@@ -1082,7 +1210,11 @@ defmodule DpExchange.Gemini do
       end
   """
   @spec live?(keyword()) :: boolean()
-  def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
+  def live?(opts \\ []) do
+    # A boolean has no room for an error: an option this does not read raises `ArgumentError`.
+    OptionKeys.check!(:live?, opts)
+    opts |> Environment.resolve() |> Environment.live?()
+  end
 
   @doc """
   Checks that the credentials reach the venue, with a signed call to `/v1/heartbeat`.
@@ -1092,7 +1224,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def test_connection(credentials, opts),
-    do: Private.test_connection(credentials, with_limiter(opts))
+    do:
+      checked(:test_connection, opts, fn ->
+        Private.test_connection(credentials, with_limiter(opts))
+      end)
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`. The venue publishes no
@@ -1111,7 +1246,7 @@ defmodule DpExchange.Gemini do
   Per-symbol trading status is `quantization/1`. See `c:DpExchange.Core.Venue.market_status/1`.
   """
   @impl true
-  def market_status(_opts), do: {:ok, :open}
+  def market_status(opts), do: checked(:market_status, opts, fn -> {:ok, :open} end)
 
   @doc """
   Price and quantity increments for `symbol`, from `/v1/symbols/details`.
@@ -1121,6 +1256,24 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def quantization(symbol), do: Rest.quantization(symbol, with_limiter([]))
+
+  # **An option this call does not read is refused, not ignored.** A misspelt `limt:` or
+  # `sinse:` returned a plausible answer to a different question than the caller asked. The
+  # keys each function reads are in `DpExchange.Gemini.OptionKeys`, in one table the Fake
+  # shares. Run at the boundary, BEFORE `with_limiter/1` adds the internal `:limiter`, and
+  # before any credential is read or anything is sent.
+  defp checked(function, opts, call) do
+    case OptionKeys.check(function, opts) do
+      :ok -> call.()
+      {:error, _refusal} = error -> error
+    end
+  end
+
+  # The same, for a market-data read whose symbol can be judged with no state: the symbol is
+  # checked first (family order: positional arguments, then options, then credentials).
+  defp checked_symbol(function, symbol, opts, call) do
+    with :ok <- Rest.validate_symbol(symbol), do: checked(function, opts, call)
+  end
 
   # Meters against the limiter this venue's own supervisor starts, unless the caller
   # names another. `Core.HttpClient` fails closed with no limiter running, so a package
@@ -1152,7 +1305,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_positions(opts \\ []),
-    do: Private.get_positions(credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_positions, opts, fn ->
+        Private.get_positions(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Funding for a perpetual — settled, projected, and when the next one lands.
@@ -1161,7 +1317,11 @@ defmodule DpExchange.Gemini do
   estimate are different facts and stay in different fields.
   """
   @impl true
-  def get_funding(symbol, opts \\ []), do: Rest.get_funding(symbol, with_limiter(opts))
+  def get_funding(symbol, opts \\ []),
+    do:
+      checked_symbol(:get_funding, symbol, opts, fn ->
+        Rest.get_funding(symbol, with_limiter(opts))
+      end)
 
   @doc """
   Risk statistics for a perpetual — mark, index and open interest.
@@ -1171,7 +1331,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_contract_stats(symbol, opts \\ []),
-    do: Rest.get_contract_stats(symbol, with_limiter(opts))
+    do:
+      checked_symbol(:get_contract_stats, symbol, opts, fn ->
+        Rest.get_contract_stats(symbol, with_limiter(opts))
+      end)
 
   @doc """
   When the next funding calculation lands, on its own.
@@ -1182,7 +1345,10 @@ defmodule DpExchange.Gemini do
   @spec next_funding_timestamp(String.t(), keyword()) ::
           {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
   def next_funding_timestamp(symbol, opts \\ []),
-    do: Rest.next_funding_timestamp(symbol, with_limiter(opts))
+    do:
+      checked_symbol(:next_funding_timestamp, symbol, opts, fn ->
+        Rest.next_funding_timestamp(symbol, with_limiter(opts))
+      end)
 
   @doc """
   The perpetuals margin account — collateral, leverage, and the estimated liquidation price.
@@ -1192,7 +1358,10 @@ defmodule DpExchange.Gemini do
   """
   @spec get_account_margin(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_account_margin(opts \\ []),
-    do: Private.get_account_margin(credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_account_margin, opts, fn ->
+        Private.get_account_margin(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Funding payments this account actually paid or received.
@@ -1203,7 +1372,10 @@ defmodule DpExchange.Gemini do
   @spec list_funding_payments(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_funding_payments(opts \\ []),
-    do: Private.list_funding_payments(credentials(opts), with_limiter(opts))
+    do:
+      checked(:list_funding_payments, opts, fn ->
+        Private.list_funding_payments(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   The funding payment report as JSON.
@@ -1214,7 +1386,10 @@ defmodule DpExchange.Gemini do
   @spec funding_payment_report(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def funding_payment_report(opts \\ []),
-    do: Private.funding_payment_report(credentials(opts), with_limiter(opts))
+    do:
+      checked(:funding_payment_report, opts, fn ->
+        Private.funding_payment_report(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   The funding amount report as a spreadsheet — the venue's bytes, unparsed.
@@ -1224,7 +1399,10 @@ defmodule DpExchange.Gemini do
   @spec funding_amount_report(String.t(), keyword()) ::
           {:ok, binary()} | {:error, term()} | {:refused, term()}
   def funding_amount_report(symbol, opts \\ []),
-    do: Private.funding_amount_report(symbol, credentials(opts), with_limiter(opts))
+    do:
+      checked(:funding_amount_report, opts, fn ->
+        Private.funding_amount_report(symbol, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   The funding payment report as a spreadsheet — the venue's bytes, unparsed.
@@ -1234,7 +1412,10 @@ defmodule DpExchange.Gemini do
   @spec funding_payment_report_file(keyword()) ::
           {:ok, binary()} | {:error, term()} | {:refused, term()}
   def funding_payment_report_file(opts \\ []),
-    do: Private.funding_payment_report_file(credentials(opts), with_limiter(opts))
+    do:
+      checked(:funding_payment_report_file, opts, fn ->
+        Private.funding_payment_report_file(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   The **spot** margin account summary — a different margin system from the perpetuals one.
@@ -1243,7 +1424,10 @@ defmodule DpExchange.Gemini do
   """
   @spec get_margin_account(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_margin_account(opts \\ []),
-    do: Private.get_margin_account(credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_margin_account, opts, fn ->
+        Private.get_margin_account(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Margin interest rates for every borrowable asset.
@@ -1254,7 +1438,10 @@ defmodule DpExchange.Gemini do
   """
   @spec get_margin_rates(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_margin_rates(opts \\ []),
-    do: Private.get_margin_rates(credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_margin_rates, opts, fn ->
+        Private.get_margin_rates(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   What a spot order would do to this account's margin. **Places nothing.**
@@ -1265,7 +1452,10 @@ defmodule DpExchange.Gemini do
   @spec preview_margin_order(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_margin_order(request, opts \\ []),
-    do: Private.preview_margin_order(request, credentials(opts), with_limiter(opts))
+    do:
+      checked(:preview_margin_order, opts, fn ->
+        Private.preview_margin_order(request, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Creates a bilateral clearing order. **Not `place_order/3`** — nothing reaches the book.
@@ -1276,7 +1466,10 @@ defmodule DpExchange.Gemini do
   @spec create_clearing_order(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_clearing_order(request, opts \\ []),
-    do: Private.create_clearing_order(request, credentials(opts), with_limiter(opts))
+    do:
+      checked(:create_clearing_order, opts, fn ->
+        Private.create_clearing_order(request, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Submits a broker-facilitated clearing order between two named counterparties.
@@ -1288,7 +1481,10 @@ defmodule DpExchange.Gemini do
   @spec create_broker_clearing_order(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_broker_clearing_order(request, opts \\ []),
-    do: Private.create_broker_clearing_order(request, credentials(opts), with_limiter(opts))
+    do:
+      checked(:create_broker_clearing_order, opts, fn ->
+        Private.create_broker_clearing_order(request, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   One clearing order's state.
@@ -1298,7 +1494,10 @@ defmodule DpExchange.Gemini do
   @spec get_clearing_order(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_clearing_order(clearing_id, opts \\ []),
-    do: Private.get_clearing_order(clearing_id, credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_clearing_order, opts, fn ->
+        Private.get_clearing_order(clearing_id, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Cancels an unconfirmed clearing order.
@@ -1309,7 +1508,10 @@ defmodule DpExchange.Gemini do
   @spec cancel_clearing_order(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def cancel_clearing_order(clearing_id, opts \\ []),
-    do: Private.cancel_clearing_order(clearing_id, credentials(opts), with_limiter(opts))
+    do:
+      checked(:cancel_clearing_order, opts, fn ->
+        Private.cancel_clearing_order(clearing_id, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Confirms a clearing order. **This executes a trade.**
@@ -1322,12 +1524,14 @@ defmodule DpExchange.Gemini do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def confirm_clearing_order(clearing_id, request, opts \\ []),
     do:
-      Private.confirm_clearing_order(
-        clearing_id,
-        request,
-        credentials(opts),
-        with_limiter(opts)
-      )
+      checked(:confirm_clearing_order, opts, fn ->
+        Private.confirm_clearing_order(
+          clearing_id,
+          request,
+          credentials(opts),
+          with_limiter(opts)
+        )
+      end)
 
   @doc """
   Clearing orders this account is party to.
@@ -1338,7 +1542,10 @@ defmodule DpExchange.Gemini do
   @spec list_clearing_orders(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_orders(opts \\ []),
-    do: Private.list_clearing_orders(credentials(opts), with_limiter(opts))
+    do:
+      checked(:list_clearing_orders, opts, fn ->
+        Private.list_clearing_orders(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Broker clearing orders — a different row shape from `list_clearing_orders/1`.
@@ -1348,7 +1555,10 @@ defmodule DpExchange.Gemini do
   @spec list_clearing_brokers(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_brokers(opts \\ []),
-    do: Private.list_clearing_brokers(credentials(opts), with_limiter(opts))
+    do:
+      checked(:list_clearing_brokers, opts, fn ->
+        Private.list_clearing_brokers(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Clearing trades — the orders that completed.
@@ -1359,7 +1569,10 @@ defmodule DpExchange.Gemini do
   @spec list_clearing_trades(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_trades(opts \\ []),
-    do: Private.list_clearing_trades(credentials(opts), with_limiter(opts))
+    do:
+      checked(:list_clearing_trades, opts, fn ->
+        Private.list_clearing_trades(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   What each provider pays for staking each asset.
@@ -1368,7 +1581,11 @@ defmodule DpExchange.Gemini do
   and `:apy_pct` never derived from `:rate_pct`.
   """
   @impl true
-  def get_staking_rates(opts \\ []), do: Rest.get_staking_rates(with_limiter(opts))
+  def get_staking_rates(opts \\ []),
+    do:
+      checked(:get_staking_rates, opts, fn ->
+        Rest.get_staking_rates(with_limiter(opts))
+      end)
 
   @doc """
   Staked positions, one per asset.
@@ -1378,7 +1595,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_staking_balances(opts \\ []),
-    do: Private.get_staking_balances(credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_staking_balances, opts, fn ->
+        Private.get_staking_balances(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Rewards accrued over a window.
@@ -1388,7 +1608,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_staking_rewards(opts \\ []),
-    do: Private.get_staking_rewards(credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_staking_rewards, opts, fn ->
+        Private.get_staking_rewards(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Movements in and out of staked positions.
@@ -1398,7 +1621,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def get_staking_history(opts \\ []),
-    do: Private.get_staking_history(credentials(opts), with_limiter(opts))
+    do:
+      checked(:get_staking_history, opts, fn ->
+        Private.get_staking_history(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Stakes `amount` of `asset`. **This moves funds.**
@@ -1408,7 +1634,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def stake(asset, amount, opts \\ []),
-    do: Private.stake(asset, amount, credentials(opts), with_limiter(opts))
+    do:
+      checked(:stake, opts, fn ->
+        Private.stake(asset, amount, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Redeems `amount` of a staked `asset`. **Returns before the redemption completes.**
@@ -1418,7 +1647,10 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def unstake(asset, amount, opts \\ []),
-    do: Private.unstake(asset, amount, credentials(opts), with_limiter(opts))
+    do:
+      checked(:unstake, opts, fn ->
+        Private.unstake(asset, amount, credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Quotes a conversion — Gemini's Instant quote. See
@@ -1427,11 +1659,18 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def quote_conversion(from, to, amount, opts \\ []),
-    do: Private.quote_conversion(from, to, amount, with_limiter(opts))
+    do:
+      checked(:quote_conversion, opts, fn ->
+        Private.quote_conversion(from, to, amount, with_limiter(opts))
+      end)
 
   @doc "Commits a quoted conversion by its `quoteId`."
   @impl true
-  def commit_conversion(id, opts \\ []), do: Private.commit_conversion(id, with_limiter(opts))
+  def commit_conversion(id, opts \\ []),
+    do:
+      checked(:commit_conversion, opts, fn ->
+        Private.commit_conversion(id, with_limiter(opts))
+      end)
 
   @doc """
   Converts in one call — the venue's wrap endpoint.
@@ -1441,12 +1680,18 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def convert(from, to, amount, opts \\ []),
-    do: Private.convert(from, to, amount, with_limiter(opts))
+    do:
+      checked(:convert, opts, fn ->
+        Private.convert(from, to, amount, with_limiter(opts))
+      end)
 
   @doc "The account's own traded volume, one row per symbol per day."
   @impl true
   def get_trade_volume(credentials, opts),
-    do: Private.get_trade_volume(credentials, with_limiter(opts))
+    do:
+      checked(:get_trade_volume, opts, fn ->
+        Private.get_trade_volume(credentials, with_limiter(opts))
+      end)
 
   # **No quote-status endpoint.** The venue quotes and executes; it does not answer "what
   # became of quote N". A caller that lost a quote re-quotes.
@@ -1582,7 +1827,9 @@ defmodule DpExchange.Gemini do
   def create_account(opts \\ []) do
     # `Private.create_account/3` refuses a missing, blank or non-string name as
     # `{:error, :name_required}`, before any credential is read.
-    Private.create_account(Keyword.get(opts, :name), credentials(opts), with_limiter(opts))
+    checked(:create_account, opts, fn ->
+      Private.create_account(Keyword.get(opts, :name), credentials(opts), with_limiter(opts))
+    end)
   end
 
   @doc """
@@ -1594,10 +1841,13 @@ defmodule DpExchange.Gemini do
   """
   @impl true
   def rename_account(id, name, opts \\ []) do
-    Private.rename_account(
-      credentials(opts),
-      opts |> with_limiter() |> Keyword.merge(account: id, name: name)
-    )
+    # `:account` is not accepted from the caller: `id` is the account, merged in below.
+    checked(:rename_account, opts, fn ->
+      Private.rename_account(
+        credentials(opts),
+        opts |> with_limiter() |> Keyword.merge(account: id, name: name)
+      )
+    end)
   end
 
   @doc """
@@ -1608,7 +1858,10 @@ defmodule DpExchange.Gemini do
   """
   @spec list_accounts(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_accounts(opts \\ []),
-    do: Private.list_accounts(credentials(opts), with_limiter(opts))
+    do:
+      checked(:list_accounts, opts, fn ->
+        Private.list_accounts(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   The roles this API key carries.
@@ -1617,7 +1870,11 @@ defmodule DpExchange.Gemini do
   `Fund Manager` and `Trader` combine and `Auditor` does not combine with anything.
   """
   @impl true
-  def get_roles(opts \\ []), do: Private.get_roles(credentials(opts), with_limiter(opts))
+  def get_roles(opts \\ []),
+    do:
+      checked(:get_roles, opts, fn ->
+        Private.get_roles(credentials(opts), with_limiter(opts))
+      end)
 
   @doc """
   Raises the incremental nonce counter to `value`, once — for a key whose stored mark is
@@ -1657,7 +1914,10 @@ defmodule DpExchange.Gemini do
   @spec refresh_access_token(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def refresh_access_token(client_id, refresh_token, opts \\ []),
-    do: Private.refresh_access_token(client_id, refresh_token, with_limiter(opts))
+    do:
+      checked(:refresh_access_token, opts, fn ->
+        Private.refresh_access_token(client_id, refresh_token, with_limiter(opts))
+      end)
 
   @doc """
   Revokes an access token. **Only reachable with an OAuth token**, not an API key.
@@ -1666,5 +1926,8 @@ defmodule DpExchange.Gemini do
   """
   @spec revoke_access_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def revoke_access_token(opts \\ []),
-    do: Private.revoke_access_token(credentials(opts), with_limiter(opts))
+    do:
+      checked(:revoke_access_token, opts, fn ->
+        Private.revoke_access_token(credentials(opts), with_limiter(opts))
+      end)
 end
