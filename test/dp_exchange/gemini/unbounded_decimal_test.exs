@@ -110,13 +110,11 @@ defmodule DpExchange.Gemini.UnboundedDecimalTest do
       assert {:error, :unexpected_response_shape} = WsDecode.to_order_book_delta(frame, "BTC-USD")
     end
 
-    test "Private: an available balance with that exponent leaves hold nil" do
+    test "Private: an available balance with that exponent refuses the read" do
       body = [%{"currency" => "USD", "amount" => "100.00", "available" => "1e999999999"}]
 
-      assert {:ok, [balance]} =
+      assert {:error, :unexpected_response_shape} =
                Private.get_balances(@credentials, plug: json(body), retry_attempts: 0)
-
-      assert balance.hold == nil
     end
   end
 
@@ -213,7 +211,7 @@ defmodule DpExchange.Gemini.UnboundedDecimalTest do
   end
 
   describe "funding timestamps" do
-    test "a zero or negative epoch is unstated, not 1970" do
+    test "a zero or negative epoch refuses the reply, not 1970 and not nil" do
       body = %{
         "symbol" => "BTCGUSDPERP",
         "amount" => "1",
@@ -222,8 +220,13 @@ defmodule DpExchange.Gemini.UnboundedDecimalTest do
         "nextFundingTimestamp" => -5
       }
 
-      assert {:ok, funding} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_funding("BTCGUSDPERP", plug: json(body), retry_attempts: 0)
+
+      absent = Map.drop(body, ["fundingTimestampMilliSecs", "nextFundingTimestamp"])
+
+      assert {:ok, funding} =
+               Rest.get_funding("BTCGUSDPERP", plug: json(absent), retry_attempts: 0)
 
       assert funding.funded_at == nil
       assert funding.next_funding_at == nil

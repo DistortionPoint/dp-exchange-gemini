@@ -428,7 +428,7 @@ defmodule DpExchange.Gemini.WriteConventionsTest do
                stake.(%{"transactionId" => "tx-9"})
     end
 
-    test "an unreadable optional field is nil, the write still reported" do
+    test "a present but unreadable optional field is write_unconfirmed, never a nil" do
       body = %{
         "transactionId" => "tx-1",
         "currency" => "ETH",
@@ -437,10 +437,18 @@ defmodule DpExchange.Gemini.WriteConventionsTest do
         "amountRemaining" => %{"x" => 1}
       }
 
-      assert {:ok, %StakingTransaction{id: "tx-1", amount_paid_so_far: nil}} =
+      assert {:error, {:write_unconfirmed, "tx-1", :unexpected_response_shape}} =
                Private.stake("ETH", Decimal.new("1"), @credentials,
                  provider_id: "p",
                  plug: answering(200, Jason.encode!(body))
+               )
+
+      absent = Map.drop(body, ["amountPaidSoFar", "amountRemaining"])
+
+      assert {:ok, %StakingTransaction{id: "tx-1", amount_paid_so_far: nil}} =
+               Private.stake("ETH", Decimal.new("1"), @credentials,
+                 provider_id: "p",
+                 plug: answering(200, Jason.encode!(absent))
                )
     end
 

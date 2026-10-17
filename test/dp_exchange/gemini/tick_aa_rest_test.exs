@@ -127,33 +127,52 @@ defmodule DpExchange.Gemini.TickAaRestTest do
   end
 
   describe "get_staking_rates/1 — rate_pct is never derived from what is not there" do
-    test "an unreadable `rate`, or neither field at all, leaves rate_pct nil" do
-      body = %{
-        "provider-uuid-1" => %{
-          "ETH" => %{"rate" => "not-a-number", "apyPct" => "3.5"},
-          "SOL" => %{"apyPct" => "4.1"}
+    test "neither rate field at all leaves rate_pct nil" do
+      body = %{"provider-uuid-1" => %{"SOL" => %{"apyPct" => "4.1", "rate" => nil}}}
+
+      assert {:ok, [sol]} = Rest.get_staking_rates(opts(responding(body)))
+
+      assert sol.rate_pct == nil
+      assert Decimal.equal?(sol.apy_pct, Decimal.new("4.1"))
+    end
+
+    test "a figure that is present but unreadable refuses the whole reply" do
+      for {key, bad} <- [
+            {"rate", "not-a-number"},
+            {"ratePct", "NaN"},
+            {"ratePct", true},
+            {"apyPct", "3.5%"},
+            {"apyPct", %{}},
+            {"depositUsdLimit", "Infinity"},
+            {"depositUsdLimit", []}
+          ] do
+        body = %{
+          "provider-uuid-1" => %{
+            "ETH" => %{key => bad},
+            "SOL" => %{"ratePct" => "4.1"}
+          }
         }
-      }
 
-      assert {:ok, rates} = Rest.get_staking_rates(opts(responding(body)))
-
-      by_asset = Map.new(rates, &{&1.asset, &1})
-
-      assert by_asset["ETH"].rate_pct == nil
-      assert by_asset["SOL"].rate_pct == nil
-      assert Decimal.equal?(by_asset["SOL"].apy_pct, Decimal.new("4.1"))
+        assert Rest.get_staking_rates(opts(responding(body))) ==
+                 {:error, :unexpected_response_shape}
+      end
     end
   end
 
   describe "funding timestamps" do
-    test "an out-of-range millisecond time is no time, and a string one is read whole" do
+    test "an out-of-range millisecond time refuses the reply, and a string one is read whole" do
       body = %{
         "symbol" => "btcgusdperp",
         "fundingTimestampMilliSecs" => 100_000_000_000_000_000_000,
         "nextFundingTimestamp" => Integer.to_string(@day_ms)
       }
 
-      assert {:ok, funding} = Rest.get_funding("BTCGUSDPERP", opts(responding(body)))
+      assert Rest.get_funding("BTCGUSDPERP", opts(responding(body))) ==
+               {:error, :unexpected_response_shape}
+
+      stated = %{body | "fundingTimestampMilliSecs" => nil}
+
+      assert {:ok, funding} = Rest.get_funding("BTCGUSDPERP", opts(responding(stated)))
       assert funding.funded_at == nil
       assert DateTime.compare(funding.next_funding_at, @day) == :eq
     end

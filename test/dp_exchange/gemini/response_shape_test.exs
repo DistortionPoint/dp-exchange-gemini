@@ -161,17 +161,36 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
       end
     end
 
-    test "an order whose id or symbol is not a string decodes with nil, not a raise or \"\"" do
-      order = %{"order_id" => %{"a" => nil}, "symbol" => [1], "side" => "buy"}
+    test "an order whose id, symbol or side is unreadable is refused, never an order with nil" do
+      good = %{"order_id" => "7", "symbol" => "btcusd", "side" => "buy"}
 
-      assert {:ok, %{id: nil, symbol: nil}} =
-               Private.get_order(@credentials, "1", dated(order))
+      for bad <- [
+            %{"order_id" => %{"a" => nil}},
+            %{"order_id" => nil},
+            %{"order_id" => ""},
+            %{"symbol" => [1]},
+            %{"symbol" => ""},
+            %{"side" => "sideways"},
+            %{"side" => 1}
+          ] do
+        body = Map.merge(good, bad)
+
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_order(@credentials, "1", dated(body)),
+               inspect(bad)
+
+        # One unreadable row refuses the whole list: dropping it would hide an open order.
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_orders(@credentials, dated([good, body])),
+               inspect(bad)
+      end
 
       # `to_string(nil)` put `""` here, which passes every nil check while naming no order.
-      assert {:ok, %{id: nil}} =
-               Private.get_order(@credentials, "1", dated(%{"order_id" => nil}))
+      assert {:ok, %{id: "7", symbol: nil, side: nil}} =
+               Private.get_order(@credentials, "1", dated(%{"order_id" => 7}))
 
-      assert {:ok, %{id: "7"}} = Private.get_order(@credentials, "1", dated(%{"order_id" => 7}))
+      assert {:ok, %{id: "7", symbol: "BTC-USD"}} =
+               Private.get_order(@credentials, "1", dated(good))
     end
 
     test "a fill whose order id is not an id is refused; a trade id is nil" do
@@ -197,9 +216,15 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
       assert {:ok, [%{id: nil}]} = Rest.get_trades("BTC-USD", dated([trade]))
     end
 
-    test "a row naming no pair is skipped; a book level that is not an object refuses the book" do
-      rows = [%{"pair" => "BTCUSD", "price" => "1"}, %{"pair" => %{}}, %{}]
-      assert {:ok, overview} = Rest.get_market_overview(dated(rows))
+    test "a row naming no pair refuses the overview; a book level that is not an object refuses the book" do
+      for bad <- [%{"pair" => %{}}, %{}, %{"price" => "2"}, nil, "BTCUSD", 7] do
+        rows = [%{"pair" => "BTCUSD", "price" => "1"}, bad]
+        assert {:error, :unexpected_response_shape} = Rest.get_market_overview(dated(rows))
+      end
+
+      assert {:ok, overview} =
+               Rest.get_market_overview(dated([%{"pair" => "BTCUSD", "price" => "1"}]))
+
       assert map_size(overview) == 1
 
       book = %{

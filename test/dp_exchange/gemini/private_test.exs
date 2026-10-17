@@ -361,30 +361,37 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert balance.hold == nil
     end
 
-    test "a non-numeric available leaves hold nil rather than raising or subtracting garbage" do
-      body = [%{"currency" => "USD", "amount" => "100.00", "available" => "null"}]
+    test "a present but unreadable available refuses the read, never a nil" do
+      for bad <- ["null", "NaN", true, %{}, []] do
+        body = [%{"currency" => "USD", "amount" => "100.00", "available" => bad}]
 
-      assert {:ok, [balance]} =
-               Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
-
-      assert balance.hold == nil
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+      end
     end
 
-    test "a non-numeric amount does not raise; balance comes back nil for that currency" do
-      # Decimal.new/1 used to raise here. balance is required by the type but this
-      # package already tolerates nil there when the venue omits the field outright —
-      # a malformed one is treated the same way rather than crashing the whole page.
-      #
-      # `Core.Types.Balance` now states this outright rather than leaving it to this test:
-      # `:balance` may honestly be `nil`, `:currency` may not. The two tests below are the
-      # other half of that rule.
-      body = [%{"currency" => "USD", "amount" => "not-a-number", "available" => "90.00"}]
+    test "a present but unreadable amount refuses the read, never a nil balance" do
+      # An ABSENT or null amount is `nil` (the vendor's schema marks it optional); one the
+      # venue sent and this package cannot read is a malformed reply (tick Q rule).
+      for bad <- ["not-a-number", "Infinity", true, %{}, []] do
+        body = [%{"currency" => "USD", "amount" => bad, "available" => "90.00"}]
 
-      assert {:ok, [balance]} =
-               Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+      end
+    end
 
-      assert balance.balance == nil
-      assert balance.hold == nil
+    test "an absent or null amount is nil, not a refusal" do
+      for body <- [
+            [%{"currency" => "USD", "available" => "90.00"}],
+            [%{"currency" => "USD", "amount" => nil, "available" => "90.00"}]
+          ] do
+        assert {:ok, [balance]} =
+                 Private.get_balances(@credentials, plug: responding(body), retry_attempts: 0)
+
+        assert balance.balance == nil
+        assert balance.hold == nil
+      end
     end
 
     test "a row with no currency refuses the whole reply" do

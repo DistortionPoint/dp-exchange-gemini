@@ -103,11 +103,6 @@ defmodule DpExchange.Gemini.Rest do
 
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
-  # A value `decimal/1` can read. A `Decimal` counts: bodies are decoded with
-  # `floats: :decimals`, so a JSON number with a fraction arrives as one, not a float.
-  defguardp is_numeric(value)
-            when is_binary(value) or is_number(value) or is_struct(value, Decimal)
-
   # The venue's refusal vocabulary, written down at compile time so that decoding one can
   # never mint an atom from venue-supplied text. See `refusal_reason/1` for why that
   # matters more than it looks.
@@ -206,13 +201,12 @@ defmodule DpExchange.Gemini.Rest do
          native = SymbolFormat.to_exchange_symbol(symbol),
          {:ok, body} <- get_symbol_body("/v1/pubticker/#{segment(native)}", opts),
          {:ok, last} <- quoted_price(body),
-         {:ok, price} <- required_price(last, :price) do
-      # The ticker's `volume` is "the 24 hour volume on the exchange", measured up to its
-      # own `timestamp` (`Ticker` in docs/reference/gemini/openapi/rest.yaml), so a rolling
-      # 24-hour total. No interval's volume can be derived from it — dp-exchange-core issue
-      # #42. Per-interval volume comes from the `:trades` stream.
-      volume = base_volume(body, native)
-
+         {:ok, price} <- required_price(last, :price),
+         # The ticker's `volume` is "the 24 hour volume on the exchange", measured up to its
+         # own `timestamp` (`Ticker` in docs/reference/gemini/openapi/rest.yaml), so a rolling
+         # 24-hour total. No interval's volume can be derived from it — dp-exchange-core issue
+         # #42. Per-interval volume comes from the `:trades` stream.
+         {:ok, volume} <- base_volume(body, native) do
       {:ok,
        %Quote{
          symbol: reported_symbol(symbol, native),
@@ -467,14 +461,22 @@ defmodule DpExchange.Gemini.Rest do
   @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def get_symbols(opts) do
     with {:ok, body} <- get_body("/v1/symbols", opts),
-         {:ok, symbols} <- list(body) do
+         {:ok, symbols} <- list(body),
+         :ok <- all_symbol_text(symbols) do
       {:ok,
        symbols
-       |> Enum.filter(&is_binary/1)
        |> Enum.reject(&SymbolFormat.perpetual?/1)
        |> Enum.map(&SymbolFormat.to_canonical_symbol/1)
        |> Enum.sort()}
     end
+  end
+
+  # `/v1/symbols` is documented as an array of strings. An entry that is not one (`null`, a
+  # number, an object) used to be dropped, so the catalogue came back with a silent hole in
+  # it — a pair the venue lists that no caller could then see. One unreadable entry refuses
+  # the whole listing instead.
+  defp all_symbol_text(symbols) do
+    if Enum.all?(symbols, &is_binary/1), do: :ok, else: {:error, :unexpected_response_shape}
   end
 
   @doc """
@@ -495,19 +497,26 @@ defmodule DpExchange.Gemini.Rest do
   def get_market_overview(opts) do
     with {:ok, body} <- get_body("/v1/pricefeed", opts),
          {:ok, rows} <- list(body) do
-      rows
-      |> Enum.filter(&priced_pair?/1)
-      |> Enum.reduce_while({:ok, %{}}, fn row, {:ok, acc} ->
-        with {:ok, price} <- stated_overview_price(row),
-             {:ok, change} <- stated_or_absent(row, "percentChange24h") do
-          entry = %{price: price, change_24h: change}
-          {:cont, {:ok, Map.put(acc, SymbolFormat.to_canonical_symbol(row["pair"]), entry)}}
-        else
+      Enum.reduce_while(rows, {:ok, %{}}, fn row, {:ok, acc} ->
+        case overview_entry(row) do
+          {:ok, pair, entry} -> {:cont, {:ok, Map.put(acc, pair, entry)}}
           error -> {:halt, error}
         end
       end)
     end
   end
+
+  # **A row that cannot be identified refuses the overview.** A row with no string `pair`
+  # (not an object, no `pair`, `pair` a number or `null`) used to be skipped, so the overview
+  # came back looking complete with a pair the venue priced missing from it.
+  defp overview_entry(%{"pair" => pair} = row) when is_binary(pair) do
+    with {:ok, price} <- stated_overview_price(row),
+         {:ok, change} <- stated_or_absent(row, "percentChange24h") do
+      {:ok, SymbolFormat.to_canonical_symbol(pair), %{price: price, change_24h: change}}
+    end
+  end
+
+  defp overview_entry(_unidentifiable), do: {:error, :unexpected_response_shape}
 
   # A field the venue left out (or sent as `null`) is unstated and stays `nil`. One it SENT
   # and this package cannot read — a bad string, NaN, an absurd exponent, a boolean, an
@@ -549,13 +558,6 @@ defmodule DpExchange.Gemini.Rest do
   defp echoed_symbol(%{"symbol" => nil}, asked), do: {:ok, asked}
   defp echoed_symbol(%{"symbol" => _unreadable}, _asked), do: {:error, :unexpected_response_shape}
   defp echoed_symbol(_absent, asked), do: {:ok, asked}
-
-  # A row that names no pair is skipped. `is_map/1` used to be the whole filter, so a row
-  # with no string `pair` reached `SymbolFormat.to_canonical_symbol/1` and raised, taking
-  # the whole overview with it (REST fuzz, 2026-09-27). A price for no named pair belongs
-  # to nothing a caller can ask about.
-  defp priced_pair?(%{"pair" => pair}) when is_binary(pair), do: true
-  defp priced_pair?(_unnamed), do: false
 
   @doc """
   The increments and minimum the venue will actually accept for a symbol.
@@ -1164,37 +1166,60 @@ defmodule DpExchange.Gemini.Rest do
   defp staking_rates(_other), do: {:error, :unexpected_response_shape}
 
   defp rates_for_provider(provider_id, %{} = assets) do
-    if Enum.all?(assets, fn {_asset, row} -> is_map(row) end),
-      do: {:ok, Enum.map(assets, fn {asset, row} -> staking_rate(asset, provider_id, row) end)},
-      else: {:error, :unexpected_response_shape}
+    assets
+    |> Enum.reduce_while({:ok, []}, fn
+      {asset, %{} = row}, {:ok, acc} ->
+        case staking_rate(asset, provider_id, row) do
+          {:ok, rate} -> {:cont, {:ok, [rate | acc]}}
+          error -> {:halt, error}
+        end
+
+      {_asset, _not_an_object}, _acc ->
+        {:halt, {:error, :unexpected_response_shape}}
+    end)
+    |> case do
+      {:ok, rates} -> {:ok, Enum.reverse(rates)}
+      error -> error
+    end
   end
 
   defp rates_for_provider(_provider_id, _other), do: {:error, :unexpected_response_shape}
 
+  # A figure absent or `null` is `nil` (the vendor marks every one optional); one the venue
+  # SENT and this package cannot read refuses the reply, because `nil` says "not published".
   defp staking_rate(asset, provider_id, row) do
-    %StakingRate{
-      asset: String.upcase(asset),
-      provider_id: provider_id,
-      rate_pct: rate_pct(row),
-      apy_pct: decimal(row["apyPct"]),
-      deposit_limit_usd: decimal(row["depositUsdLimit"]),
-      venue_time: nil,
-      provider: :gemini
-    }
+    with {:ok, rate_pct} <- rate_pct(row),
+         {:ok, apy_pct} <- stated_or_absent(row, "apyPct"),
+         {:ok, limit} <- stated_or_absent(row, "depositUsdLimit") do
+      {:ok,
+       %StakingRate{
+         asset: String.upcase(asset),
+         provider_id: provider_id,
+         rate_pct: rate_pct,
+         apy_pct: apy_pct,
+         deposit_limit_usd: limit,
+         venue_time: nil,
+         provider: :gemini
+       }}
+    end
   end
 
   # `ratePct` where the venue publishes it; otherwise `rate`, which is basis points, divided
   # by a hundred. Never `apyPct`, which is a different number for the same position.
-  defp rate_pct(%{"ratePct" => pct}) when is_numeric(pct), do: decimal(pct)
-
-  defp rate_pct(%{"rate" => bps}) when is_numeric(bps) do
-    case decimal(bps) do
-      nil -> nil
-      value -> Decimal.div(value, Decimal.new(100))
+  defp rate_pct(row) do
+    case stated_or_absent(row, "ratePct") do
+      {:ok, nil} -> basis_points_pct(row)
+      other -> other
     end
   end
 
-  defp rate_pct(_row), do: nil
+  defp basis_points_pct(row) do
+    case stated_or_absent(row, "rate") do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, bps} -> {:ok, Decimal.div(bps, Decimal.new(100))}
+      error -> error
+    end
+  end
 
   @doc """
   Funding for a perpetual — `GET /v1/fundingamount/{symbol}`.
@@ -1231,14 +1256,16 @@ defmodule DpExchange.Gemini.Rest do
          # A figure the venue SENT and this package cannot read refuses the reply: `nil` is
          # "the venue stated none", and a funding amount of `nil` reads as nothing to pay.
          {:ok, amount} <- stated_decimal(body["amount"] || body["fundingAmount"]),
-         {:ok, estimated} <- stated_or_absent(body, "estimatedFundingAmount") do
+         {:ok, estimated} <- stated_or_absent(body, "estimatedFundingAmount"),
+         {:ok, funded_at} <- stated_epoch(body, "fundingTimestampMilliSecs"),
+         {:ok, next_funding_at} <- stated_epoch(body, "nextFundingTimestamp") do
       {:ok,
        %Funding{
          symbol: echoed,
          amount: amount,
          estimated_amount: estimated,
-         funded_at: epoch_ms(body["fundingTimestampMilliSecs"]),
-         next_funding_at: epoch_ms(body["nextFundingTimestamp"]),
+         funded_at: funded_at,
+         next_funding_at: next_funding_at,
          provider: :gemini
        }}
     end
@@ -1306,6 +1333,21 @@ defmodule DpExchange.Gemini.Rest do
          venue_time: nil,
          provider: :gemini
        }}
+    end
+  end
+
+  # A time absent or `null` is `nil`; one the venue SENT that is not a positive, in-range epoch
+  # in milliseconds refuses the reply rather than reading as "no funding time".
+  defp stated_epoch(body, key) do
+    case Map.get(body, key) do
+      nil ->
+        {:ok, nil}
+
+      value ->
+        case epoch_ms(value) do
+          nil -> {:error, :unexpected_response_shape}
+          at -> {:ok, at}
+        end
     end
   end
 
@@ -2010,6 +2052,9 @@ defmodule DpExchange.Gemini.Rest do
 
   # `/v1/pubticker` reports volume keyed by currency code, so the base asset's key has to
   # be recovered from the symbol rather than assumed to be first.
+  #
+  # Absent or `null` is `nil` ("not stated"); a `volume` that is not an object, or a base figure
+  # the venue sent and this package cannot read, refuses the reply instead of reading as nil.
   defp base_volume(%{"volume" => volume}, native) when is_map(volume) do
     base =
       native
@@ -2017,10 +2062,12 @@ defmodule DpExchange.Gemini.Rest do
       |> String.split("-")
       |> List.first()
 
-    decimal(Map.get(volume, base))
+    stated_decimal(Map.get(volume, base))
   end
 
-  defp base_volume(_body, _native), do: nil
+  defp base_volume(%{"volume" => nil}, _native), do: {:ok, nil}
+  defp base_volume(%{"volume" => _unreadable}, _native), do: {:error, :unexpected_response_shape}
+  defp base_volume(_body, _native), do: {:ok, nil}
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)

@@ -581,11 +581,20 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
         time_in_force: :gtc
       }
 
-      assert {:ok, %Order{id: "1234"}} =
+      for {key, value} <- [{"is_live", "true"}, {"price", "abc"}, {"timestampms", "soon"}] do
+        assert {:ok, %Order{id: "1234"}} =
+                 Private.place_order(
+                   @credentials,
+                   request,
+                   public_opts(Map.put(@order, key, value))
+                 )
+      end
+
+      assert {:ok, %Order{id: "1234", price: nil}} =
                Private.place_order(
                  @credentials,
                  request,
-                 public_opts(Map.put(@order, "is_live", "true"))
+                 public_opts(Map.put(@order, "price", "abc"))
                )
     end
   end

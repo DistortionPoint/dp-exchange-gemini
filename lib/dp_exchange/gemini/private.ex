@@ -363,21 +363,17 @@ defmodule DpExchange.Gemini.Private do
 
   # **An answer to a placement is an order, a refusal, or "unconfirmed".** Nothing in between.
   #
-  # A 2xx body that names an `order_id` is the venue confirming the order, and stays
-  # `{:ok, %Order{}}` even when a field of it is unreadable (`id: nil` included): it was made
-  # `{:error, :order_id_not_returned}` on 2026-10-10 and reverted the same day, because an
-  # error reads as "nothing was placed" and a retry then places a second order. A 2xx that
-  # confirms nothing (no `order_id`, not JSON, not an object), a 5xx, and a transport failure
-  # after the send may all have created an order, so each is `:order_unconfirmed` with the
-  # `client_order_id` actually sent (or `nil`), which is the only handle a caller has to find
-  # out. A venue refusal and anything decided before the send stay what they were.
-  #
-  # An `order_id` that is `null`, blank or not an id is no id: `{:ok, %Order{id: nil}}` was a
-  # success with no handle on the order, so it is `:order_unconfirmed` like a 2xx naming none.
-  # The 2026-10-10 revert above was about a plain error inviting a retry; this shape does not.
+  # A 2xx body that names a readable `order_id` is the venue confirming the order, and stays
+  # `{:ok, %Order{}}` even when a figure of it is unreadable (that figure is `nil`; see
+  # `lenient_order/1`): a plain error would read as "nothing was placed" and a retry would
+  # place a second order. A 2xx that confirms nothing (no `order_id`, not JSON, not an object),
+  # a 5xx, and a transport failure after the send may all have created an order, so each is
+  # `:order_unconfirmed` with the `client_order_id` actually sent (or `nil`), the only handle
+  # a caller has to find out. A venue refusal and anything decided before the send stay what
+  # they were. An `order_id` that is `null`, blank or not an id is no id: unconfirmed.
   defp placed_order({:ok, %{"order_id" => id} = body, _headers}, client_order_id) do
     if order_id_present?(id),
-      do: to_order(body, :lenient),
+      do: {:ok, lenient_order(body)},
       else: unconfirmed(client_order_id, {:missing_required_field, :order_id})
   end
 
@@ -391,6 +387,37 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp placed_order({:refused, _reason} = refusal, _client_order_id), do: refusal
+
+  # **A placement whose reply names a readable `order_id` is a placed, identified order, and is
+  # returned even when a figure in it cannot be read** (tick AA). The id is the handle the
+  # caller needs to cancel it; discarding it for `:order_unconfirmed` over, say, an unreadable
+  # `executed_amount` would be worse than a `nil` figure. Unreadable figures, times and flags
+  # are `nil`, and `status_of/1` never vouches an unreadable fill as complete. (The reads,
+  # `get_order/3` and `get_orders/2`, stay strict.)
+  defp lenient_order(body) do
+    executed = body["executed_amount"]
+
+    %Order{
+      id: order_id(body["order_id"]),
+      symbol: lenient_symbol(body["symbol"]),
+      side: side(body["side"]),
+      order_type: order_type_of(body),
+      quantity: decimal(body["original_amount"]),
+      price: decimal(body["price"]),
+      stop_price: decimal(body["stop_price"]),
+      status: status_of(body),
+      filled_quantity: decimal(executed),
+      average_price: if(positive?(executed), do: decimal(body["avg_execution_price"])),
+      created_at: epoch_ms(body["timestampms"]),
+      updated_at: nil,
+      provider: :gemini
+    }
+  end
+
+  defp lenient_symbol(symbol) when is_binary(symbol) and symbol != "",
+    do: SymbolFormat.to_canonical_symbol(symbol)
+
+  defp lenient_symbol(_unreadable), do: nil
 
   defp unconfirmed(client_order_id, reason),
     do: {:error, {:order_unconfirmed, client_order_id, bounded_reason(reason)}}
@@ -1565,29 +1592,27 @@ defmodule DpExchange.Gemini.Private do
   defp execution_options(_type, _fixed, _time_in_force),
     do: {:error, {:unexpected_field, :time_in_force}}
 
-  # **A numeric field that is PRESENT and unreadable fails the row** (`:strict`, the default).
-  # `nil` is "the venue did not say"; a quantity, price or time the venue sent and this package
-  # cannot read is a malformed reply, and an order whose size or price became `nil` looks like
-  # one the venue never sized or priced. An ABSENT field stays `nil`.
-  #
-  # `place_order/3` alone reads `:lenient`: the order it describes is already live at the venue,
-  # an error would read as "nothing was placed", and a retry places a second one (see the note
-  # there). Its unreadable fields are `nil` and the order is still returned.
-  defp to_order(body, mode \\ :strict)
-
-  defp to_order(%{"order_id" => _id} = body, mode) do
-    with {:ok, quantity} <- order_decimal(body, "original_amount", mode),
-         {:ok, price} <- order_decimal(body, "price", mode),
-         {:ok, stop_price} <- order_decimal(body, "stop_price", mode),
-         {:ok, filled} <- order_decimal(body, "executed_amount", mode),
-         {:ok, average} <- order_average(body, mode),
-         {:ok, created_at} <- order_time(body, mode),
-         :ok <- order_flags(body, mode) do
+  # **A field that is PRESENT and unreadable fails the row.** `nil` is "the venue did not say";
+  # an id, symbol, side, quantity, price or time the venue sent and this package cannot read is
+  # a malformed reply, and an order carrying `nil` for it looks like one the venue never
+  # described. An ABSENT or `null` field stays `nil`, except the id, which every order has.
+  # `place_order/3` does not use this: see `lenient_order/1`.
+  defp to_order(%{"order_id" => _id} = body) do
+    with {:ok, id} <- required_order_id(body["order_id"]),
+         {:ok, symbol} <- stated_order_symbol(body["symbol"]),
+         {:ok, side} <- stated_side(body["side"]),
+         {:ok, quantity} <- order_decimal(body, "original_amount"),
+         {:ok, price} <- order_decimal(body, "price"),
+         {:ok, stop_price} <- order_decimal(body, "stop_price"),
+         {:ok, filled} <- order_decimal(body, "executed_amount"),
+         {:ok, average} <- order_average(body),
+         {:ok, created_at} <- order_time(body),
+         :ok <- order_flags(body) do
       {:ok,
        %Order{
-         id: order_id(body["order_id"]),
-         symbol: order_symbol(body["symbol"]),
-         side: side(body["side"]),
+         id: id,
+         symbol: symbol,
+         side: side,
          order_type: order_type_of(body),
          quantity: quantity,
          price: price,
@@ -1604,71 +1629,71 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp to_order(_body, _mode), do: {:error, :unexpected_response_shape}
+  defp to_order(_body), do: {:error, :unexpected_response_shape}
 
   # **`is_live` and `is_cancelled` are JSON booleans, or absent.** `status_of/1` matches only a
   # literal `true`, so `"is_live": "true"` (or `1`) fell through to `:pending` or `:filled` and
   # a resting order was reported as one that was not on the book, and `"is_cancelled": "true"`
   # reported a cancelled order as live or filled. A flag this package cannot read refuses the
-  # row (`:strict`). `place_order/3` reads `:lenient` because its order is already live at the
-  # venue; an error there would read as "nothing was placed" and invite a second one.
-  defp order_flags(_body, :lenient), do: :ok
-
-  defp order_flags(body, :strict) do
+  # row.
+  defp order_flags(body) do
     if Enum.all?(["is_live", "is_cancelled"], &(Map.get(body, &1) in [nil, true, false])),
       do: :ok,
       else: {:error, :unexpected_response_shape}
   end
 
-  defp order_decimal(body, key, mode) do
-    case Map.get(body, key) do
+  # Absent or `null` is `nil`; a figure the venue sent and this package cannot read refuses.
+  defp order_decimal(body, key), do: stated_number(Map.get(body, key))
+
+  # The venue states `"0.00"` for an order with nothing executed (rest.yaml:847,1369). That is
+  # no average, not a fill at zero, which a notional computed from it reads.
+  defp order_average(body) do
+    if positive?(body["executed_amount"]),
+      do: order_decimal(body, "avg_execution_price"),
+      else: {:ok, nil}
+  end
+
+  defp order_time(body) do
+    case Map.get(body, "timestampms") do
       nil ->
         {:ok, nil}
 
       value ->
-        case {decimal(value), mode} do
-          {nil, :strict} -> {:error, :unexpected_response_shape}
-          {parsed, _mode} -> {:ok, parsed}
+        case epoch_ms(value) do
+          nil -> {:error, :unexpected_response_shape}
+          at -> {:ok, at}
         end
     end
   end
 
-  # The venue states `"0.00"` for an order with nothing executed (rest.yaml:847,1369). That is
-  # no average, not a fill at zero, which a notional computed from it reads.
-  defp order_average(body, mode) do
-    if positive?(body["executed_amount"]),
-      do: order_decimal(body, "avg_execution_price", mode),
-      else: {:ok, nil}
-  end
+  # The venue's id as a string. A missing, blank or non-id `order_id` is no order a caller can
+  # act on (cancel, look up, reconcile): refused, never `id: nil`. (`to_string/1` used to stand
+  # here, so an absent id became `""`, and a map or a list raised.)
+  defp required_order_id(id) when is_binary(id) and id != "", do: {:ok, id}
+  defp required_order_id(id) when is_integer(id), do: {:ok, Integer.to_string(id)}
+  defp required_order_id(_unreadable), do: {:error, :unexpected_response_shape}
 
-  defp order_time(body, mode) do
-    case {Map.get(body, "timestampms"), mode} do
-      {nil, _mode} ->
-        {:ok, nil}
+  # Absent or `null` is `nil`; text is the canonical symbol; anything else is unreadable.
+  defp stated_order_symbol(nil), do: {:ok, nil}
 
-      {value, mode} ->
-        case {epoch_ms(value), mode} do
-          {nil, :strict} -> {:error, :unexpected_response_shape}
-          {at, _mode} -> {:ok, at}
-        end
-    end
-  end
+  defp stated_order_symbol(symbol) when is_binary(symbol) and symbol != "",
+    do: {:ok, SymbolFormat.to_canonical_symbol(symbol)}
 
-  # The venue's id as a string, or `nil`. `to_string/1` used to stand here, so an absent
-  # `order_id` became `""` (the substitution `to_fill/2`'s note describes) and a map or a list
-  # raised out of `get_order/3`, `get_orders/2`, `cancel_order/3` and `place_order/3`. A REST
-  # mutation fuzz found the raise (2026-09-27). `nil` is what a caller can detect. It is not an
-  # error, because on `place_order/3` the order this body describes is live at the venue.
+  defp stated_order_symbol(_unreadable), do: {:error, :unexpected_response_shape}
+
+  # A fill's trade id (`fill_id/1`): a string or whole number, else `nil` (it is optional there).
   defp order_id(id) when is_binary(id) and id != "", do: id
   defp order_id(id) when is_integer(id), do: Integer.to_string(id)
   defp order_id(_unreadable), do: nil
 
-  defp order_symbol(symbol) when is_binary(symbol), do: SymbolFormat.to_canonical_symbol(symbol)
-  defp order_symbol(_absent), do: nil
-
   defp side("buy"), do: :buy
   defp side("sell"), do: :sell
   defp side(_other), do: nil
+
+  defp stated_side(nil), do: {:ok, nil}
+  defp stated_side("buy"), do: {:ok, :buy}
+  defp stated_side("sell"), do: {:ok, :sell}
+  defp stated_side(_unreadable), do: {:error, :unexpected_response_shape}
 
   # **The schema and the vendor's own example disagree on this string.** `NewOrderRequest`/
   # `Order`'s own enum (`rest.yaml` components.schemas) names `"exchange stop limit"`, the
@@ -1696,10 +1721,24 @@ defmodule DpExchange.Gemini.Private do
 
   defp order_type_of(%{"type" => type}) when type in @market_types, do: :market
 
-  defp order_type_of(%{"options" => ["maker-or-cancel" | _rest]}), do: :post_only
-  defp order_type_of(%{"options" => ["immediate-or-cancel" | _rest]}), do: :ioc
-  defp order_type_of(%{"options" => ["fill-or-kill" | _rest]}), do: :fok
-  defp order_type_of(_body), do: :limit
+  # A limit order: Gemini models maker-or-cancel, IOC and FOK as execution options on one.
+  @limit_types ["exchange limit", "limit"]
+
+  defp order_type_of(%{"type" => type} = body) when type in @limit_types, do: limit_variant(body)
+  defp order_type_of(%{"type" => nil} = body), do: limit_variant(body)
+
+  # **A type the venue sent and this package does not know is `nil`, never `:limit`.** The
+  # catch-all used to answer `:limit` for any other string, so an order of a kind this package
+  # has no atom for (an auction-only or block order, a spelling added after this was written)
+  # read as an ordinary limit the caller chose, every other field real. `nil` is the contract's
+  # "not stated in a form this venue's reply can be mapped" (`Order.order_type` is nullable).
+  defp order_type_of(%{"type" => _unknown}), do: nil
+  defp order_type_of(body), do: limit_variant(body)
+
+  defp limit_variant(%{"options" => ["maker-or-cancel" | _rest]}), do: :post_only
+  defp limit_variant(%{"options" => ["immediate-or-cancel" | _rest]}), do: :ioc
+  defp limit_variant(%{"options" => ["fill-or-kill" | _rest]}), do: :fok
+  defp limit_variant(_body), do: :limit
 
   # A cancelled MOC/IOC/FOK order arrives as a successful 200. It is a state, not a
   # failure, and reporting it as one would have a caller retry an order the venue handled.
@@ -1798,13 +1837,18 @@ defmodule DpExchange.Gemini.Private do
   defp to_balance(row, _timestamp) when not is_map(row), do: {:error, :unexpected_response_shape}
 
   defp to_balance(row, timestamp) do
-    with {:ok, currency} <- required_currency(row["currency"]) do
+    # `amount` and `available` are optional in the vendor's `Balance` schema: absent or `null`
+    # is `nil`. One the venue SENT and this package cannot read refuses the reply, as a
+    # row it cannot read always does; a `nil` balance would read as "the venue stated none".
+    with {:ok, currency} <- required_currency(row["currency"]),
+         {:ok, balance} <- stated_number(row["amount"]),
+         {:ok, available} <- stated_number(row["available"]) do
       {:ok,
        %Balance{
          currency: currency,
-         balance: decimal(row["amount"]),
-         available_balance: decimal(row["available"]),
-         hold: hold(row),
+         balance: balance,
+         available_balance: available,
+         hold: subtract_hold(balance, available),
          timestamp: timestamp,
          provider: :gemini
        }}
@@ -1847,12 +1891,6 @@ defmodule DpExchange.Gemini.Private do
   # for either shape, rather than requiring one specific JSON type the venue does not
   # promise: a malformed side must not raise, and it must not produce a fabricated hold
   # either.
-  defp hold(%{"amount" => amount, "available" => available}) do
-    subtract_hold(decimal(amount), decimal(available))
-  end
-
-  defp hold(_row), do: nil
-
   defp subtract_hold(nil, _available), do: nil
   defp subtract_hold(_amount, nil), do: nil
   defp subtract_hold(amount, available), do: Decimal.sub(amount, available)
@@ -1924,7 +1962,7 @@ defmodule DpExchange.Gemini.Private do
          {:ok, timestamp} <- required_time(row["timestampms"]),
          # A fee the venue SENT and this package cannot read is a refusal, not `nil`: `nil`
          # reads as "the venue stated no fee", and a reconciliation sums it as zero.
-         {:ok, fee} <- order_decimal(row, "fee_amount", :strict) do
+         {:ok, fee} <- order_decimal(row, "fee_amount") do
       {:ok,
        %Fill{
          order_id: order_id,
@@ -2318,14 +2356,32 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, id} <- required_id(Map.get(body, "quoteId") || Map.get(body, "orderId"), :id),
          {:ok, side} <- conversion_side(Map.get(body, "side"), requested_side),
          {:ok, from_asset, from_amount, to_asset, to_amount} <-
-           conversion_amounts(side, body, from, to) do
+           conversion_amounts(side, body, from, to),
+         {:ok, rate} <- stated_number(Map.get(body, "price")),
+         {:ok, fee} <- stated_number(Map.get(body, "fee")) do
       {:ok,
-       build_conversion(body, id, from_asset, from_amount, to_asset, to_amount, status, headers)}
+       build_conversion(
+         {body, id, status, headers},
+         {from_asset, from_amount, to_asset, to_amount},
+         {rate, fee}
+       )}
     end
   end
 
   defp to_conversion(_body, _from, _to, _status, _headers, _side),
     do: {:error, :unexpected_response_shape}
+
+  # A number the venue left out (or sent as `null`) is unstated: `nil`. One it SENT and this
+  # package cannot read (wrong type, unparsable, NaN, absurd exponent) refuses the reply; `nil`
+  # would say the venue stated none.
+  defp stated_number(nil), do: {:ok, nil}
+
+  defp stated_number(value) do
+    case decimal(value) do
+      nil -> {:error, :unexpected_response_shape}
+      parsed -> {:ok, parsed}
+    end
+  end
 
   # **Which of the two asset columns is the one given up depends on the side, so the side
   # must be known — never defaulted.** `conversion_amounts/4` used to treat every body that
@@ -2372,7 +2428,9 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, from_asset} <-
            required_id(from || Map.get(body, "quantityCurrency"), :from_asset),
          {:ok, to_asset} <- required_id(to || Map.get(body, "priceCurrency"), :to_asset) do
-      {:ok, from_asset, decimal(Map.get(body, "quantity")), to_asset, nil}
+      with {:ok, quantity} <- stated_number(Map.get(body, "quantity")) do
+        {:ok, from_asset, quantity, to_asset, nil}
+      end
     end
   end
 
@@ -2380,12 +2438,18 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, from_asset} <-
            required_id(from || Map.get(body, "totalSpendCurrency"), :from_asset),
          {:ok, to_asset} <- required_id(to || Map.get(body, "quantityCurrency"), :to_asset) do
-      {:ok, from_asset, decimal(Map.get(body, "totalSpend")), to_asset,
-       decimal(Map.get(body, "quantity"))}
+      with {:ok, spend} <- stated_number(Map.get(body, "totalSpend")),
+           {:ok, quantity} <- stated_number(Map.get(body, "quantity")) do
+        {:ok, from_asset, spend, to_asset, quantity}
+      end
     end
   end
 
-  defp build_conversion(body, id, from_asset, from_amount, to_asset, to_amount, status, headers) do
+  defp build_conversion(
+         {body, id, status, headers},
+         {from_asset, from_amount, to_asset, to_amount},
+         {rate, fee}
+       ) do
     %Conversion{
       id: id,
       status: status,
@@ -2393,8 +2457,8 @@ defmodule DpExchange.Gemini.Private do
       to_asset: to_asset,
       from_amount: from_amount,
       to_amount: to_amount,
-      rate: decimal(Map.get(body, "price")),
-      fee: decimal(Map.get(body, "fee")),
+      rate: rate,
+      fee: fee,
       expires_at: expires_at(Map.get(body, "maxAgeMs"), headers),
       venue_time: venue_date(headers),
       provider: :gemini
@@ -2824,12 +2888,24 @@ defmodule DpExchange.Gemini.Private do
     do: {:error, :unexpected_response_shape}
 
   defp to_approved_address(row, network) do
-    with {:ok, address} <- required_id(row["address"], :address) do
-      {:ok, to_approved_address(row, network, address)}
+    # `createdAt` absent or `null` is `nil`; one the venue sent and this package cannot read
+    # (text, zero, out of range) refuses the row rather than reading as "no time".
+    with {:ok, address} <- required_id(row["address"], :address),
+         {:ok, created_at} <- stated_created_at(row["createdAt"]) do
+      {:ok, to_approved_address(row, network, address, created_at)}
     end
   end
 
-  defp to_approved_address(row, network, address) do
+  defp stated_created_at(nil), do: {:ok, nil}
+
+  defp stated_created_at(value) do
+    case epoch_ms_to_datetime(value) do
+      nil -> {:error, :unexpected_response_shape}
+      at -> {:ok, at}
+    end
+  end
+
+  defp to_approved_address(row, network, address, created_at) do
     %ApprovedAddress{
       address: address,
       # Text, as the field is typed: a number or an object the venue put in `network` was carried
@@ -2841,7 +2917,7 @@ defmodule DpExchange.Gemini.Private do
       # The venue publishes `createdAt` and no activation time. `usable?/2` therefore
       # answers `nil` for a pending address rather than guessing when the lock lifts.
       active_from: nil,
-      requested_at: epoch_ms_to_datetime(row["createdAt"]),
+      requested_at: created_at,
       provider: :gemini
     }
   end
@@ -3076,6 +3152,9 @@ defmodule DpExchange.Gemini.Private do
           transfer_id,
           {asset, network, address, Decimal.new(wire_amount), wire_memo(memo)}
         )
+        # A 2xx whose `fee` is present and unreadable: the money may have moved, so it is
+        # `{:write_unconfirmed, key, reason}`, never a bare error that invites a re-send.
+        |> readable_write(transfer_id)
         |> withdraw_refusal(transfer_id, calls, opts)
       end
     end
@@ -3301,10 +3380,12 @@ defmodule DpExchange.Gemini.Private do
         end
       end)
 
-    {:ok, build_withdrawal(body, id, asset, network, address, amount, memo)}
+    with {:ok, fee} <- stated_number(body["fee"]) do
+      {:ok, build_withdrawal(body, id, {asset, network, address, amount, memo}, fee)}
+    end
   end
 
-  defp build_withdrawal(body, id, asset, network, address, amount, memo) do
+  defp build_withdrawal(body, id, {asset, network, address, amount, memo}, fee) do
     %Withdrawal{
       id: id,
       # The venue accepting a withdrawal is not the chain confirming it. `:pending` unless
@@ -3316,7 +3397,7 @@ defmodule DpExchange.Gemini.Private do
       network: network,
       address: address,
       memo: memo,
-      fee: decimal(body["fee"]),
+      fee: fee,
       tx_id: tx_hash(body["txHash"]) || tx_hash(body["txn_hash"]),
       requested_at: DateTime.utc_now(),
       provider: :gemini
@@ -3976,8 +4057,8 @@ defmodule DpExchange.Gemini.Private do
     # fails the row — `nil` would claim the venue did not say.
     with {:ok, asset} <- required_id(row["currency"], :asset),
          {:ok, staked} <- required_decimal(row["balance"], :staked),
-         {:ok, tradable} <- order_decimal(row, "available", :strict),
-         {:ok, withdrawable} <- order_decimal(row, "availableForWithdrawal", :strict),
+         {:ok, tradable} <- order_decimal(row, "available"),
+         {:ok, withdrawable} <- order_decimal(row, "availableForWithdrawal"),
          {:ok, by_provider} <- by_provider(row["balanceByProvider"]) do
       {:ok,
        %StakingBalance{
@@ -4109,7 +4190,7 @@ defmodule DpExchange.Gemini.Private do
   defp to_staking_reward({provider_id, currency, period}) when is_map(period) do
     with {:ok, asset} <- required_id(currency, :asset),
          {:ok, amount} <- required_decimal(period["accrualTotal"], :amount),
-         {:ok, apy} <- order_decimal(period, "apyPct", :strict),
+         {:ok, apy} <- order_decimal(period, "apyPct"),
          {:ok, count} <- accrual_count(period["numberOfAccruals"]),
          {:ok, first} <- stated_time(period["firstAccrualAt"]),
          {:ok, last} <- stated_time(period["lastAccrualAt"]) do
@@ -4339,12 +4420,12 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, id} <- required_id(row["transactionId"] || row["id"], :id),
          {:ok, asset} <- required_id(row["currency"], :asset),
          {:ok, amount} <- required_decimal(row["amount"], :amount),
-         # `:lenient`, like `place_order/3`: this is the reply to a stake or redemption the venue
-         # has ALREADY accepted, so an error would read as "nothing moved" and invite a retry.
-         # An optional field it sent and this package cannot read is `nil` here.
-         {:ok, paid} <- order_decimal(row, "amountPaidSoFar", :lenient),
-         {:ok, remaining} <- order_decimal(row, "amountRemaining", :lenient) do
-      at = staking_time(row["requestInitiated"])
+         # Strict: a figure or time the venue sent and this package cannot read refuses. The
+         # caller (`staking_write/6`) turns that into `{:write_unconfirmed, key, reason}`, so it
+         # never reads as "nothing moved" and never carries a `nil` for something the venue sent.
+         {:ok, paid} <- order_decimal(row, "amountPaidSoFar"),
+         {:ok, remaining} <- order_decimal(row, "amountRemaining"),
+         {:ok, at} <- stated_time(row["requestInitiated"]) do
       {:ok, build_staking_transaction(row, id, asset, amount, type, {paid, remaining, at})}
     end
   end
@@ -4414,8 +4495,8 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, id} <- required_id(txn["transactionId"], :id),
          {:ok, asset} <- required_id(txn["amountCurrency"], :asset),
          {:ok, amount} <- required_decimal(txn["amount"], :amount),
-         {:ok, paid} <- order_decimal(txn, "amountPaidSoFar", :strict),
-         {:ok, remaining} <- order_decimal(txn, "amountRemaining", :strict),
+         {:ok, paid} <- order_decimal(txn, "amountPaidSoFar"),
+         {:ok, remaining} <- order_decimal(txn, "amountRemaining"),
          {:ok, at} <- stated_time(txn["dateTime"]) do
       {:ok,
        %StakingTransaction{
@@ -4632,11 +4713,11 @@ defmodule DpExchange.Gemini.Private do
   defp position_struct(row, at, symbol, side, quantity) do
     # A figure the venue SENT and this package cannot read refuses the row: `nil` is "not
     # stated", and a mark price or a P&L of `nil` for a held position read as nothing to report.
-    with {:ok, average_cost} <- order_decimal(row, "average_cost", :strict),
-         {:ok, mark_price} <- order_decimal(row, "mark_price", :strict),
-         {:ok, notional} <- order_decimal(row, "notional_value", :strict),
-         {:ok, realised} <- order_decimal(row, "realised_pnl", :strict),
-         {:ok, unrealised} <- order_decimal(row, "unrealised_pnl", :strict) do
+    with {:ok, average_cost} <- order_decimal(row, "average_cost"),
+         {:ok, mark_price} <- order_decimal(row, "mark_price"),
+         {:ok, notional} <- order_decimal(row, "notional_value"),
+         {:ok, realised} <- order_decimal(row, "realised_pnl"),
+         {:ok, unrealised} <- order_decimal(row, "unrealised_pnl") do
       {:ok,
        %Position{
          symbol: symbol,

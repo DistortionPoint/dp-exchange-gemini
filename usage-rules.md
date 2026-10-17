@@ -863,6 +863,25 @@ them. `capabilities/0` declares `supported_instrument_types: [:spot, :perp]` —
 perpetuals surface has its own endpoints (`get_positions/1`, `get_contract_stats/2`,
 `get_funding/2`, among others), not a place in this list.
 
+**Unreadable is a refusal, never a `nil`.** A figure the venue left out (or sent as `null`) is
+`nil`; one it sent and this package cannot read makes the call
+`{:error, :unexpected_response_shape}`. This covers `get_balances/2` (`amount`, `available`),
+`get_staking_rates/1` (`ratePct`, `rate`, `apyPct`, `depositUsdLimit`), `get_funding/2` (both
+timestamps), the conversion calls (`price`, `fee`, `totalSpend`, `quantity`), and
+`get_market_overview/1` (a row with no string `pair` refuses the whole overview). So a `nil`
+in these structs always means "the venue stated none". It also covers `get_price/2` (`volume`)
+and `list_approved_addresses/2` (`createdAt`). A money write whose 2xx reply is unreadable
+(`withdraw/6` `fee`, `stake/4` / `unstake/4`) is `:write_unconfirmed` with the key sent: check
+the account, do not resend. `place_order/3` is the exception: a reply naming a readable
+`order_id` is returned as the placed `%Order{}` with any unreadable figure `nil` (you need the
+id to cancel it); only a missing or unreadable `order_id` is `:order_unconfirmed`.
+
+A `/v1/symbols` array holding an entry that is not a string is
+`{:error, :unexpected_response_shape}`, not a shorter list.
+
+An order read back has `order_type: nil` when the venue sent a `type` this package has no
+atom for (it never reads as `:limit` by default). Match on `nil` as "not mappable".
+
 ## `:since` narrows a window as a `DateTime`, everywhere it appears — except the two staking reads
 
 `get_orders/2` (with `history: true`), `get_trade_history/2`, `list_custody_fees/2` and

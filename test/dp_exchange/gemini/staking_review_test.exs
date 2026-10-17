@@ -146,7 +146,7 @@ defmodule DpExchange.Gemini.StakingReviewTest do
   end
 
   describe "stake/4 and unstake/4 report what the venue accepted" do
-    test "an unreadable optional field is nil, not an error after funds moved" do
+    test "a present but unreadable optional field is write_unconfirmed, not a nil" do
       body = %{
         "transactionId" => "9",
         "currency" => "ETH",
@@ -155,12 +155,24 @@ defmodule DpExchange.Gemini.StakingReviewTest do
         "requestInitiated" => "bad"
       }
 
+      for broken <- [body, Map.delete(body, "amountRemaining")] do
+        assert {:error, {:write_unconfirmed, "9", :unexpected_response_shape}} =
+                 Private.unstake(
+                   "ETH",
+                   Decimal.new(1),
+                   @credentials,
+                   [provider_id: "p", plug: json(broken)] ++ @opts
+                 )
+      end
+
+      absent = Map.drop(body, ["amountRemaining", "requestInitiated"])
+
       assert {:ok, tx} =
                Private.unstake(
                  "ETH",
                  Decimal.new(1),
                  @credentials,
-                 [provider_id: "p", plug: json(body)] ++ @opts
+                 [provider_id: "p", plug: json(absent)] ++ @opts
                )
 
       assert tx.id == "9"

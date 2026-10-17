@@ -323,13 +323,36 @@ defmodule DpExchange.Gemini.TickAAPrivateATest do
       assert {:ok, [%{status: :rejected}]} = approved(body)
     end
 
-    test "a createdAt that is not a positive, in-range epoch is no time, not 1970" do
+    test "a createdAt that is not a positive, in-range epoch refuses, not 1970 and not nil" do
       for created_at <- ["not-an-epoch", 100_000_000_000_000_000_000, 0, -5, %{"ms" => 1}] do
         body = %{"approvedAddresses" => [%{"address" => "0x1", "createdAt" => created_at}]}
 
-        assert {:ok, [%{requested_at: nil}]} = approved(body),
-               "createdAt #{inspect(created_at)} must be no time"
+        assert {:error, :unexpected_response_shape} = approved(body),
+               "createdAt #{inspect(created_at)} must refuse"
       end
+
+      absent = %{"approvedAddresses" => [%{"address" => "0x1", "createdAt" => nil}]}
+      assert {:ok, [%{requested_at: nil}]} = approved(absent)
+    end
+  end
+
+  describe "withdraw/6 — a fee in the 2xx reply" do
+    test "present but unreadable is write_unconfirmed with the key sent; absent or null is nil" do
+      for bad <- ["abc", "NaN", true, %{}] do
+        body = %{"withdrawalId" => "w-1", "fee" => bad}
+
+        assert {:error, {:write_unconfirmed, "k-fee", :unexpected_response_shape}} =
+                 withdraw(client_transfer_id: "k-fee", plug: responding(body))
+      end
+
+      for body <- [%{"withdrawalId" => "w-1"}, %{"withdrawalId" => "w-1", "fee" => nil}] do
+        assert {:ok, withdrawal} = withdraw(client_transfer_id: "k-fee", plug: responding(body))
+        assert withdrawal.fee == nil
+      end
+
+      readable = %{"withdrawalId" => "w-1", "fee" => "0.0005"}
+      assert {:ok, withdrawal} = withdraw(client_transfer_id: "k-fee", plug: responding(readable))
+      assert Decimal.equal?(withdrawal.fee, Decimal.new("0.0005"))
     end
   end
 

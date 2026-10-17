@@ -190,13 +190,11 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
       assert order.created_at.year == 2026
     end
 
-    test "a side the contract does not model is nil, not guessed at" do
+    test "a side the contract does not model is refused, not guessed at or nil" do
       body = Map.put(@order, "side", "something-new")
 
-      assert {:ok, order} =
+      assert {:error, :unexpected_response_shape} =
                Private.get_order(@credentials, "1", plug: json(body), retry_attempts: 0)
-
-      assert order.side == nil
     end
   end
 

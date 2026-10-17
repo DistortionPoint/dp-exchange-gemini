@@ -20,6 +20,60 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_symbols/1` refuses (`{:error, :unexpected_response_shape}`) a `/v1/symbols` array that
+  holds an entry which is not a string. Such entries were silently dropped, so the catalogue
+  came back with a hole in it and no way to tell.
+- An order read back (`get_order/3`, `get_orders/2`, `cancel_order/3`, `place_order/3`)
+  reports `order_type: nil` when the venue sent a `type` this package has no atom for. The
+  catch-all answered `:limit` for any such string (an auction-only or block order, a spelling
+  added later), so it read as an ordinary limit order the caller chose. `"exchange limit"`,
+  `"limit"`, a `null` or an absent `type` are unchanged (the options array still names
+  `:post_only`, `:ioc` and `:fok`).
+
+### Changed — BREAKING
+
+Present-but-unreadable no longer becomes `nil` (family rule: unreadable refuses, never
+substitutes). Absent or `null` is still `nil` where the vendor's schema marks the field
+optional (checked in `rest.yaml`: none of these is `required`). Each is now
+`{:error, :unexpected_response_shape}`:
+
+- `get_balances/2`: a row whose `amount` or `available` was sent and cannot be read (wrong
+  type, `"NaN"`, absurd exponent). It was `balance: nil` / `hold: nil` inside `{:ok, _}`.
+- `get_staking_rates/1`: a sent `ratePct`, `rate`, `apyPct` or `depositUsdLimit` that cannot
+  be read. It was `nil` for that figure.
+- `get_funding/2`: a sent `fundingTimestampMilliSecs` or `nextFundingTimestamp` that is not a
+  positive, in-range epoch in milliseconds (zero, negative, out of range, text). It was `nil`.
+- `quote_conversion/4`, `commit_conversion/2`, `convert/4`: a sent `price`, `fee`,
+  `totalSpend` or `quantity` that cannot be read. It was `nil` (on a commit this is
+  `{:write_unconfirmed, _, _}`, as for any unreadable settled reply).
+- `get_market_overview/1`: a row that is not an object or has no string `pair` refuses the
+  overview. It was skipped, so the overview looked complete with a priced pair missing.
+- `get_price/2`: a ticker `volume` that is not an object, or a base-asset figure that cannot be
+  read, refuses. It was `volume: nil`.
+- `list_approved_addresses/2`: a sent `createdAt` that is not a positive, in-range epoch refuses
+  the list. It was `requested_at: nil`.
+- `get_order/3`, `get_orders/2`, `cancel_order/3`: an order row whose `order_id` is missing,
+  `null`, blank or not an id, or whose `symbol` or `side` is sent and unreadable (not text; a
+  side other than `buy`/`sell`), refuses (`get_orders/2` refuses the whole list, so no open
+  order is hidden). It was an `%Order{}` with `id: nil`, `symbol: nil` or `side: nil`. An
+  absent or `null` `symbol` or `side` is still `nil`.
+
+Money writes whose 2xx reply cannot be read take the write's own unconfirmed tag instead (the
+money may have moved, so a bare error would invite a second send):
+
+- `withdraw/6`: a present, unreadable `fee` is `{:error, {:write_unconfirmed, transfer_id,
+  :unexpected_response_shape}}`. It was `fee: nil` inside `{:ok, _}`.
+- `stake/4`, `unstake/4`: a present, unreadable `amountPaidSoFar`, `amountRemaining` or
+  `requestInitiated` is `{:write_unconfirmed, transactionId, :unexpected_response_shape}`. It was
+  `nil`.
+
+`place_order/3` is deliberately NOT in this list: a 2xx naming a readable `order_id` returns
+the placed `%Order{}` with unreadable figures as `nil`, because the id is the handle the caller
+needs to cancel it, and an unreadable or missing `order_id` stays `:order_unconfirmed`. Its
+status is never vouched as a full fill from an unreadable amount.
+
 ## [0.2.147] - 2026-10-17
 
 ### Dependencies
