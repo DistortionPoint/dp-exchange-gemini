@@ -5795,6 +5795,116 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, rows} <- list_rows(rows), do: {:ok, List.flatten(rows)}
   end
 
+  # --- request validation, exposed for the Fake ----------------------------
+  #
+  # Each function below runs the checks a real call makes before it signs anything, in the
+  # same order, and returns `:ok` or the real call's own refusal. `DpExchange.Gemini.Fake`
+  # refuses with these rather than with a second copy of the rules, so a fake that accepts
+  # what the real call refuses (or the reverse) cannot arise by the two drifting.
+
+  @doc """
+  Refusal for the perpetuals and spot margin reads when `opts[:symbol]` is missing:
+  `{:error, {:missing_option, :symbol}}`, else `:ok`. Checked before a credential is read.
+  """
+  @spec validate_margin_symbol(keyword()) :: :ok | {:error, {:missing_option, :symbol}}
+  def validate_margin_symbol(opts) do
+    with {:ok, _symbol} <- required_opt(opts, :symbol), do: :ok
+  end
+
+  @doc """
+  What `preview_margin_order/3` refuses before a request is made: missing fields, an unknown
+  side or order type, and a size or price that is not a positive number.
+  """
+  @spec validate_margin_preview(term()) :: :ok | {:error, term()}
+  def validate_margin_preview(request) do
+    with {:ok, _params} <- margin_preview_params(request), do: :ok
+  end
+
+  @doc """
+  What `funding_payment_report/2` refuses before it signs: a bad date or row count.
+  """
+  @spec validate_funding_payment_report(keyword()) :: :ok | {:error, term()}
+  def validate_funding_payment_report(opts), do: validate_report_opts(opts, :no_symbol)
+
+  @doc """
+  What `funding_amount_report/3` refuses before it signs: `:from` without `:to` (or the
+  reverse), a missing symbol, a bad date or row count, in that order.
+  """
+  @spec validate_funding_amount_report(term(), keyword()) :: :ok | {:error, term()}
+  def validate_funding_amount_report(symbol, opts) do
+    with :ok <- both_dates_or_neither(opts),
+         do: validate_report_opts(Keyword.put(opts, :symbol, symbol), :symbol_required)
+  end
+
+  @doc """
+  What `funding_payment_report_file/2` refuses before it signs: `:from` without `:to` (or the
+  reverse), then a bad date or row count.
+  """
+  @spec validate_funding_payment_report_file(keyword()) :: :ok | {:error, term()}
+  def validate_funding_payment_report_file(opts) do
+    with :ok <- both_dates_or_neither(opts), do: validate_report_opts(opts, :no_symbol)
+  end
+
+  @doc """
+  What `create_clearing_order/3` refuses before it signs: missing or invalid terms.
+  """
+  @spec validate_clearing_order(term()) :: :ok | {:error, term()}
+  def validate_clearing_order(request) do
+    with {:ok, _params} <- clearing_order_params(request), do: :ok
+  end
+
+  @doc """
+  What `create_broker_clearing_order/3` refuses before it signs, in order: the terms, the
+  source and target counterparties, then `:expires_in_hrs`.
+  """
+  @spec validate_broker_clearing_order(term(), keyword()) :: :ok | {:error, term()}
+  def validate_broker_clearing_order(request, opts) do
+    with {:ok, _params} <- clearing_order_params(request),
+         {:ok, _source} <- required_name(opts, :source_counterparty_id),
+         {:ok, _target} <- required_name(opts, :target_counterparty_id),
+         {:ok, _hours} <- required_opt(opts, :expires_in_hrs),
+         do: :ok
+  end
+
+  @doc """
+  The clearing id as `get_clearing_order/3` and `cancel_clearing_order/3` accept it, else
+  `{:error, {:invalid_clearing_id, value}}`.
+  """
+  @spec validate_clearing_id(term()) ::
+          {:ok, String.t()} | {:error, {:invalid_clearing_id, term()}}
+  def validate_clearing_id(id), do: clearing_id_arg(id)
+
+  @doc """
+  What `list_clearing_orders/2` (`:orders`) and `list_clearing_brokers/2` (`:brokers`) refuse
+  before they sign: a window with one bound, then a malformed filter.
+  """
+  @spec validate_clearing_list(:orders | :brokers, keyword()) :: :ok | {:error, term()}
+  def validate_clearing_list(:orders, opts) do
+    with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration),
+         :ok <- window_pair(opts, :submission_start, :submission_end, :submission),
+         do: validate_history_opts(:clearing_orders, opts)
+  end
+
+  def validate_clearing_list(:brokers, opts) do
+    with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration),
+         do: validate_history_opts(:clearing_brokers, opts)
+  end
+
+  @doc """
+  What `refresh_access_token/3` refuses before anything is sent, in order: a blank client id,
+  a blank refresh token, a client secret that is not a string, and an `:auth_url` that is not
+  https (loopback excepted).
+  """
+  @spec validate_refresh_request(term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate_refresh_request(client_id, refresh_token, opts) do
+    cond do
+      blank_string?(client_id) -> {:error, :client_id_required}
+      blank_string?(refresh_token) -> {:error, :refresh_token_required}
+      not valid_client_secret?(Keyword.get(opts, :client_secret)) -> secret_refusal(opts)
+      true -> https_only(Config.opt(opts, :auth_url, "https://exchange.gemini.com"))
+    end
+  end
+
   # --- shared helpers -----------------------------------------------------
 
   defp venue_time(headers) do

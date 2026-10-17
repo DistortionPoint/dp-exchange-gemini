@@ -675,6 +675,22 @@ defmodule DpExchange.Gemini.Auth do
 
   def seed_nonce(_not_a_positive_integer), do: {:error, :invalid_seed}
 
+  @doc """
+  Whether `value` is a seed `seed_nonce/1` would accept for the counter, without touching it:
+  `:ok`, `{:error, :above_counter_range}` or `{:error, :invalid_seed}`.
+
+  The two refusals `seed_nonce/1` makes before it reads the counter, in the same order, so
+  `DpExchange.Gemini.Fake` refuses exactly as the real call does without raising the node-wide
+  counter a consumer's other tests share. `:below_current` depends on the counter and is not
+  decided here.
+  """
+  @spec check_seed(term()) :: :ok | {:error, :above_counter_range | :invalid_seed}
+  def check_seed(value) when is_integer(value) and value > 0 do
+    if value >= @max_counter_value, do: {:error, :above_counter_range}, else: :ok
+  end
+
+  def check_seed(_not_a_positive_integer), do: {:error, :invalid_seed}
+
   # The same compare-and-exchange loop `nonce(:incremental)` uses, for the same reason: two
   # processes may be doing this at once, and the loser must re-read rather than overwrite.
   defp raise_counter(counter, value) do

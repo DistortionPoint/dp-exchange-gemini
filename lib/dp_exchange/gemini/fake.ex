@@ -2670,4 +2670,591 @@ defmodule DpExchange.Gemini.Fake do
       end
     end)
   end
+
+  # --- venue-specific functions on `DpExchange.Gemini` that are not `Venue` callbacks ------
+  #
+  # Every public function the facade exposes is on this module too, at the same arity: a
+  # consumer's tier-1 suite that swaps the fake in must not meet an `UndefinedFunctionError`
+  # for a call that works against the real adapter. Each one refuses first with the real
+  # call's own validation (`Private.validate_*`, `Rest.validate_symbol/1`), in the real order,
+  # then the credential, then answers with a fixed value in the shape of the vendor's own
+  # response example (`docs/reference/gemini/openapi/rest.yaml`). The values are the spec's
+  # examples, not measurements.
+
+  @doc """
+  Whether the environment `opts` resolves to moves real money. The same function as the
+  real adapter's, since it reads only `opts` and `DpExchange.Core.Config`.
+
+  See `DpExchange.Gemini.live?/1`.
+  """
+  @spec live?(keyword()) :: boolean()
+  def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
+
+  @doc "The real adapter's `DpExchange.Gemini.venue_does_not_serve/0`, unchanged."
+  @spec venue_does_not_serve() :: [{atom(), arity()}]
+  def venue_does_not_serve, do: DpExchange.Gemini.venue_does_not_serve()
+
+  @nonce_seed_key {__MODULE__, :nonce_seed}
+
+  @doc """
+  Accepts a nonce seed without touching the node-wide counter the real call raises.
+
+  Refuses what `DpExchange.Gemini.seed_nonce/1` refuses (`:invalid_seed`,
+  `:above_counter_range`, through `Auth.check_seed/1`), and `:below_current` against the
+  highest seed this process has been given, so a test sees the one-way rule without moving the
+  counter a consumer's other async tests sign with.
+
+  See `DpExchange.Gemini.seed_nonce/1`.
+  """
+  @spec seed_nonce(term()) ::
+          :ok | {:error, :below_current | :above_counter_range | :invalid_seed}
+  def seed_nonce(value) do
+    with :ok <- Auth.check_seed(value) do
+      if value <= Process.get(@nonce_seed_key, 0) do
+        {:error, :below_current}
+      else
+        Process.put(@nonce_seed_key, value)
+        :ok
+      end
+    end
+  end
+
+  @doc """
+  The next funding time for a perpetual; a symbol that is not one is refused as the venue
+  refuses it.
+
+  See `DpExchange.Gemini.next_funding_timestamp/2`.
+  """
+  @spec next_funding_timestamp(term(), keyword()) ::
+          {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}
+  def next_funding_timestamp(symbol, _opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol) do
+      with_injection(symbol, fn ->
+        if perpetual_symbol?(symbol),
+          do: {:ok, ~U[2026-09-01 19:00:00Z]},
+          else: {:refused, :not_listed}
+      end)
+    end
+  end
+
+  defp usd(value), do: %{"currency" => "USD", "value" => value}
+
+  defp margin_summary(buying_power) do
+    %{
+      "marginAssetValue" => usd("10000.00"),
+      "availableCollateral" => usd("8500.00"),
+      "notionalValue" => usd("15000.00"),
+      "totalBorrowed" => usd("5000.00"),
+      "leverage" => "1.5",
+      "buyingPower" => usd(buying_power),
+      "sellingPower" => usd("8500.00"),
+      "liquidationRisk" => %{"lossPercentage" => "0.1550", "liquidationPrice" => usd("50000.00")},
+      "interestRate" => %{"rate" => "0.00001141552511", "interval" => "hour"},
+      "reservedBuyOrders" => usd("1000.00"),
+      "reservedSellOrders" => usd("500.00")
+    }
+  end
+
+  @doc """
+  Fixed perpetuals margin account. `opts[:symbol]` is required, as on the real call.
+
+  See `DpExchange.Gemini.get_account_margin/1`.
+  """
+  @spec get_account_margin(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_account_margin(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_margin_symbol(opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok,
+         %{
+           "margin_assets_value" => "9800",
+           "initial_margin" => "6000",
+           "available_margin" => "3800",
+           "margin_maintenance_limit" => "5800",
+           "leverage" => "12.34567",
+           "notional_value" => "1300",
+           "estimated_liquidation_price" => "1300",
+           "initial_margin_positions" => "3500",
+           "reserved_margin" => "2500",
+           "reserved_margin_buys" => "1800",
+           "reserved_margin_sells" => "700",
+           "buying_power" => "0.19",
+           "selling_power" => "0.19"
+         }}
+      end
+    end)
+  end
+
+  @funding_payments [
+    %{
+      "eventType" => "Hourly Funding Transfer",
+      "hourlyFundingTransfer" => %{
+        "eventType" => "Hourly Funding Transfer",
+        "timestamp" => 1_683_730_803_940,
+        "assetCode" => "GUSD",
+        "action" => "Debit",
+        "quantity" => %{"currency" => "GUSD", "value" => "4.78958"}
+      }
+    },
+    %{
+      "eventType" => "Hourly Funding Transfer",
+      "hourlyFundingTransfer" => %{
+        "eventType" => "Hourly Funding Transfer",
+        "timestamp" => 1_683_734_406_746,
+        "assetCode" => "GUSD",
+        "action" => "Debit",
+        "quantity" => %{"currency" => "GUSD", "value" => "4.78958"},
+        "instrumentSymbol" => "BTCGUSDPERP"
+      }
+    }
+  ]
+
+  @doc """
+  Fixed funding payments this account paid. `:since` and `:to` narrow by each row's own
+  timestamp, as the venue's query parameters do.
+
+  See `DpExchange.Gemini.list_funding_payments/1`.
+  """
+  @spec list_funding_payments(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_funding_payments(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_history_opts(:funding_payments, opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        since = epoch_bound(Keyword.get(opts, :since))
+        until = epoch_bound(Keyword.get(opts, :to))
+
+        {:ok,
+         Enum.filter(@funding_payments, fn row ->
+           within_bounds?(row["hourlyFundingTransfer"]["timestamp"], since, until)
+         end)}
+      end
+    end)
+  end
+
+  defp epoch_bound(nil), do: nil
+  defp epoch_bound(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
+  defp epoch_bound(millis) when is_integer(millis), do: millis
+  defp epoch_bound(digits) when is_binary(digits), do: String.to_integer(digits)
+
+  defp within_bounds?(at, since, until),
+    do: (since == nil or at >= since) and (until == nil or at <= until)
+
+  @doc """
+  Fixed funding payment report rows. Dates and `:rows` are validated as the real call does.
+
+  See `DpExchange.Gemini.funding_payment_report/1`.
+  """
+  @spec funding_payment_report(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def funding_payment_report(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_funding_payment_report(opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        row = %{
+          "eventType" => "Hourly Funding Transfer",
+          "timestamp" => 1_713_344_403_617,
+          "assetCode" => "GUSD",
+          "action" => "Credit",
+          "quantity" => %{"currency" => "GUSD", "value" => "35.81084"},
+          "instrumentSymbol" => "BTCGUSDPERP"
+        }
+
+        {:ok, take_rows([row], Keyword.get(opts, :rows))}
+      end
+    end)
+  end
+
+  defp take_rows(rows, nil), do: rows
+  defp take_rows(rows, count), do: Enum.take(rows, count)
+
+  # The venue's bytes are a spreadsheet, which this package never parses. These are the
+  # `PK` zip signature plus a marker, so a consumer can tell the fake's file from a real one.
+  @fake_spreadsheet <<"PK", 3, 4>> <> "dp-exchange-gemini fake spreadsheet"
+
+  @doc """
+  The funding amount report as fixed spreadsheet bytes. `symbol` is required, and `:from`
+  and `:to` come together or not at all, as on the real call.
+
+  See `DpExchange.Gemini.funding_amount_report/2`.
+  """
+  @spec funding_amount_report(term(), keyword()) ::
+          {:ok, binary()} | {:error, term()} | {:refused, term()}
+  def funding_amount_report(symbol, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_funding_amount_report(symbol, opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, @fake_spreadsheet}
+      end
+    end)
+  end
+
+  @doc """
+  The funding payment report as fixed spreadsheet bytes.
+
+  See `DpExchange.Gemini.funding_payment_report_file/1`.
+  """
+  @spec funding_payment_report_file(keyword()) ::
+          {:ok, binary()} | {:error, term()} | {:refused, term()}
+  def funding_payment_report_file(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_funding_payment_report_file(opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, @fake_spreadsheet}
+      end
+    end)
+  end
+
+  @doc """
+  Fixed spot margin account summary. `opts[:symbol]` is required, as on the real call.
+
+  See `DpExchange.Gemini.get_margin_account/1`.
+  """
+  @spec get_margin_account(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_margin_account(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_margin_symbol(opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, margin_summary("8500.00")}
+      end
+    end)
+  end
+
+  @doc """
+  Fixed margin interest rates, three per currency as the venue sends them.
+
+  See `DpExchange.Gemini.get_margin_rates/1`.
+  """
+  @spec get_margin_rates(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_margin_rates(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok,
+         [
+           margin_rate("BTC", "0.00001141552511", "0.00027397260264", "0.1"),
+           margin_rate("ETH", "0.00001141552511", "0.00027397260264", "0.1"),
+           margin_rate("USD", "0.00000913242009", "0.00021917808216", "0.08")
+         ]}
+      end
+    end)
+  end
+
+  defp margin_rate(currency, hourly, daily, annual) do
+    %{
+      "currency" => currency,
+      "borrowRate" => hourly,
+      "borrowRateDaily" => daily,
+      "borrowRateAnnual" => annual,
+      "lastUpdated" => 1_700_000_000_000
+    }
+  end
+
+  @doc """
+  A fixed margin preview. Places nothing. The request is validated by the real function
+  (fields, side, type, and which of `amount` or `total_spend` the type needs) before the
+  credential.
+
+  See `DpExchange.Gemini.preview_margin_order/2`.
+  """
+  @spec preview_margin_order(term(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_margin_order(request, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_margin_preview(request),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok,
+         %{"preorder" => margin_summary("8500.00"), "postorder" => margin_summary("7000.00")}}
+      end
+    end)
+  end
+
+  @doc """
+  A fixed clearing order awaiting the counterparty. The terms are validated by the real
+  function before the credential. Nothing is confirmed.
+
+  See `DpExchange.Gemini.create_clearing_order/2`.
+  """
+  @spec create_clearing_order(term(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_clearing_order(request, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_clearing_order(request),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, %{"result" => "AwaitConfirm", "clearing_id" => "0OQGOZXW"}}
+      end
+    end)
+  end
+
+  @doc """
+  A fixed broker clearing order awaiting both parties. Terms, counterparties and
+  `:expires_in_hrs` are validated by the real function before the credential.
+
+  See `DpExchange.Gemini.create_broker_clearing_order/2`.
+  """
+  @spec create_broker_clearing_order(term(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_broker_clearing_order(request, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_broker_clearing_order(request, opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, %{"result" => "AwaitSourceTargetConfirm", "clearing_id" => "8EM7NVXD"}}
+      end
+    end)
+  end
+
+  @doc """
+  A fixed clearing order state. The id is validated before the credential.
+
+  See `DpExchange.Gemini.get_clearing_order/2`.
+  """
+  @spec get_clearing_order(term(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_clearing_order(clearing_id, opts \\ []) do
+    with_injection(fn ->
+      with {:ok, _id} <- Private.validate_clearing_id(clearing_id),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, %{"result" => "ok", "status" => "Confirmed"}}
+      end
+    end)
+  end
+
+  @doc """
+  A fixed successful clearing cancel. The id is validated before the credential.
+
+  See `DpExchange.Gemini.cancel_clearing_order/2`.
+  """
+  @spec cancel_clearing_order(term(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def cancel_clearing_order(clearing_id, opts \\ []) do
+    with_injection(fn ->
+      with {:ok, id} <- Private.validate_clearing_id(clearing_id),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, %{"result" => "ok", "details" => "#{id} order canceled"}}
+      end
+    end)
+  end
+
+  @doc """
+  A fixed successful clearing confirm. The id, then the four terms, are validated by the real
+  functions before the credential. Nothing is executed.
+
+  See `DpExchange.Gemini.confirm_clearing_order/3`.
+  """
+  @spec confirm_clearing_order(term(), term(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def confirm_clearing_order(clearing_id, request, opts \\ []) do
+    with_injection(fn ->
+      with {:ok, _id} <- Private.validate_clearing_id(clearing_id),
+           :ok <- Private.validate_clearing_order(request),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok, %{"result" => "confirmed"}}
+      end
+    end)
+  end
+
+  @clearing_orders [
+    %{
+      "clearing_id" => "9LVQE9X5",
+      "counterparty_id" => "YZ43LX81",
+      "symbol" => "BTCEUR",
+      "side" => "sell",
+      "price" => 2,
+      "status" => "AwaitTargetConfirm",
+      "submission" => 1_641_790_800_020,
+      "expiration" => 1_641_963_600_000
+    },
+    %{
+      "clearing_id" => "2MYR07XP",
+      "order_id" => "trade1SrcOrderId",
+      "counterparty_id" => "KQ4P3XWE",
+      "broker_id" => "WV4V1DGN",
+      "symbol" => "BTCEUR",
+      "side" => "buy",
+      "price" => 1,
+      "status" => "AwaitSourceConfirm",
+      "submission" => 1_641_790_800_016,
+      "expiration" => 1_642_222_800_000
+    }
+  ]
+
+  @doc """
+  Fixed clearing orders, narrowed by `:symbol` and `:side` as the venue's filters are. Each
+  window needs both bounds, checked by the real function before the credential.
+
+  See `DpExchange.Gemini.list_clearing_orders/1`.
+  """
+  @spec list_clearing_orders(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_orders(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_clearing_list(:orders, opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        symbol = clearing_filter(Keyword.get(opts, :symbol), &SymbolFormat.to_exchange_symbol/1)
+        side = clearing_filter(Keyword.get(opts, :side), &to_string/1)
+
+        {:ok,
+         Enum.filter(@clearing_orders, fn row ->
+           matches?(row["symbol"], symbol, &String.upcase/1) and matches?(row["side"], side, & &1)
+         end)}
+      end
+    end)
+  end
+
+  defp clearing_filter(nil, _convert), do: nil
+  defp clearing_filter(value, convert), do: convert.(value)
+
+  defp matches?(_value, nil, _normalise), do: true
+  defp matches?(value, wanted, normalise), do: normalise.(value) == normalise.(wanted)
+
+  @doc """
+  Fixed broker clearing orders. The expiration window needs both bounds, checked by the real
+  function before the credential.
+
+  See `DpExchange.Gemini.list_clearing_brokers/1`.
+  """
+  @spec list_clearing_brokers(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_brokers(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_clearing_list(:brokers, opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        {:ok,
+         [
+           %{
+             "clearing_id" => "9LVQ98X5",
+             "source_counterparty_id" => "R54L3DG1",
+             "source_order_id" => "trade1SrcOrderId",
+             "target_counterparty_id" => "KQ4P3XWE",
+             "target_order_id" => "trade1TgtOrderId",
+             "symbol" => "BTCEUR",
+             "source_side" => "buy",
+             "price" => 1,
+             "quantity" => 50,
+             "status" => "AwaitSourceConfirm",
+             "submission" => 1_641_790_800_016,
+             "expiration" => 1_642_222_800_000
+           }
+         ]}
+      end
+    end)
+  end
+
+  @doc """
+  Fixed completed clearing trades; `:limit` takes the first rows.
+
+  See `DpExchange.Gemini.list_clearing_trades/1`.
+  """
+  @spec list_clearing_trades(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_clearing_trades(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_history_opts(:clearing_trades, opts),
+           :ok <- authenticated(fake_credentials(opts), opts) do
+        trade = %{
+          "sourceAccount" => "primary",
+          "targetAccount" => "primary",
+          "pair" => "BTCUSD",
+          "sourceSide" => "buy",
+          "price" => "1",
+          "quantity" => "1000",
+          "clearingId" => "41M23L5Q",
+          "status" => "Settled",
+          "expirationTimeMs" => 1_662_567_706_120,
+          "createdMs" => 1_662_481_306_139,
+          "lastUpdatedMs" => 1_662_481_561_668,
+          "hasBroker" => false,
+          "wasNotified" => false
+        }
+
+        trades = [trade, %{trade | "clearingId" => "0EMOYLJ5"}]
+        {:ok, take_rows(trades, Keyword.get(opts, :limit))}
+      end
+    end)
+  end
+
+  @fake_subaccounts [
+    %{
+      "name" => "Primary",
+      "account" => "primary",
+      "type" => "exchange",
+      "counterparty_id" => "EMONNYXH",
+      "created" => 1_495_127_793_000,
+      "status" => "open"
+    },
+    %{
+      "name" => "My Custody Account",
+      "account" => "my-custody-account",
+      "type" => "custody",
+      "counterparty_id" => nil,
+      "created" => 1_565_970_772_000,
+      "status" => "open"
+    }
+  ]
+
+  @doc """
+  Fixed subaccounts. `:limit` takes the first rows and `:since` keeps those created on or
+  before it, which is how the venue reads that name here.
+
+  See `DpExchange.Gemini.list_accounts/1`.
+  """
+  @spec list_accounts(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_accounts(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_history_opts(:accounts, opts),
+           :ok <- authenticated_group(fake_credentials(opts), opts) do
+        since = epoch_bound(Keyword.get(opts, :since))
+
+        rows = Enum.filter(@fake_subaccounts, &(since == nil or &1["created"] <= since))
+        {:ok, take_rows(rows, Keyword.get(opts, :limit))}
+      end
+    end)
+  end
+
+  @doc """
+  A fixed token refresh. The client id, refresh token, client secret and `:auth_url` are
+  validated by the real function first. The answer carries a NEW refresh token, as the venue's
+  does, so a consumer that keeps the old one fails here as it would there. Nothing is sent.
+
+  See `DpExchange.Gemini.refresh_access_token/3`.
+  """
+  @spec refresh_access_token(term(), term(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def refresh_access_token(client_id, refresh_token, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Private.validate_refresh_request(client_id, refresh_token, opts) do
+        {:ok,
+         %{
+           "access_token" => "fake-access-token",
+           "refresh_token" => "fake-rotated-refresh-token",
+           "token_type" => "Bearer",
+           "expires_in" => 3600
+         }}
+      end
+    end)
+  end
+
+  @doc """
+  A fixed token revocation. Like the real call, it is refused as `:oauth_token_required`
+  unless the credentials carry a non-blank `access_token`, and it authenticates as OAuth.
+
+  See `DpExchange.Gemini.revoke_access_token/1`.
+  """
+  @spec revoke_access_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def revoke_access_token(opts \\ []) do
+    with_injection(fn ->
+      case fake_credentials(opts) do
+        %{access_token: token} = credentials when is_binary(token) and token != "" ->
+          with :ok <- authenticated(credentials, Keyword.put(opts, :auth_scheme, :oauth)) do
+            {:ok,
+             %{
+               "message" =>
+                 "OAuth tokens and codes have been revoked for " <>
+                   "00000000-0000-0000-0000-000000000000 on your account."
+             }}
+          end
+
+        _other ->
+          {:error, :oauth_token_required}
+      end
+    end)
+  end
 end

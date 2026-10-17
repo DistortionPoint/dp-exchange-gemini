@@ -19,7 +19,7 @@ same facade every venue in the family exposes.
 
 ## What this package covers
 
-88 callbacks, of which **64 are declared `:experimental`** and 24 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
+89 callbacks (every `@callback` in `DpExchange.Core.Venue`, the four `@optional_callbacks` included, all of which this package defines), of which **65 are declared `:experimental`** and 24 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
 
 Placing an order: `place_order(credentials, %{symbol: "BTC-USD", side: :buy, order_type: :limit, time_in_force: :gtc, quantity: Decimal.new("1"), price: Decimal.new("100")}, opts)`. Nothing is defaulted, an unknown request key is refused, and a placement that may have reached the venue is `{:error, {:order_unconfirmed, client_order_id_or_nil, reason}}` - reconcile before placing again. See `usage-rules.md`.
 

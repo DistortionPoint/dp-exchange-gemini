@@ -286,7 +286,7 @@ defmodule DpExchange.Gemini.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.{Capabilities, Config, Fanout, Notice}
+  alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Gemini.{Socket, SymbolFormat}
 
@@ -1229,6 +1229,8 @@ defmodule DpExchange.Gemini.Feed do
   # being narrowed symbol-by-symbol the way `drop/2` narrows it for an ordinary
   # unsubscribe.
   defp isolate_crashed_socket(state, reason) do
+    report_link_down_metric(state, reason)
+
     state = %{
       state
       | socket: nil,
@@ -1258,6 +1260,19 @@ defmodule DpExchange.Gemini.Feed do
       0 -> resubscribe(state)
       delay -> schedule_redial(state, delay)
     end
+  end
+
+  # **A crashed socket closes the `[:dp_exchange, :link, :up]` the socket opened.** Its
+  # `handle_connect/2` emits `link_up`, and its `handle_disconnect/2` emits `link_down`, but a
+  # socket that CRASHES (a callback raising, a kill) runs no `handle_disconnect/2`, so a
+  # metrics consumer's link gauge stayed "up" for a connection that no longer existed, while
+  # the `:link_down` notice (above) did fire. Emitted here, from the one place the crash is
+  # seen. Not when the socket already reported its own drop (`link_down?`, set by the
+  # `:link_down` notice that precedes the `EXIT`), so one loss is one `link_down`.
+  defp report_link_down_metric(state, reason) do
+    if Map.get(state, :link_down?, false),
+      do: :ok,
+      else: Telemetry.link_down(:gemini, reason_text(reason))
   end
 
   # One redial timer at a time, identified by a ref the message carries. See the

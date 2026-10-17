@@ -1024,6 +1024,10 @@ Four things to know before you build on them:
   polling route has no frame, so there is no byte count that means what a socket's does.
   Treat a missing `:bytes` as "this route cannot measure that", not as no data. This
   package's socket does report it, per frame.
+- **Every `[:dp_exchange, :link, :up]` is closed by a `[:dp_exchange, :link, :down]`**,
+  including when the socket process crashes rather than disconnecting (the feed emits it
+  from the crash, once, with the bounded reason text). A link gauge built on the pair does
+  not stay "up" for a connection that is gone.
 - **Reconnect delay is the delay actually waited.** The `delay_ms` of the reconnect-attempt
   event is the jittered wait (up to a quarter shorter than the 1s-doubling-to-30s ladder),
   not the ladder's rung, so two sockets retrying together report different values.

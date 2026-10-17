@@ -20,6 +20,41 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Requires `dp_exchange_core ~> 0.3.99`: its tightened conformance groups 12 and 38 run
+  against this package's fake and pass.
+
+### Fixed
+
+- A socket process that crashed (rather than disconnecting) left its
+  `[:dp_exchange, :link, :up]` open: only `Socket.handle_disconnect/2` emitted
+  `[:dp_exchange, :link, :down]`, and a crash runs no `handle_disconnect/2`, so a metrics
+  consumer's link gauge stayed up for a dead connection while the `:link_down` notice fired.
+  `Feed` now emits `link_down` (bounded reason text) when it sees the socket's `EXIT`, once,
+  and not when the socket already reported its own drop.
+- `Fake` lacked every public `DpExchange.Gemini` function that is not a `Venue` callback, so a
+  consumer's test got `UndefinedFunctionError` for a call that works against the real adapter.
+  Added, at the facade's arities, each refusing with the real call's own validation in the real
+  order (new `Private.validate_*` functions), then the credential, then a fixed answer in the
+  vendor's response shape: `live?/1`, `venue_does_not_serve/0`, `seed_nonce/1` (process-local;
+  never moves the node-wide counter), `next_funding_timestamp/2`, `get_account_margin/1`,
+  `list_funding_payments/1`, `funding_payment_report/1`, `funding_amount_report/2`,
+  `funding_payment_report_file/1`, `get_margin_account/1`, `get_margin_rates/1`,
+  `preview_margin_order/2`, `create_clearing_order/2`, `create_broker_clearing_order/2`,
+  `get_clearing_order/2`, `cancel_clearing_order/2`, `confirm_clearing_order/3`,
+  `list_clearing_orders/1`, `list_clearing_brokers/1`, `list_clearing_trades/1`,
+  `list_accounts/1`, `refresh_access_token/3` (rotates the refresh token) and
+  `revoke_access_token/1`. A test asserts the facade's exports minus the Fake's are empty.
+- README: the callback count was 88 with 64 experimental; `DpExchange.Core.Venue` defines 89
+  `@callback`s (the four `@optional_callbacks` included, all defined here), 24 unsupported, so
+  65 experimental.
+
+### Added
+
+- `Auth.check_seed/1` and `Private.validate_*` request validators (internal), so the Fake
+  refuses exactly as the real calls do.
+
 ## [0.2.146] - 2026-10-16
 
 ### Changed
