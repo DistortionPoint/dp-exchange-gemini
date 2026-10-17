@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.147] - 2026-10-17
+
 ### Dependencies
 
 - Requires `dp_exchange_core ~> 0.3.99`: its tightened conformance groups 12 and 38 run
