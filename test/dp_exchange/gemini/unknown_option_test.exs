@@ -331,6 +331,42 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
     end
   end
 
+  describe "an OAuth call cannot carry :account" do
+    @oauth %{access_token: "oauth-token-not-real"}
+    @unsupported {:error, {:unsupported_option, :account}}
+
+    test "a signed POST and a signed GET refuse it before any request" do
+      exploding = fn _conn -> raise "must not reach the venue" end
+      opts = [account: "sub", plug: exploding, retry_attempts: 0]
+
+      assert Gemini.get_balances(@oauth, opts) == @unsupported
+      assert Gemini.list_networks("BTC", [{:credentials, @oauth} | opts]) == @unsupported
+    end
+
+    test "the Fake refuses it the same way, and answers without :account" do
+      assert Fake.get_balances(@oauth, account: "sub") == @unsupported
+      assert Fake.list_networks("BTC", credentials: @oauth, account: "sub") == @unsupported
+      refute match?({:error, {:unsupported_option, _}}, Fake.get_balances(@oauth, []))
+    end
+
+    test "an API key still carries :account" do
+      result = Fake.get_balances(@credentials, account: "sub")
+      refute match?({:error, {:unsupported_option, _}}, result)
+    end
+  end
+
+  describe "revoke_access_token reads no option of its own" do
+    test "a stray :account is refused, on the facade and on the Fake" do
+      opts = [credentials: %{access_token: "token"}, account: "sub"]
+      expected = {:error, {:unknown_option, :account}}
+
+      assert Gemini.revoke_access_token(opts) == expected
+      assert Fake.revoke_access_token(opts) == expected
+      transport = DpExchange.Core.Options.transport_options()
+      assert OptionKeys.allowed(:revoke_access_token) == transport
+    end
+  end
+
   describe "the conformance probe" do
     test "get_price, get_top_of_book, get_symbols, get_order_book and get_trades on the Fake" do
       probe = DpExchange.Core.AdapterContract.unknown_option_probe()

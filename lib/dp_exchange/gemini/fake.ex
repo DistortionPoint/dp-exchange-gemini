@@ -1098,7 +1098,8 @@ defmodule DpExchange.Gemini.Fake do
   # 2026-09-06 real/fake parity sweep — `fake_parity_test.exs` pins this fake's answers
   # against the real path's for these cases.
   defp authenticated(credentials, opts) do
-    with :ok <- authenticated_group(credentials, opts),
+    with :ok <- Private.account_scheme_refusal(credentials, opts),
+         :ok <- authenticated_group(credentials, opts),
          do: account_named(credentials, opts)
   end
 

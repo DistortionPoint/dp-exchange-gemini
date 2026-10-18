@@ -1215,7 +1215,8 @@ defmodule DpExchange.Gemini.Private do
   # `wrap` is applied to the per-attempt signer, so a caller that must know how many attempts
   # actually left the process (`withdraw/6`, which retries a keyed write) can count them.
   defp post_signed(path, params, credentials, opts, subject, wrap) do
-    with :ok <- https_only(base_url(opts)) do
+    with :ok <- https_only(base_url(opts)),
+         :ok <- account_scheme(auth_scheme(credentials, opts), opts) do
       once_more_on_reordered_nonce(
         fn -> post_signed_checked(path, params, credentials, opts, subject, wrap) end,
         opts
@@ -1474,12 +1475,32 @@ defmodule DpExchange.Gemini.Private do
   # rather than a parameter one. One string, used in both places, is what keeps them equal.
   defp signed_get(path, credentials, opts) do
     with :ok <- https_only(base_url(opts)),
+         :ok <- account_scheme(auth_scheme(credentials, opts), opts),
          do:
            once_more_on_reordered_nonce(
              fn -> signed_get_checked(path, credentials, opts) end,
              opts
            )
   end
+
+  # **`:account` is refused, not dropped, under OAuth.** An OAuth call signs nothing and sends
+  # no body (`Auth.headers/5`), so the subaccount a caller named could never reach the venue:
+  # the token's own account would answer, and every value would look right for the wrong
+  # account. Refused before anything is signed or sent, where the scheme is known.
+  defp account_scheme(:oauth, opts) do
+    if Keyword.get(opts, :account) == nil,
+      do: :ok,
+      else: {:error, {:unsupported_option, :account}}
+  end
+
+  defp account_scheme(_api_key_or_other, _opts), do: :ok
+
+  @doc false
+  # Exposed so `DpExchange.Gemini.Fake` refuses with this function, as it does for a scheme.
+  @spec account_scheme_refusal(term(), keyword()) ::
+          :ok | {:error, {:unsupported_option, :account}}
+  def account_scheme_refusal(credentials, opts),
+    do: account_scheme(auth_scheme(credentials, opts), opts)
 
   defp signed_get_checked(path, credentials, opts) do
     scheme = auth_scheme(credentials, opts)
@@ -1510,6 +1531,7 @@ defmodule DpExchange.Gemini.Private do
 
   defp signed_get_bytes(path, credentials, opts) do
     with :ok <- https_only(base_url(opts)),
+         :ok <- account_scheme(auth_scheme(credentials, opts), opts),
          do:
            once_more_on_reordered_nonce(
              fn -> signed_get_bytes_checked(path, credentials, opts) end,

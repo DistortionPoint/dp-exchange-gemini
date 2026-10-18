@@ -20,6 +20,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).
+
+### Fixed
+
+- `DpExchange.Gemini.child_spec/1` derives its default child id from the environment
+  (`DpExchange.Gemini` for production, `DpExchange.Gemini.Sandbox` for sandbox). The tree the
+  `Supervisor` moduledoc shows, production and sandbox side by side with nothing named,
+  carried two children with one id, which the parent supervisor refuses to start. An explicit
+  `:name` still wins.
+- A signed call made with OAuth credentials and given `:account` answers
+  `{:error, {:unsupported_option, :account}}` before anything is sent (the real adapter and
+  `Fake`). An OAuth call signs nothing and carries no body, so the option was accepted and
+  dropped, and the token's own account answered for the account the caller named.
+- `revoke_access_token/1` no longer lists `:account` among its options. The call is OAuth-only,
+  an OAuth call signs nothing and sends no body, so the key was accepted and never read: a
+  stray `:account` there is now `{:error, {:unknown_option, :account}}`, like any other key
+  the function does not use. `usage-rules.md`'s option table is corrected to match.
+
 ## [0.2.148] - 2026-10-17
 
 ### Fixed

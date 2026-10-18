@@ -109,6 +109,13 @@ defmodule DpExchange.Gemini.SupervisorTest do
       assert %{id: DpExchange.Gemini} = DpExchange.Gemini.child_spec([])
     end
 
+    test "child_spec/1 gives production and sandbox distinct default ids" do
+      assert %{id: DpExchange.Gemini} = DpExchange.Gemini.child_spec(environment: :production)
+
+      assert %{id: DpExchange.Gemini.Sandbox} =
+               DpExchange.Gemini.child_spec(environment: :sandbox)
+    end
+
     test "child_spec/1 declares :supervisor, not OTP's default :worker shutdown" do
       # `start_link/1` starts a `Supervisor`. Without `type: :supervisor` OTP defaults
       # `:shutdown` to 5_000ms instead of `:infinity`, giving the whole nested tree only

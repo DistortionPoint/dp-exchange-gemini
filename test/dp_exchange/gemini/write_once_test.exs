@@ -159,7 +159,10 @@ defmodule DpExchange.Gemini.WriteOnceTest do
   end
 
   test "a rename and a revoke are sent once" do
-    Private.rename_account(@oauth, opts(account: "old", name: "New"))
+    # An API key: `:account` names the account to rename, which an OAuth call cannot carry
+    # (it is refused as `{:unsupported_option, :account}`).
+    api_key = %{api_key: "account-k", api_secret: "s"}
+    Private.rename_account(api_key, opts(account: "old", name: "New"))
     assert ["/v1/account/rename"] = requests()
 
     Private.revoke_access_token(@oauth, opts([]))

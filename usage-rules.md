@@ -1166,6 +1166,11 @@ first. `transfer_internal/4` checks its `[from:, to:, client_transfer_id:]` term
 :retry_delay :max_retry_after_s :max_body_bytes :log_requests`. A signed call also accepts
 `:nonce_mode :auth_scheme :account`; `create_account/1`, `rename_account/3`,
 `list_accounts/1` and `get_roles/1` act on the key or the group and do not accept `:account`.
+**`:account` with OAuth credentials is `{:error, {:unsupported_option, :account}}`**, on every
+signed call, before anything is sent: an OAuth call signs nothing and carries no body, so the
+named subaccount could not reach the venue and the token's own account would answer instead.
+`:account` is for API-key (master key) calls. `rename_account/3` included: its `:account`
+(the account to rename) cannot be sent under OAuth either.
 
 **The rest, per function** (the single source is `DpExchange.Gemini.OptionKeys`, which
 `allowed/1` answers from):
@@ -1211,7 +1216,7 @@ first. `transfer_internal/4` checks its `[from:, to:, client_transfer_id:]` term
 | `rename_account/3` | `:shortname` (`id` and `name` are arguments) |
 | `list_accounts/1` | `:limit`, `:since` |
 | `refresh_access_token/3` | `:client_secret`, `:auth_url` |
-| `revoke_access_token/1` | `:account` |
+| `revoke_access_token/1` | none (the token names the account; a stray `:account` is refused) |
 
 ## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded
 

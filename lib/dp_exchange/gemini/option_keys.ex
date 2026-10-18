@@ -156,7 +156,9 @@ defmodule DpExchange.Gemini.OptionKeys do
     list_accounts: [:limit, :since | @group_signed],
     get_roles: @group_signed,
     refresh_access_token: [:client_secret, :auth_url],
-    revoke_access_token: [:account]
+    # An OAuth call signs nothing and sends no body (`Auth.headers/5`), and the token already
+    # names the account, so no key of its own is read here.
+    revoke_access_token: []
   }
 
   # The keyword terms some functions take as a positional argument. They are checked against

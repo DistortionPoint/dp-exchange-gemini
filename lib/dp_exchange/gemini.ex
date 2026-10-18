@@ -225,7 +225,9 @@ defmodule DpExchange.Gemini do
   The supervisor child spec for this venue, so `{DpExchange.Gemini, opts}` works in your tree.
 
   Wraps any credentials in `opts` before the spec is built, so they never appear in a
-  supervisor's crash report. Recognised options: `:environment`, `:name`. The child is
+  supervisor's crash report. Recognised options: `:environment`, `:name`. The child id is
+  `:name` when given, else `DpExchange.Gemini` (production) or `DpExchange.Gemini.Sandbox`
+  (sandbox), so both environments can sit in one tree unnamed. The child is
   declared `type: :supervisor`. See `c:DpExchange.Core.Venue.child_spec/1` for the contract.
   """
   @impl true
@@ -246,11 +248,23 @@ defmodule DpExchange.Gemini do
     # shut down gracefully before `:kill`, instead of letting it unwind on its own terms.
     # Found by a cross-package audit comparing `child_spec/1` across all five venues;
     # `dp_exchange_schwab` was the only one that already declared this.
+    #
+    # The default id is environment-derived like every default name (`Supervisor`): the
+    # documented `[{DpExchange.Gemini, environment: :production}, {DpExchange.Gemini,
+    # environment: :sandbox}]` tree otherwise carried two children with one id, which the
+    # parent supervisor refuses to start.
     %{
-      id: Keyword.get(opts, :name, __MODULE__),
+      id: Keyword.get_lazy(opts, :name, fn -> default_child_id(opts) end),
       start: {__MODULE__, :start_link, [opts]},
       type: :supervisor
     }
+  end
+
+  defp default_child_id(opts) do
+    case Environment.resolve(opts) do
+      :production -> __MODULE__
+      :sandbox -> DpExchange.Gemini.Sandbox
+    end
   end
 
   @doc """
