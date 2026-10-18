@@ -69,10 +69,10 @@ defmodule DpExchange.Gemini.WriteOnceTest do
   test "an internal transfer with an asset or amount that is not real is never sent" do
     accounts = [from: "a", to: "b"]
 
-    assert {:error, {:non_positive_amount, :amount, 0}} =
+    assert {:error, {:invalid_amount, 0}} =
              Private.transfer_internal("USD", 0, accounts, @oauth, opts([]))
 
-    assert {:error, {:invalid_decimal, :amount, "abc"}} =
+    assert {:error, {:invalid_amount, "abc"}} =
              Private.transfer_internal("USD", "abc", accounts, @oauth, opts([]))
 
     assert {:error, {:invalid_asset, nil}} =
@@ -83,11 +83,14 @@ defmodule DpExchange.Gemini.WriteOnceTest do
 
   test "a staking write with an asset or amount that is not real is never sent" do
     for write <- [&Private.stake/4, &Private.unstake/4] do
-      assert {:error, {:non_positive_amount, :amount, _zero}} =
-               write.("ETH", Decimal.new(0), @oauth, opts(provider_id: "p"))
+      zero = Decimal.new(0)
+      nan = Decimal.new("NaN")
 
-      assert {:error, {:invalid_decimal, :amount, _nan}} =
-               write.("ETH", Decimal.new("NaN"), @oauth, opts(provider_id: "p"))
+      assert {:error, {:invalid_amount, ^zero}} =
+               write.("ETH", zero, @oauth, opts(provider_id: "p"))
+
+      assert {:error, {:invalid_amount, ^nan}} =
+               write.("ETH", nan, @oauth, opts(provider_id: "p"))
 
       assert {:error, {:invalid_asset, nil}} =
                write.(nil, Decimal.new(1), @oauth, opts(provider_id: "p"))
@@ -121,8 +124,8 @@ defmodule DpExchange.Gemini.WriteOnceTest do
     base = %{symbol: "BTC-USD", side: :buy, type: "limit", amount: "1", price: "100"}
 
     for {terms, expected} <- [
-          {%{amount: 0}, {:non_positive_amount, :amount, 0}},
-          {%{amount: "abc"}, {:invalid_decimal, :amount, "abc"}},
+          {%{amount: 0}, {:invalid_amount, 0}},
+          {%{amount: "abc"}, {:invalid_amount, "abc"}},
           {%{price: "-1"}, {:non_positive_amount, :price, "-1"}}
         ] do
       assert {:error, ^expected} =

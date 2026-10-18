@@ -720,10 +720,8 @@ defmodule DpExchange.Gemini.FakeTest do
       opts = [credentials: @credentials]
 
       for bad <- [0, -1, "abc", Decimal.new("NaN"), nil] do
-        assert {:error, {reason, :amount, _value}} =
+        assert {:error, {:invalid_amount, ^bad}} =
                  Fake.transfer_internal("BTC", bad, accounts, opts)
-
-        assert reason in [:non_positive_amount, :invalid_decimal]
       end
 
       assert {:error, {:invalid_asset, nil}} = Fake.transfer_internal(nil, 1, accounts, opts)
@@ -736,8 +734,8 @@ defmodule DpExchange.Gemini.FakeTest do
       opts = [provider_id: "p", credentials: @credentials]
 
       for write <- [&Fake.stake/3, &Fake.unstake/3] do
-        assert {:error, {:non_positive_amount, :amount, _value}} =
-                 write.("ETH", Decimal.new(0), opts)
+        zero = Decimal.new(0)
+        assert {:error, {:invalid_amount, ^zero}} = write.("ETH", zero, opts)
 
         assert {:error, {:invalid_asset, nil}} = write.(nil, Decimal.new(1), opts)
         assert {:ok, _transaction} = write.("eth", Decimal.new(1), opts)

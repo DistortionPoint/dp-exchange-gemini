@@ -629,7 +629,21 @@ defmodule DpExchange.Gemini.Private do
   # refusal. A float is taken through its shortest round-trip representation, which is what
   # its author typed. Zero and negatives are `:non_positive_amount`: no order, transfer or
   # conversion this package makes has a meaning at or below zero.
-  defp wire_positive(value, field) do
+  #
+  # **The money `:amount` of a write is `{:invalid_amount, value}` for every bad value (W4)**: a
+  # float, zero, a negative, NaN, Infinity, a word. One tag, the value as given, so a caller
+  # matches one shape whichever way the amount is wrong. Other fields (`:price`, `:fee`, ...)
+  # keep their own tags.
+  defp wire_positive(value, :amount) do
+    case wire_positive_field(value, :amount) do
+      {:ok, wire} -> {:ok, wire}
+      {:error, _detail} -> {:error, {:invalid_amount, value}}
+    end
+  end
+
+  defp wire_positive(value, field), do: wire_positive_field(value, field)
+
+  defp wire_positive_field(value, field) do
     with {:ok, number} <- wire_decimal(value, field) do
       if Decimal.positive?(number),
         do: {:ok, Decimal.to_string(number, :normal)},
@@ -2169,8 +2183,9 @@ defmodule DpExchange.Gemini.Private do
   quote" (`rest.yaml`, `/v1/instant/execute`). On a buy the two differ — `totalSpend` is the
   CCY2 amount spent — and passing the spend would be a quantity the quote never held. The
   amount and price must be finite numbers above zero and the fee one that is not negative,
-  else `{:error, {:invalid_decimal, field, value}}`, `{:error, {:non_positive_amount, field,
-  value}}` or `{:error, {:negative_amount, :fee, value}}` before a request is made. A `:side`
+  else `{:error, {:invalid_amount, value}}` (the amount), `{:error, {:invalid_decimal |
+  :non_positive_amount, :price, value}}` or `{:error, {:negative_amount, :fee, value}}` before
+  a request is made. A `:side`
   other than `:buy` / `:sell` is `{:error, {:invalid_side, side}}`.
 
   `opts[:fee]` is required too: the venue
@@ -3110,8 +3125,7 @@ defmodule DpExchange.Gemini.Private do
 
   Before anything is signed, `asset`, `network` and `address` must be non-blank strings
   (`{:error, {:invalid_asset | :invalid_network | :invalid_address, value}}`) and `amount` a
-  finite number above zero (`{:error, {:invalid_decimal | :non_positive_amount, :amount,
-  value}}`). A `:memo` that is not a string or a non-negative whole number is
+  finite number above zero (`{:error, {:invalid_amount, value}}`). A `:memo` that is not a string or a non-negative whole number is
   `{:error, {:invalid_memo, memo}}`. A blank `opts[:client_transfer_id]` is treated as none, and
   one is generated; one that is neither a string nor absent is
   `{:error, {:invalid_option, :client_transfer_id, value}}`, never replaced by a generated key.
@@ -3574,8 +3588,11 @@ defmodule DpExchange.Gemini.Private do
   @spec transfer_internal(String.t(), Decimal.t(), keyword(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def transfer_internal(asset, amount, transfer_opts, credentials, opts) do
-    with {:ok, from, to} <- validate_internal_accounts(transfer_opts),
-         {:ok, currency, wire_amount} <- validate_internal_transfer(asset, amount),
+    # The asset and amount are positional arguments and are checked before the keyword terms
+    # (W4): an amount that is not a positive finite number is `{:invalid_amount, value}`
+    # whatever the terms hold.
+    with {:ok, currency, wire_amount} <- validate_internal_transfer(asset, amount),
+         {:ok, from, to} <- validate_internal_accounts(transfer_opts),
          {:ok, supplied_id} <-
            client_transfer_id(Keyword.get(transfer_opts, :client_transfer_id)) do
       transfer_id = supplied_id || generate_transfer_id()
@@ -3609,11 +3626,11 @@ defmodule DpExchange.Gemini.Private do
   the refusal.
 
   `asset` must be a non-blank string (`{:error, {:invalid_asset, value}}`) and `amount` a
-  finite number above zero (`{:error, {:invalid_decimal | :non_positive_amount, :amount,
-  value}}`). Before this, `String.downcase/1` raised on a non-string asset and any amount,
+  finite number above zero (`{:error, {:invalid_amount, value}}`). Before this,
+  `String.downcase/1` raised on a non-string asset and any amount,
   `"abc"`, zero or a negative included, was signed into an account-to-account transfer.
-  Exposed so `DpExchange.Gemini.Fake` refuses with this function, after the two account
-  names and before the credential.
+  Exposed so `DpExchange.Gemini.Fake` refuses with this function, before the two account
+  names (positional arguments first, W4) and before the credential.
   """
   @spec validate_internal_transfer(term(), term()) ::
           {:ok, String.t(), String.t()} | {:error, term()}
@@ -3627,8 +3644,9 @@ defmodule DpExchange.Gemini.Private do
   @doc """
   The plain-notation string `quote_conversion/4`, `convert/4` and the other money-moving calls
   send for `value`, or the refusal: a `Decimal`, integer or numeric string that is finite and
-  above zero, else `{:error, {:invalid_decimal | :non_positive_amount, field, value}}`. A
-  float is `{:error, {:invalid_amount, value}}` (it has already lost digits).
+  above zero, else `{:error, {:invalid_amount, value}}` when `field` is `:amount`, or
+  `{:error, {:invalid_decimal | :non_positive_amount, field, value}}` for any other field. A
+  float is `{:error, {:invalid_amount, value}}` whatever the field (it has already lost digits).
 
   Exposed so `DpExchange.Gemini.Fake` refuses with this function rather than a second copy.
   """
@@ -3639,7 +3657,7 @@ defmodule DpExchange.Gemini.Private do
   Whether `withdraw/6` would get past its own checks, without sending anything: the asset,
   network and destination must be non-blank strings and the amount a finite number above zero
   (`{:error, {:invalid_asset | :invalid_network | :invalid_address, value}}`,
-  `{:error, {:invalid_decimal | :non_positive_amount, :amount, value}}`), in that order.
+  `{:error, {:invalid_amount, value}}`), in that order.
 
   Exposed so `DpExchange.Gemini.Fake` refuses with this function, after the memo rule and
   before the credential, as the real call does.
@@ -4385,8 +4403,8 @@ defmodule DpExchange.Gemini.Private do
   refusal.
 
   `asset` must be a non-blank string (`{:error, {:invalid_asset, value}}`) and `amount` a
-  finite number above zero (`{:error, {:invalid_decimal | :non_positive_amount, :amount,
-  value}}`). Before this, `String.upcase/1` and `Decimal.to_string/2` raised in the caller on
+  finite number above zero (`{:error, {:invalid_amount, value}}`). Before this,
+  `String.upcase/1` and `Decimal.to_string/2` raised in the caller on
   a non-string asset or a non-`Decimal` amount, and a zero, negative or NaN `Decimal` was
   signed into a staking write. Exposed so `DpExchange.Gemini.Fake` refuses with this function,
   after the provider and before the credential.

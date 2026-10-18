@@ -375,6 +375,7 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
 
     test "check_terms/2 accepts the terms' keys and refuses the transport ones" do
       assert OptionKeys.check_terms(:transfer_internal, from: "a", to: "b") == :ok
+      assert OptionKeys.check_terms(:transfer_internal, credentials: %{}) == :ok
 
       assert OptionKeys.check_terms(:transfer_internal, plug: nil) ==
                {:error, {:unknown_option, :plug}}

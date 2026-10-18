@@ -203,7 +203,7 @@ defmodule DpExchange.Gemini.UnboundedDecimalTest do
     test "a Decimal with a huge exponent is refused before it is written out" do
       huge = %Decimal{sign: 1, coef: 1, exp: 999_999_999}
 
-      assert {:error, {:invalid_decimal, :amount, ^huge}} =
+      assert {:error, {:invalid_amount, ^huge}} =
                Private.validate_amount(huge, :amount)
 
       assert {:ok, "0.00000001"} = Private.validate_amount(Decimal.new("1E-8"), :amount)

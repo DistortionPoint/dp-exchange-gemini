@@ -1159,8 +1159,9 @@ room for an error, so they raise `ArgumentError` instead. Requires `dp_exchange_
 
 Order of checks: a market-data symbol first (`{:invalid_symbol, _}`), then the options, then
 the credential. `subscribe/2`, `unsubscribe/2` and `update_symbols/2` check the symbols
-first. `transfer_internal/4` checks its `[from:, to:, client_transfer_id:]` terms, then
-`opts`.
+first. `transfer_internal/4` checks its `[from:, to:, client_transfer_id:]` terms (and
+`:credentials`, which every call may be handed), then `opts`, then the asset and amount
+(`{:invalid_amount, value}`) before the account names inside the terms.
 
 **A call that sends an HTTP request accepts** the transport keys `:credentials :environment
 :base_url :plug :adapter :req_adapter :limiter :rate_limit_blocking :weight :timeout

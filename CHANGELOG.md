@@ -30,6 +30,18 @@ acceptable changelog line.
   `:retry_delay` as `{:error, {:unknown_option, :retry_delay}}`, as they already refused
   `:retry_attempts`: with one attempt there is no retry to wait before, so nothing read it.
   Facade and Fake share the table.
+- The money `:amount` of a write that is not a positive finite number is
+  `{:error, {:invalid_amount, value}}`, the value as given (family rule W4). It was
+  `{:non_positive_amount, :amount, v}` for zero and negatives and `{:invalid_decimal, :amount,
+  v}` for NaN, Infinity and words; floats were already `{:invalid_amount, v}`. Applies to
+  `stake`, `unstake`, `convert`, `withdraw`, `transfer_internal`, and the other calls that
+  take an `:amount` (`quote_conversion`, `commit_conversion`, `estimate_withdrawal_fee`,
+  clearing orders, margin preview) on the real path and the Fake. Other fields (`:price`,
+  `:fee`, `:total_spend`) keep their tags.
+- `transfer_internal` checks the asset and amount before the account names in its terms, on
+  the real path and the Fake (positional arguments first), so a bad amount is
+  `{:invalid_amount, v}` whatever the terms hold. `OptionKeys.check_terms/2` accepts
+  `:credentials` for the terms, as every call may be handed one.
 
 ### Fixed — BREAKING
 
@@ -43,6 +55,9 @@ acceptable changelog line.
 
 ### Tests
 
+- The contract test declares `endpoint_opts:` for `stake`/`unstake` (`provider_id`) and
+  `convert` (`symbol`, `side`) so groups 43, 47 and 48 reach the amount and get a
+  `StakingTransaction`, and `unknown_order_id:` (a numeric id) for group 49.
 - Tightened assertions that passed for any error: the trade-frame decoder tests now name
   `{:invalid_decimal, field, value}` / `:unexpected_frame_shape`, the `commit_conversion`
   sent-once test names `{:write_unconfirmed, "20930", _}`, and the `withdraw` retry-key test

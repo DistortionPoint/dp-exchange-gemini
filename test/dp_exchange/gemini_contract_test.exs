@@ -32,6 +32,21 @@ defmodule DpExchange.GeminiContractTest do
     # `DpExchange.Gemini.Vendor.WebSockex`). The scanning assertions are written for this
     # family's own conventions, so they read `lib/dp_exchange` only, as Webull's do.
     package_root: "lib/dp_exchange",
+    # Groups 43, 47, 48 (W4/W5): the calls whose Fake needs more than the credential to answer.
+    # A staking write needs its provider (checked before the amount, on the real path too); a
+    # conversion names its pair by `symbol`/`side`, else the pair is derived and can be
+    # ambiguous. `transfer_internal/4` needs nothing here: its asset and amount are checked
+    # before the account terms, so group 47 reaches the amount, and group 43 judges a call
+    # only when it succeeds without the probe.
+    endpoint_opts: %{
+      {:stake, 3} => [provider_id: "contract-provider"],
+      {:unstake, 3} => [provider_id: "contract-provider"],
+      {:convert, 4} => [symbol: "GUSD-USD", side: :sell]
+    },
+    # Group 49 (W6): this venue's order ids are digit strings (`Private.order_id_param/1`), so
+    # the default non-numeric id is refused as `:invalid_order_id`, not looked up. In range and
+    # never issued by the Fake.
+    unknown_order_id: "18446744073709551000",
     # Conformance group 42: the REAL `Private.place_order/3` (not the fake) against a plug that
     # answers 503 after the request is sent, so the answer must be `:order_unconfirmed`. The
     # contract's default request (`BTC-USD`, `:limit`, `:gtc`, Decimal amounts) is accepted

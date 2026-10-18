@@ -402,7 +402,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
 
     test "the amount to quote or convert must be a finite number above zero" do
       for bad <- [Decimal.new("NaN"), "abc", "0", Decimal.new("-1"), nil] do
-        assert {:error, {reason, :amount, ^bad}} =
+        assert {:error, {:invalid_amount, ^bad}} =
                  Private.quote_conversion("ETH", "USD", bad,
                    symbol: "ETH-USD",
                    side: :sell,
@@ -411,9 +411,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                    retry_attempts: 0
                  )
 
-        assert reason in [:invalid_decimal, :non_positive_amount]
-
-        assert {:error, {^reason, :amount, ^bad}} =
+        assert {:error, {:invalid_amount, ^bad}} =
                  Private.convert("GUSD", "USD", bad,
                    symbol: "GUSD-USD",
                    side: :sell,
@@ -483,8 +481,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
 
     test "an amount that is not a finite number above zero" do
       for bad <- [Decimal.new("NaN"), Decimal.new("Infinity"), "abc", "0", Decimal.new("-1")] do
-        assert {:error, {reason, :amount, ^bad}} = withdraw(bad, "0xabc", [])
-        assert reason in [:invalid_decimal, :non_positive_amount]
+        assert {:error, {:invalid_amount, ^bad}} = withdraw(bad, "0xabc", [])
       end
     end
 
@@ -563,7 +560,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
     end
 
     test "the amount and path segments are checked before signing" do
-      assert {:error, {:non_positive_amount, :amount, "0"}} =
+      assert {:error, {:invalid_amount, "0"}} =
                Private.estimate_withdrawal_fee("ETH", "ethereum", "0", @credentials,
                  address: "0xabc",
                  plug: exploding(),

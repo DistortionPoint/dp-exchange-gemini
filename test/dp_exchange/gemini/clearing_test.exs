@@ -115,9 +115,9 @@ defmodule DpExchange.Gemini.ClearingTest do
         )
       end
 
-      assert {:error, {:non_positive_amount, :amount, 0}} = refused.(%{@terms | amount: 0})
+      assert {:error, {:invalid_amount, 0}} = refused.(%{@terms | amount: 0})
       assert {:error, {:non_positive_amount, :price, _price}} = refused.(%{@terms | price: "-1"})
-      assert {:error, {:invalid_decimal, :amount, "abc"}} = refused.(%{@terms | amount: "abc"})
+      assert {:error, {:invalid_amount, "abc"}} = refused.(%{@terms | amount: "abc"})
       assert {:error, {:invalid_side, :hold}} = refused.(%{@terms | side: :hold})
     end
 

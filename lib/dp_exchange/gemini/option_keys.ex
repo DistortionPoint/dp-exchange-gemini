@@ -240,8 +240,11 @@ defmodule DpExchange.Gemini.OptionKeys do
 
   # The keyword terms some functions take as a positional argument. They are checked against
   # their own keys alone: the transport options are the call's, not the terms'.
+  #
+  # `:credentials` is the one key every call may be handed (the contract suite hands the same
+  # keyword to the terms and to `opts`), so the terms accept it too; nothing reads it there.
   @terms %{
-    transfer_internal: [:from, :to, :client_transfer_id]
+    transfer_internal: [:from, :to, :client_transfer_id, :credentials]
   }
 
   @typedoc "The refusal `check/2` and `check_terms/2` answer."

@@ -2499,16 +2499,16 @@ defmodule DpExchange.Gemini.Fake do
 
   defp do_transfer_internal(asset, amount, transfer_opts, opts) do
     with_injection(fn ->
-      # `Private.transfer_internal/5` refuses a missing `:from` or `:to` before it signs
-      # anything. The account names are checked by the real function (non-blank strings, and
-      # not the same account), then the asset and amount (the amount written out in full, as
-      # there), then the key, then the credential, as there.
+      # `Private.transfer_internal/5` checks the asset and amount first (the amount written
+      # out in full), then refuses a missing `:from` or `:to` before it signs anything. The
+      # account names are checked by the real function (non-blank strings, and not the same
+      # account), then the key, then the credential, as there.
       #
       # The reply carries the venue's own response fields (`rest.yaml`, "Transfer Between
       # Accounts"): `fromAccount`, `toAccount`, `amount` and a `uuid` unique to the transfer.
       # It no longer echoes the request's `asset`, a field the venue's reply does not have.
-      with {:ok, from, to} <- Private.validate_internal_accounts(transfer_opts),
-           {:ok, _currency, wire_amount} <- Private.validate_internal_transfer(asset, amount),
+      with {:ok, _currency, wire_amount} <- Private.validate_internal_transfer(asset, amount),
+           {:ok, from, to} <- Private.validate_internal_accounts(transfer_opts),
            {:ok, _supplied_id} <-
              Private.client_transfer_id(Keyword.get(transfer_opts, :client_transfer_id)),
            :ok <- authenticated(Keyword.get(opts, :credentials, %{}), opts) do

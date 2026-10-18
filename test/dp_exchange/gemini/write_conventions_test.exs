@@ -229,7 +229,7 @@ defmodule DpExchange.Gemini.WriteConventionsTest do
     end
 
     test "validation and credentials stay plain" do
-      assert {:error, {:non_positive_amount, :amount, 0}} =
+      assert {:error, {:invalid_amount, 0}} =
                Private.withdraw("ETH", "ethereum", 0, "0xabc", @credentials, plug: exploding())
 
       assert {:error, {:missing_credentials, :gemini}} =
