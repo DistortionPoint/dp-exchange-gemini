@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.151] - 2026-10-18
+
 ### Changed — BREAKING
 
 - A call that is always sent exactly once (the `@sent_once` writes: `place_order`,
