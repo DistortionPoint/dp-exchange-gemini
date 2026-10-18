@@ -150,8 +150,10 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
     :confirm_clearing_order
   ]
 
-  defp not_read(:refresh_access_token), do: [:environment, :base_url, :retry_attempts]
-  defp not_read(function) when function in @sent_once, do: [:retry_attempts]
+  defp not_read(:refresh_access_token),
+    do: [:environment, :base_url, :retry_attempts, :retry_delay]
+
+  defp not_read(function) when function in @sent_once, do: [:retry_attempts, :retry_delay]
   defp not_read(_function), do: []
 
   defp call(module, function, args, opts), do: apply(module, function, args ++ [opts])
@@ -342,10 +344,10 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
     test "the keys a request-sending call does not read are named, with the table's reasons" do
       assert OptionKeys.not_read(:get_price) == []
       assert OptionKeys.not_read(:get_balances) == []
-      assert OptionKeys.not_read(:place_order) == [:retry_attempts]
+      assert OptionKeys.not_read(:place_order) == [:retry_attempts, :retry_delay]
 
       assert OptionKeys.not_read(:refresh_access_token) ==
-               [:environment, :base_url, :retry_attempts]
+               [:environment, :base_url, :retry_attempts, :retry_delay]
 
       assert OptionKeys.not_read(:market_status) == []
     end
@@ -424,7 +426,9 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
       assert Gemini.revoke_access_token(opts) == expected
       assert Fake.revoke_access_token(opts) == expected
       transport = DpExchange.Core.Options.transport_options()
-      assert OptionKeys.allowed(:revoke_access_token) == transport -- [:retry_attempts]
+
+      assert OptionKeys.allowed(:revoke_access_token) ==
+               transport -- [:retry_attempts, :retry_delay]
     end
   end
 
@@ -496,8 +500,31 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
                {:error, {:unknown_option, :retry_attempts}}
     end
 
-    test "the OAuth refresh refuses the environment, the base URL and :retry_attempts" do
-      for key <- [:environment, :base_url, :retry_attempts], module <- [Gemini, Fake] do
+    test "a sent-once write refuses :retry_delay on the facade and the Fake" do
+      assert Gemini.place_order(@credentials, @request, retry_delay: 1) ==
+               {:error, {:unknown_option, :retry_delay}}
+
+      assert Fake.place_order(@credentials, @request, retry_delay: 1) ==
+               {:error, {:unknown_option, :retry_delay}}
+
+      assert Gemini.cancel_order(@credentials, "1", retry_delay: 0) ==
+               {:error, {:unknown_option, :retry_delay}}
+
+      assert Fake.cancel_order(@credentials, "1", retry_delay: 0) ==
+               {:error, {:unknown_option, :retry_delay}}
+    end
+
+    test "every sent-once write refuses both retry keys at the table" do
+      for function <- @sent_once, key <- [:retry_attempts, :retry_delay] do
+        assert OptionKeys.check(function, [{key, 1}]) == {:error, {:unknown_option, key}},
+               "#{function} must refuse #{inspect(key)}"
+      end
+    end
+
+    test "the OAuth refresh refuses the environment, the base URL and both retry keys" do
+      keys = [:environment, :base_url, :retry_attempts, :retry_delay]
+
+      for key <- keys, module <- [Gemini, Fake] do
         assert module.refresh_access_token("client", "refresh", [{key, nil}]) ==
                  {:error, {:unknown_option, key}}
       end

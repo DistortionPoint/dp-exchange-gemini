@@ -20,6 +20,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- A call that is always sent exactly once (the `@sent_once` writes: `place_order`,
+  `cancel_order`, `cancel_all_orders`, `commit_conversion`, `convert`, `get_deposit_address`,
+  `add_payment_method`, `transfer_internal`, `request_approved_address`,
+  `remove_approved_address`, `stake`, `unstake`, `create_account`, `rename_account`,
+  `revoke_access_token`, the four clearing writes) and `refresh_access_token/3` now refuse
+  `:retry_delay` as `{:error, {:unknown_option, :retry_delay}}`, as they already refused
+  `:retry_attempts`: with one attempt there is no retry to wait before, so nothing read it.
+  Facade and Fake share the table.
+
 ## [0.2.150] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).

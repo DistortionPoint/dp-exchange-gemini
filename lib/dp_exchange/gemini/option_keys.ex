@@ -22,8 +22,9 @@ defmodule DpExchange.Gemini.OptionKeys do
     * A call that **sends an HTTP request** reads every shared transport key
       (`Rest.request_opts/1` and `Private.request_opts/1` forward them all to
       `Core.HttpClient`), except those `not_read/1` names: the writes that are sent exactly
-      once (`@sent_once`) never honour `:retry_attempts`, and `refresh_access_token/3` posts to
-      `:auth_url`, so it reads neither `:environment` nor `:base_url`, and is sent once. Those
+      once (`@sent_once`) never honour `:retry_attempts` or `:retry_delay`, and
+      `refresh_access_token/3` posts to `:auth_url`, so it reads neither `:environment` nor
+      `:base_url`, and is sent once (no `:retry_attempts`, no `:retry_delay`). Those
       keys are refused as `{:unknown_option, key}`. `:credentials` is accepted everywhere: one
       credential set is handed to every call, and one a call does not need changes no answer.
     * A call that **sends no request** accepts no transport key but `:credentials`:
@@ -90,7 +91,8 @@ defmodule DpExchange.Gemini.OptionKeys do
   ]
 
   # Writes the venue cannot tell a repeat of (`Private.post_once/5`): `:retry_attempts` is
-  # forced to 1 whatever the caller gave, so it is never honoured and is refused here.
+  # forced to 1 whatever the caller gave, so it and `:retry_delay` (the wait before a retry that
+  # never happens) are never honoured and are refused here.
   @sent_once [
     :place_order,
     :cancel_order,
@@ -114,7 +116,8 @@ defmodule DpExchange.Gemini.OptionKeys do
   ]
 
   @sent_once_not_read [
-    retry_attempts: "sent exactly once whatever the caller gives (no idempotency key)"
+    retry_attempts: "sent exactly once whatever the caller gives (no idempotency key)",
+    retry_delay: "there is no retry to wait before: the request is sent exactly once"
   ]
 
   # The OAuth refresh posts to the token host (`:auth_url`, default exchange.gemini.com), not to
@@ -123,7 +126,8 @@ defmodule DpExchange.Gemini.OptionKeys do
   @refresh_not_read [
     environment: "the token host is `:auth_url`; the environment does not select it",
     base_url: "the token host is `:auth_url`, not the REST host",
-    retry_attempts: "a single-use refresh token: sent exactly once"
+    retry_attempts: "a single-use refresh token: sent exactly once",
+    retry_delay: "a single-use refresh token: sent once, so no retry to wait before"
   ]
 
   # The history reads page by the venue's own names; see `Private.validate_history_opts/2`.

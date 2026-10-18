@@ -1171,10 +1171,11 @@ because the call can never honour it: the writes that are **sent exactly once** 
 `cancel_order`, `cancel_all_orders`, `commit_conversion`, `convert`, `get_deposit_address`,
 `add_payment_method`, `transfer_internal`, `request_approved_address`,
 `remove_approved_address`, `stake`, `unstake`, `create_account`, `rename_account`,
-`revoke_access_token` and the four clearing writes) never read `:retry_attempts`, since the
-venue has no idempotency key and a retry could do the money movement twice; and
-`refresh_access_token/3` (a single-use refresh token, sent once) reads neither `:environment`
-nor `:base_url`, since it posts to `:auth_url`, nor `:retry_attempts`.
+`revoke_access_token` and the four clearing writes) never read `:retry_attempts` or
+`:retry_delay` (there is no retry to wait before), since the venue has no idempotency key and a
+retry could do the money movement twice; and `refresh_access_token/3` (a single-use refresh
+token, sent once) reads neither `:environment` nor `:base_url`, since it posts to `:auth_url`,
+nor `:retry_attempts` or `:retry_delay`.
 
 **A call that sends no request accepts no transport key** but `:credentials` (every call may
 be handed one credential set), and `:environment` where it picks the feed or the environment:
@@ -1235,8 +1236,8 @@ named subaccount could not reach the venue and the token's own account would ans
 | `create_account/1` | `:name`, `:type` |
 | `rename_account/3` | `:shortname` (`id` and `name` are arguments) |
 | `list_accounts/1` | `:limit`, `:since` |
-| `refresh_access_token/3` | `:client_secret`, `:auth_url` (no `:environment`, `:base_url` or `:retry_attempts`) |
-| `revoke_access_token/1` | none (the token names the account; a stray `:account` is refused; no `:retry_attempts`) |
+| `refresh_access_token/3` | `:client_secret`, `:auth_url` (no `:environment`, `:base_url`, `:retry_attempts` or `:retry_delay`) |
+| `revoke_access_token/1` | none (the token names the account; a stray `:account` is refused; no `:retry_attempts` or `:retry_delay`) |
 
 ## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded
 
