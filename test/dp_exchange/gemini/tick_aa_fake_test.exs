@@ -85,9 +85,9 @@ defmodule DpExchange.Gemini.TickAAFakeTest do
   end
 
   describe "get_transactions/2 with :since as a string of digits" do
-    test "reads it as nanoseconds, as an integer :since is read" do
-      as_string = [since: "1700000000001000000"]
-      as_integer = [since: 1_700_000_000_001_000_000]
+    test "reads it as milliseconds, as an integer :since is read" do
+      as_string = [since: "1700000000001"]
+      as_integer = [since: 1_700_000_000_001]
 
       assert {:ok, rows} = Fake.get_transactions(@credentials, as_string)
       assert Enum.map(rows, & &1["type"]) == ["Deposit", "Fee"]

@@ -93,8 +93,9 @@ defmodule DpExchange.Gemini.TickAfDecodersTest do
 
     test "an empty string, a huge exponent and a word refuse the print" do
       for bad <- ["", "1e999999999", "-1e999999999", "NaN", "Infinity", "ten"],
-          field <- ["p", "q"] do
-        assert {:error, _reason} = WsDecode.to_trade(%{@trade | field => bad}, "BTC-USD")
+          {field, name} <- [{"p", :price}, {"q", :quantity}] do
+        assert {:error, {:invalid_decimal, ^name, ^bad}} =
+                 WsDecode.to_trade(%{@trade | field => bad}, "BTC-USD")
       end
     end
 

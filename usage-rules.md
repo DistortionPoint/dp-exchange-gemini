@@ -917,8 +917,9 @@ most, with no cursor, so with no `limit_transfers:` this asks for 50 and a full 
 `list_custody_fees/2` follows the same rule with `limit:`.
 
 `get_transactions/2` is the other. `POST /v1/transactions` names its window parameter
-`timestamp_nanos` and takes **nanoseconds**, not the millisecond unit every other
-`:since`-accepting call above converts to. Without `opts[:limit]` this call also follows
+`timestamp_nanos` and takes nanoseconds, but this call's `:since` is **milliseconds** (or a
+`DateTime`) like every other `:since` above, and is converted (x 1_000_000) before it is
+sent; only the clearing reads' explicitly named `:since_nanos` is nanoseconds. Without `opts[:limit]` this call also follows
 the venue's own `continuationToken` across pages itself, at the documented maximum page of
 300, and refuses (`{:error, {:too_many_pages, 50}}` or `{:error, :repeated_continuation_token}`)
 rather than truncate or loop forever — `Core.Venue` types the result `[map()]`, so there is

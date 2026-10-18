@@ -106,7 +106,9 @@ defmodule DpExchange.Gemini.WriteOnceTest do
       credentials: @oauth
     ]
 
-    assert {:error, _transport} = Private.commit_conversion("20930", opts(terms))
+    assert {:error, {:write_unconfirmed, "20930", _reason}} =
+             Private.commit_conversion("20930", opts(terms))
+
     assert [_one] = requests()
   end
 

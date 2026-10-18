@@ -496,8 +496,14 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
       assert Gemini.cancel_order(@credentials, "1", retry_attempts: 3) ==
                {:error, {:unknown_option, :retry_attempts}}
 
-      assert Fake.withdraw("ETH", "ethereum", @amount, "0xabc", retry_attempts: 3) !=
-               {:error, {:unknown_option, :retry_attempts}}
+      # `withdraw` always sends a `clientTransferId` (an idempotency key), so it is retried and
+      # keeps both retry keys: the table accepts them, and the Fake does not refuse them.
+      assert OptionKeys.check(:withdraw, retry_attempts: 3, retry_delay: 1) == :ok
+
+      for key <- [:retry_attempts, :retry_delay] do
+        refute Fake.withdraw("ETH", "ethereum", @amount, "0xabc", [{key, 3}]) ==
+                 {:error, {:unknown_option, key}}
+      end
     end
 
     test "a sent-once write refuses :retry_delay on the facade and the Fake" do

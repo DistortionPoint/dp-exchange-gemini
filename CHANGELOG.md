@@ -31,6 +31,23 @@ acceptable changelog line.
   `:retry_attempts`: with one attempt there is no retry to wait before, so nothing read it.
   Facade and Fake share the table.
 
+### Fixed — BREAKING
+
+- `get_transactions/2` `:since` is milliseconds, like every other `:since` in the package
+  (a `DateTime` is unchanged; an integer or a string of digits is now converted x 1_000_000
+  to the venue's `timestamp_nanos`). It used to forward the integer as given, so a
+  millisecond value was read by the venue as nanoseconds: a 1970 window that silently
+  answered the whole history. A caller who passed nanoseconds must now pass milliseconds.
+  The Fake filters identically. The clearing reads' explicitly named `:since_nanos` is
+  unchanged.
+
+### Tests
+
+- Tightened assertions that passed for any error: the trade-frame decoder tests now name
+  `{:invalid_decimal, field, value}` / `:unexpected_frame_shape`, the `commit_conversion`
+  sent-once test names `{:write_unconfirmed, "20930", _}`, and the `withdraw` retry-key test
+  asserts the table accepts both keys instead of `!=` against one tuple.
+
 ## [0.2.150] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).

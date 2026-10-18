@@ -2579,7 +2579,7 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @doc """
-  Fixed ledger rows that are neither trades nor transfers. `:since` is nanoseconds (or a
+  Fixed ledger rows that are neither trades nor transfers. `:since` is milliseconds (or a
   `DateTime`) and `:limit` takes the first rows.
 
   See `DpExchange.Gemini.get_transactions/2` and
@@ -2596,7 +2596,7 @@ defmodule DpExchange.Gemini.Fake do
       with :ok <- Private.validate_history_opts(:transactions, opts),
            :ok <- authenticated(credentials, opts) do
         # Kinds that are not trades and not transfers, because that is the point of the
-        # endpoint and a fake returning only fills would hide it. `:since` is NANOSECONDS (or
+        # endpoint and a fake returning only fills would hide it. `:since` is milliseconds (or
         # a `DateTime`), as on the real call, and `:limit` takes the first rows.
         {:ok, transactions(opts)}
       end
@@ -2617,16 +2617,12 @@ defmodule DpExchange.Gemini.Fake do
     |> Enum.take(Keyword.get(opts, :limit) || 300)
   end
 
-  # The window bound in milliseconds: a `DateTime`, or the nanoseconds `:since` takes (an
+  # The window bound in milliseconds: a `DateTime`, or the milliseconds `:since` takes (an
   # integer or a string of digits). Absent is before everything.
   defp transactions_since_ms(nil), do: 0
   defp transactions_since_ms(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
-
-  defp transactions_since_ms(nanos) when is_binary(nanos) do
-    transactions_since_ms(String.to_integer(nanos))
-  end
-
-  defp transactions_since_ms(nanos), do: div(nanos, 1_000_000)
+  defp transactions_since_ms(ms) when is_binary(ms), do: String.to_integer(ms)
+  defp transactions_since_ms(ms), do: ms
 
   @doc """
   Fixed balances each carrying a quantity and a separate notional valuation. A blank

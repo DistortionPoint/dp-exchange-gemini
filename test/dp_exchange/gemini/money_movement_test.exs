@@ -532,6 +532,32 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert payload["limit"] == 50
       assert payload["timestamp_nanos"] == DateTime.to_unix(since, :nanosecond)
     end
+
+    test "an integer :since is milliseconds, like every other :since, and goes out as nanos" do
+      me = self()
+
+      for since <- [1_700_000_000_001, "1700000000001"] do
+        assert {:ok, _rows} =
+                 Private.get_transactions(@credentials,
+                   since: since,
+                   limit: 50,
+                   plug: capturing(%{"results" => []}, me),
+                   retry_attempts: 0
+                 )
+
+        assert_receive {:payload, payload, "/v1/transactions"}, 5_000
+        assert payload["timestamp_nanos"] == 1_700_000_000_001_000_000
+      end
+    end
+
+    test "the Fake filters an integer millisecond :since exactly as the request bound reads it" do
+      # The same value the real call turns into 1_700_000_000_001_000_000 nanoseconds keeps
+      # the rows at or after that millisecond, not the whole ledger (a 1970 window).
+      assert {:ok, rows} =
+               DpExchange.Gemini.Fake.get_transactions(@credentials, since: 1_700_000_000_001)
+
+      assert Enum.map(rows, & &1["type"]) == ["Deposit", "Fee"]
+    end
   end
 
   describe "get_transactions/2 follows the venue's continuationToken" do

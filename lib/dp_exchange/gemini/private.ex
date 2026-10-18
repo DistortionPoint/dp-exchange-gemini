@@ -3846,7 +3846,9 @@ defmodule DpExchange.Gemini.Private do
   credits and adjustments alongside deposits and fills. Rows are the venue's own, because
   the kinds do not share a shape.
 
-  `opts[:since]` and `opts[:limit]` narrow it, in the venue's own names.
+  `opts[:since]` and `opts[:limit]` narrow it. `:since` is milliseconds, like every other
+  `:since` here (or a `DateTime`), and is sent as the venue's `timestamp_nanos`, converted
+  to nanoseconds.
 
   **Summing this is not a balance.** `get_balances/2` is the authority; this explains it.
   """
@@ -3861,7 +3863,9 @@ defmodule DpExchange.Gemini.Private do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transactions(credentials, opts) do
     with :ok <- validate_history_opts(:transactions, opts) do
-      params = put_present(%{}, "timestamp_nanos", nanos_param(Keyword.get(opts, :since)))
+      params =
+        put_present(%{}, "timestamp_nanos", transactions_nanos(Keyword.get(opts, :since)))
+
       fetch_transactions(params, Keyword.get(opts, :limit), credentials, opts)
     end
   end
@@ -3941,6 +3945,15 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp transactions_body(_other), do: {:error, :unexpected_response_shape}
+
+  # `/v1/transactions` names its window `timestamp_nanos`, but the caller's `:since` is
+  # milliseconds like every other `:since` here (a `DateTime`, an integer, or a string of
+  # digits). Passed through as given, a millisecond integer was read as nanoseconds: a 1970
+  # window, and the whole history answered for a recent bound.
+  defp transactions_nanos(nil), do: nil
+  defp transactions_nanos(%DateTime{} = at), do: DateTime.to_unix(at, :nanosecond)
+  defp transactions_nanos(ms) when is_integer(ms), do: ms * 1_000_000
+  defp transactions_nanos(ms) when is_binary(ms), do: transactions_nanos(String.to_integer(ms))
 
   defp nanos_param(nil), do: nil
   defp nanos_param(%DateTime{} = at), do: DateTime.to_unix(at, :nanosecond)

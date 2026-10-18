@@ -295,12 +295,11 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
       assert {:ok, [_fee]} = Fake.list_custody_fees(@credentials, limit: 1)
     end
 
-    test "transactions: since is NANOSECONDS, as on the real call" do
+    test "transactions: since is MILLISECONDS, as on the real call" do
       assert {:ok, all} = Fake.get_transactions(@credentials)
       assert length(all) == 3
 
-      nanos = 1_700_000_000_001_000_000
-      assert {:ok, later} = Fake.get_transactions(@credentials, since: nanos)
+      assert {:ok, later} = Fake.get_transactions(@credentials, since: 1_700_000_000_001)
       assert Enum.map(later, & &1["type"]) == ["Deposit", "Fee"]
 
       assert {:ok, [%{"type" => "Trade"}]} = Fake.get_transactions(@credentials, limit: 1)

@@ -330,7 +330,8 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       # had the OTHER half of the pair right — `to_string_or_nil/1` on the id rather than
       # `to_string/1` — and REST had that half wrong. Each file held the fix the other needed.
       for field <- ["p", "q"] do
-        assert {:error, _reason} = WsDecode.to_trade(Map.delete(@trade, field), "BTC-USD"),
+        assert {:error, :unexpected_frame_shape} =
+                 WsDecode.to_trade(Map.delete(@trade, field), "BTC-USD"),
                "a trade frame missing #{field} must be refused"
       end
 
