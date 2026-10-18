@@ -365,7 +365,9 @@ defmodule DpExchange.Gemini.AdminTest do
     end
 
     test "the facade delegates each" do
-      base = [credentials: @credentials, retry_attempts: 0]
+      # No `:retry_attempts`: create/rename/revoke are sent once and refuse that key, and the
+      # plugs here answer 200, so the two reads have nothing to retry.
+      base = [credentials: @credentials]
 
       refusing = base ++ [plug: exploding()]
 

@@ -20,6 +20,36 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).
+
+### Changed — BREAKING
+
+- A shared transport key is accepted only by a call that reads it (tick AK). A call that
+  sends no request (`market_status/1`, `subscribe/2`, `unsubscribe/2`, `update_symbols/2`,
+  `subscribe_notices/1`, `coverage/1`, `coverage_by_kind/1`, `wanted/1`, `live?/1`) used to
+  accept `:timeout`, `:plug`, `:weight` and the rest and read none of them. It now accepts
+  only `:credentials`, plus `:environment` where it picks the feed or the environment, and
+  its own keys; any other transport key is `{:error, {:unknown_option, key}}` on the facade
+  and the Fake (an `ArgumentError` on `coverage/1`, `coverage_by_kind/1`, `wanted/1` and
+  `live?/1`).
+- The writes sent exactly once (`place_order`, `cancel_order`, `cancel_all_orders`,
+  `commit_conversion`, `convert`, `get_deposit_address`, `add_payment_method`,
+  `transfer_internal`, `request_approved_address`, `remove_approved_address`, `stake`,
+  `unstake`, `create_account`, `rename_account`, `revoke_access_token` and the four clearing
+  writes) refuse `:retry_attempts`: it was forced to 1 whatever the caller gave. A caller
+  passing `retry_attempts: 0` to one of them must now drop the option.
+- `refresh_access_token/3` refuses `:environment`, `:base_url` and `:retry_attempts`: it posts
+  to `:auth_url` (so a sandbox `:environment` never moved it) and is sent once.
+- `DpExchange.Gemini.OptionKeys.not_read/1` names, per call, the shared keys it sends a
+  request and still does not read.
+
+- `:adapter`, `:weight`, `:retry_delay`, `:max_retry_after_s` and `:max_body_bytes` were
+  accepted on every REST call and dropped before `Core.HttpClient` (`Rest.request_opts/1` and
+  `Private.request_opts/1` forwarded seven keys). They are forwarded now: `weight: 7` is what
+  the limiter is asked for, and `max_body_bytes: 10` refuses a larger reply as
+  `{:exchange_error, :gemini, {:response_too_large, 10}}`. Both are tested.
+
+
 ## [0.2.149] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).

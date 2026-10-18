@@ -1486,8 +1486,13 @@ defmodule DpExchange.Gemini.Rest do
       :limiter,
       :timeout,
       :retry_attempts,
+      :retry_delay,
+      :max_retry_after_s,
+      :max_body_bytes,
+      :weight,
       :log_requests,
       :plug,
+      :adapter,
       :req_adapter,
       :rate_limit_blocking
     ])

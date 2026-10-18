@@ -224,7 +224,10 @@ defmodule DpExchange.Gemini.TickJReviewTest do
       assert Private.refresh_access_token("client-1", "", opts) ==
                {:error, :refresh_token_required}
 
-      assert Gemini.refresh_access_token("client-1", " ", opts) ==
+      # `retry_attempts` is not read by a refresh (sent once), so the facade refuses it.
+      facade_opts = Keyword.delete(opts, :retry_attempts)
+
+      assert Gemini.refresh_access_token("client-1", " ", facade_opts) ==
                {:error, :refresh_token_required}
     end
   end

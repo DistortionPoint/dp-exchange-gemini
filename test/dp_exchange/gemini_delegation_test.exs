@@ -318,8 +318,7 @@ defmodule DpExchange.GeminiDelegationTest do
       assert {:ok, %DpExchange.Core.Types.Order{id: "1234"}} =
                Gemini.place_order(@credentials, request,
                  plug: responding(@order_body),
-                 limiter: opts[:limiter],
-                 retry_attempts: 0
+                 limiter: opts[:limiter]
                )
     end
 
@@ -327,7 +326,7 @@ defmodule DpExchange.GeminiDelegationTest do
       request = %{symbol: "BTC-USD", side: :buy, quantity: "1", price: "1", order_type: :market}
 
       assert {:error, {:unsupported_order_type, :market}} =
-               Gemini.place_order(@credentials, request, retry_attempts: 0)
+               Gemini.place_order(@credentials, request, [])
     end
 
     test "cancel_order/3", %{opts: opts} do
@@ -336,8 +335,7 @@ defmodule DpExchange.GeminiDelegationTest do
       assert {:ok, %DpExchange.Core.Types.Order{status: :cancelled}} =
                Gemini.cancel_order(@credentials, "1234",
                  plug: responding(body),
-                 limiter: opts[:limiter],
-                 retry_attempts: 0
+                 limiter: opts[:limiter]
                )
     end
 
@@ -457,14 +455,15 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     # The facade points at the supervisor's limiter, which the setup starts. Passing it
-    # through is what makes these exercise the real path rather than a bypass.
+    # through is what makes these exercise the real path rather than a bypass. No
+    # `:retry_attempts`: the writes here are sent once and refuse that key, and every plug
+    # answers 200, so a read has nothing to retry.
     defp money_opts(sup, body, extra \\ []) do
       Keyword.merge(
         [
           credentials: @money_creds,
           plug: money_plug(body),
-          limiter: sup[:limiter],
-          retry_attempts: 0
+          limiter: sup[:limiter]
         ],
         extra
       )

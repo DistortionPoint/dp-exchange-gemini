@@ -464,7 +464,9 @@ defmodule DpExchange.Gemini.ClearingTest do
 
   describe "the facade reaches all eight" do
     test "each clearing function delegates" do
-      creds = [credentials: @credentials, retry_attempts: 0]
+      # No `:retry_attempts`: the four writes are sent once and refuse it, and every plug
+      # here answers 200, so a read has nothing to retry.
+      creds = [credentials: @credentials]
 
       assert {:ok, _order} =
                DpExchange.Gemini.create_clearing_order(

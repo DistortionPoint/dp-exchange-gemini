@@ -103,7 +103,7 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
         assert Private.place_order(@credentials, bad, opts(exploding())) == expected
         assert Private.validate_order(bad) == expected
         assert Fake.place_order(@credentials, bad, []) == expected
-        assert Gemini.place_order(@credentials, bad, opts(exploding())) == expected
+        assert Gemini.place_order(@credentials, bad, plug: exploding()) == expected
       end
     end
 
@@ -352,7 +352,7 @@ defmodule DpExchange.Gemini.TradingConventionsTest do
         assert Private.get_order(@credentials, bad, opts(exploding())) == expected
         assert Private.cancel_order(@credentials, bad, opts(exploding())) == expected
         assert Gemini.get_order(@credentials, bad, opts(exploding())) == expected
-        assert Gemini.cancel_order(%{}, bad, opts(exploding())) == expected
+        assert Gemini.cancel_order(%{}, bad, plug: exploding()) == expected
         assert Fake.get_order(@credentials, bad, []) == expected
         assert Fake.cancel_order(@credentials, bad, []) == expected
       end

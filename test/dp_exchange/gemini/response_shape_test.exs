@@ -67,7 +67,11 @@ defmodule DpExchange.Gemini.ResponseShapeTest do
           {"get_top_of_book/2", fn -> v.get_top_of_book("BTC-USD", base([])) end},
           {"get_funding/2", fn -> v.get_funding("BTCGUSDPERP", base([])) end},
           {"get_contract_stats/2", fn -> v.get_contract_stats("BTCGUSDPERP", base([])) end},
-          {"get_deposit_address/3", fn -> v.get_deposit_address("BTC", "bitcoin", base([])) end}
+          # A sent-once write (it can mint a new address): `:retry_attempts` is refused there.
+          {"get_deposit_address/3",
+           fn ->
+             v.get_deposit_address("BTC", "bitcoin", Keyword.delete(base([]), :retry_attempts))
+           end}
         ] do
       assert {:error, :unexpected_response_shape} = answers_without_raising(label, call)
     end

@@ -1161,9 +1161,29 @@ the credential. `subscribe/2`, `unsubscribe/2` and `update_symbols/2` check the 
 first. `transfer_internal/4` checks its `[from:, to:, client_transfer_id:]` terms, then
 `opts`.
 
-**Every call accepts** the transport keys `:credentials :environment :base_url :plug
-:adapter :req_adapter :limiter :rate_limit_blocking :weight :timeout :retry_attempts
-:retry_delay :max_retry_after_s :max_body_bytes :log_requests`. A signed call also accepts
+**A call that sends an HTTP request accepts** the transport keys `:credentials :environment
+:base_url :plug :adapter :req_adapter :limiter :rate_limit_blocking :weight :timeout
+:retry_attempts :retry_delay :max_retry_after_s :max_body_bytes :log_requests`, and every one
+of them is forwarded to `Core.HttpClient` (a `weight: 7` is what the limiter is asked for; a
+`max_body_bytes:` smaller than the reply is `{:exchange_error, :gemini,
+{:response_too_large, limit}}`). Three exceptions, each refused as `{:unknown_option, key}`
+because the call can never honour it: the writes that are **sent exactly once** (`place_order`,
+`cancel_order`, `cancel_all_orders`, `commit_conversion`, `convert`, `get_deposit_address`,
+`add_payment_method`, `transfer_internal`, `request_approved_address`,
+`remove_approved_address`, `stake`, `unstake`, `create_account`, `rename_account`,
+`revoke_access_token` and the four clearing writes) never read `:retry_attempts`, since the
+venue has no idempotency key and a retry could do the money movement twice; and
+`refresh_access_token/3` (a single-use refresh token, sent once) reads neither `:environment`
+nor `:base_url`, since it posts to `:auth_url`, nor `:retry_attempts`.
+
+**A call that sends no request accepts no transport key** but `:credentials` (every call may
+be handed one credential set), and `:environment` where it picks the feed or the environment:
+`market_status/1` (answers `:open` from nothing) takes `:credentials` only; `subscribe/2`,
+`unsubscribe/2`, `update_symbols/2`, `subscribe_notices/1`, `coverage/1`,
+`coverage_by_kind/1`, `wanted/1` and `live?/1` take `:credentials`, `:environment` and the keys
+in the table below. A `timeout: 5_000` there is `{:error, {:unknown_option, :timeout}}` (a
+raised `ArgumentError` on the plain-value reads), on the facade and on the Fake: nothing would
+read it. A signed call also accepts
 `:nonce_mode :auth_scheme :account`; `create_account/1`, `rename_account/3`,
 `list_accounts/1` and `get_roles/1` act on the key or the group and do not accept `:account`.
 **`:account` with OAuth credentials is `{:error, {:unsupported_option, :account}}`**, on every
@@ -1185,7 +1205,7 @@ named subaccount could not reach the venue and the token's own account would ans
 | `subscribe/2` | `:to`, `:feed`, `:channels` (`:channels` is `{:invalid_option, :channels, _}`) |
 | `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `coverage_by_kind/1`, `wanted/1` | `:feed` |
 | `subscribe_notices/1` | `:to`, `:feed` |
-| `live?/1` | none (`:environment` is a transport key) |
+| `live?/1` | none (and only `:credentials` and `:environment` beyond them) |
 | `get_balances/2`, `get_accounts/2`, `place_order/3`, `cancel_order/3`, `get_order/3`, `test_connection/2`, `get_notional_balances/3`, `get_trade_volume/2`, `get_fx_rate/3`, `list_payment_methods/2`, `transfer_internal/4`, `remove_approved_address/3`, `get_staking_balances/1`, `get_positions/1`, `get_margin_rates/1`, `preview_margin_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`, `confirm_clearing_order/3` | none |
 | `get_fees/2` | `:symbol` |
 | `get_transfers/2` | `:limit_transfers`, `:currency`, `:network`, `:timestamp` |
@@ -1215,8 +1235,8 @@ named subaccount could not reach the venue and the token's own account would ans
 | `create_account/1` | `:name`, `:type` |
 | `rename_account/3` | `:shortname` (`id` and `name` are arguments) |
 | `list_accounts/1` | `:limit`, `:since` |
-| `refresh_access_token/3` | `:client_secret`, `:auth_url` |
-| `revoke_access_token/1` | none (the token names the account; a stray `:account` is refused) |
+| `refresh_access_token/3` | `:client_secret`, `:auth_url` (no `:environment`, `:base_url` or `:retry_attempts`) |
+| `revoke_access_token/1` | none (the token names the account; a stray `:account` is refused; no `:retry_attempts`) |
 
 ## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded
 

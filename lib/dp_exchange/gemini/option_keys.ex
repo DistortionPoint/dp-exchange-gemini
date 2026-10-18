@@ -13,10 +13,27 @@ defmodule DpExchange.Gemini.OptionKeys do
 
   ## What a function accepts
 
-  `DpExchange.Core.Options.transport_options/0` (credentials, environment, base URL, the
-  `Req` test seams, the limiter, timeout and retry knobs) plus the keys in the table below,
-  which are the keys that function, and what it forwards to, actually reads. The table is
-  `@own`; `allowed/1` answers a function's whole list. A function the venue does not serve
+  The keys in the table below (`@own`), which are the keys that function, and what it
+  forwards to, actually reads, plus the shared transport keys it reads
+  (`DpExchange.Core.Options.transport_options/0`: credentials, environment, base URL, the
+  `Req` test seams, the limiter, timeout, weight, body cap and retry knobs). `allowed/1`
+  answers a function's whole list.
+
+    * A call that **sends an HTTP request** reads every shared transport key
+      (`Rest.request_opts/1` and `Private.request_opts/1` forward them all to
+      `Core.HttpClient`), except those `not_read/1` names: the writes that are sent exactly
+      once (`@sent_once`) never honour `:retry_attempts`, and `refresh_access_token/3` posts to
+      `:auth_url`, so it reads neither `:environment` nor `:base_url`, and is sent once. Those
+      keys are refused as `{:unknown_option, key}`. `:credentials` is accepted everywhere: one
+      credential set is handed to every call, and one a call does not need changes no answer.
+    * A call that **sends no request** accepts no transport key but `:credentials`:
+      `market_status/1` (answers `:open` from nothing) and, with `:environment` as well
+      because it picks the feed (or, for `live?/1`, the environment), `subscribe/2`,
+      `unsubscribe/2`, `update_symbols/2`, `subscribe_notices/1`, `coverage/1`,
+      `coverage_by_kind/1`, `wanted/1` and `live?/1`. A `:timeout` or `:weight` there is
+      refused, since nothing would read it.
+
+  A function the venue does not serve
   (`DpExchange.Core.Venue.not_supported/0`) is not in the table: it answers `:not_supported`
   whatever the options.
 
@@ -52,6 +69,62 @@ defmodule DpExchange.Gemini.OptionKeys do
   # The calls that act on the key or the group rather than on one account never send
   # `:account` (`@group_level_paths` in `Private`).
   @group_signed [:nonce_mode, :auth_scheme]
+
+  # The calls that send no HTTP request and address no feed: `market_status/1` answers `:open`
+  # from nothing. They accept `:credentials` (the one key every call may be handed) and their
+  # own keys; every other transport key is refused as `{:unknown_option, key}`.
+  @no_request [:market_status]
+
+  # The calls that send no HTTP request but address a feed (or, for `live?/1`, resolve an
+  # environment): they read `:environment` to pick the feed (`Supervisor.feed_name/1`), plus
+  # their own keys, and no other transport key.
+  @feed_addressing [
+    :subscribe,
+    :unsubscribe,
+    :update_symbols,
+    :subscribe_notices,
+    :coverage,
+    :coverage_by_kind,
+    :wanted,
+    :live?
+  ]
+
+  # Writes the venue cannot tell a repeat of (`Private.post_once/5`): `:retry_attempts` is
+  # forced to 1 whatever the caller gave, so it is never honoured and is refused here.
+  @sent_once [
+    :place_order,
+    :cancel_order,
+    :cancel_all_orders,
+    :commit_conversion,
+    :convert,
+    :get_deposit_address,
+    :add_payment_method,
+    :transfer_internal,
+    :request_approved_address,
+    :remove_approved_address,
+    :stake,
+    :unstake,
+    :create_account,
+    :rename_account,
+    :revoke_access_token,
+    :create_clearing_order,
+    :create_broker_clearing_order,
+    :cancel_clearing_order,
+    :confirm_clearing_order
+  ]
+
+  @sent_once_not_read [
+    retry_attempts: "sent exactly once whatever the caller gives (no idempotency key)"
+  ]
+
+  # The OAuth refresh posts to the token host (`:auth_url`, default exchange.gemini.com), not to
+  # the REST host, so neither `:environment` nor `:base_url` selects anything there; and the
+  # refresh token is single-use, so the request is sent once whatever `:retry_attempts` says.
+  @refresh_not_read [
+    environment: "the token host is `:auth_url`; the environment does not select it",
+    base_url: "the token host is `:auth_url`, not the REST host",
+    retry_attempts: "a single-use refresh token: sent exactly once"
+  ]
 
   # The history reads page by the venue's own names; see `Private.validate_history_opts/2`.
   @own %{
@@ -177,7 +250,30 @@ defmodule DpExchange.Gemini.OptionKeys do
   package and not something a caller can cause.
   """
   @spec allowed(atom()) :: [atom()]
-  def allowed(function), do: Options.transport_options() ++ Map.fetch!(@own, function)
+  def allowed(function) do
+    own = Map.fetch!(@own, function)
+
+    cond do
+      function in @no_request -> [:credentials | own]
+      function in @feed_addressing -> [:credentials, :environment | own]
+      true -> (Options.transport_options() -- not_read(function)) ++ own
+    end
+  end
+
+  @doc """
+  The shared transport keys `function` sends a request and still does not read, each with
+  the reason (see the moduledoc). Empty for a call that reads every one, and for a call that
+  sends no request (which allows no transport key but `:credentials`, see `allowed/1`).
+  """
+  @spec not_read(atom()) :: [atom()]
+  def not_read(function) do
+    cond do
+      function in @no_request or function in @feed_addressing -> []
+      function == :refresh_access_token -> Keyword.keys(@refresh_not_read)
+      function in @sent_once -> Keyword.keys(@sent_once_not_read)
+      true -> []
+    end
+  end
 
   @doc """
   Checks `opts` against what `function` accepts.

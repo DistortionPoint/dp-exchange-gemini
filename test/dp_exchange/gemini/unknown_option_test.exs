@@ -111,6 +111,49 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
   # Plain-value reads: no error channel, so they raise.
   @raising [:coverage, :coverage_by_kind, :wanted, :live?]
 
+  # Calls that send no HTTP request. `market_status/1` reads nothing; the feed calls and
+  # `live?/1` read `:environment` (it picks the feed) and their own keys, and no other
+  # transport key. `:credentials` is accepted on all of them.
+  @no_request [:market_status]
+  @feed_addressing [
+    :subscribe,
+    :unsubscribe,
+    :update_symbols,
+    :subscribe_notices,
+    :coverage,
+    :coverage_by_kind,
+    :wanted,
+    :live?
+  ]
+
+  # The writes sent exactly once whatever the caller gives (`Private.post_once/5`): they
+  # never read `:retry_attempts`.
+  @sent_once [
+    :place_order,
+    :cancel_order,
+    :cancel_all_orders,
+    :commit_conversion,
+    :convert,
+    :get_deposit_address,
+    :add_payment_method,
+    :transfer_internal,
+    :request_approved_address,
+    :remove_approved_address,
+    :stake,
+    :unstake,
+    :create_account,
+    :rename_account,
+    :revoke_access_token,
+    :create_clearing_order,
+    :create_broker_clearing_order,
+    :cancel_clearing_order,
+    :confirm_clearing_order
+  ]
+
+  defp not_read(:refresh_access_token), do: [:environment, :base_url, :retry_attempts]
+  defp not_read(function) when function in @sent_once, do: [:retry_attempts]
+  defp not_read(_function), do: []
+
   defp call(module, function, args, opts), do: apply(module, function, args ++ [opts])
 
   test "every function in this table has a row in OptionKeys" do
@@ -281,12 +324,30 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
   end
 
   describe "the table itself" do
-    test "every function accepts the shared transport keys" do
+    test "a call that sends a request accepts every shared transport key it can honour" do
+      transport = DpExchange.Core.Options.transport_options()
+      no_request = @no_request ++ @feed_addressing
+
       for function <- Map.keys(@positional) ++ @raising,
-          key <- DpExchange.Core.Options.transport_options() do
-        assert OptionKeys.check(function, [{key, nil}]) == :ok,
-               "#{function} must accept the transport key #{inspect(key)}"
+          function not in no_request,
+          key <- transport do
+        expected =
+          if key in not_read(function), do: {:error, {:unknown_option, key}}, else: :ok
+
+        assert OptionKeys.check(function, [{key, nil}]) == expected,
+               "#{function} and the transport key #{inspect(key)}"
       end
+    end
+
+    test "the keys a request-sending call does not read are named, with the table's reasons" do
+      assert OptionKeys.not_read(:get_price) == []
+      assert OptionKeys.not_read(:get_balances) == []
+      assert OptionKeys.not_read(:place_order) == [:retry_attempts]
+
+      assert OptionKeys.not_read(:refresh_access_token) ==
+               [:environment, :base_url, :retry_attempts]
+
+      assert OptionKeys.not_read(:market_status) == []
     end
 
     test "a function accepts the keys it reads and nothing else" do
@@ -363,7 +424,161 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
       assert Gemini.revoke_access_token(opts) == expected
       assert Fake.revoke_access_token(opts) == expected
       transport = DpExchange.Core.Options.transport_options()
-      assert OptionKeys.allowed(:revoke_access_token) == transport
+      assert OptionKeys.allowed(:revoke_access_token) == transport -- [:retry_attempts]
+    end
+  end
+
+  describe "a call that sends no request reads no transport key but its own" do
+    test "timeout: 5_000 is refused on the facade and on the Fake" do
+      calls = [
+        {:subscribe, [["BTC-USD"]]},
+        {:unsubscribe, [["BTC-USD"]]},
+        {:update_symbols, [["BTC-USD"]]},
+        {:subscribe_notices, []},
+        {:market_status, []}
+      ]
+
+      for {function, args} <- calls, module <- [Gemini, Fake] do
+        assert call(module, function, args, timeout: 5_000) ==
+                 {:error, {:unknown_option, :timeout}},
+               "#{inspect(module)}.#{function} reads no :timeout"
+      end
+    end
+
+    test "the plain-value reads raise on a transport key they cannot read" do
+      for module <- [Gemini, Fake], function <- @raising, key <- [:timeout, :weight, :plug] do
+        assert_raise ArgumentError, fn -> call(module, function, [], [{key, 5_000}]) end
+      end
+    end
+
+    test "only :credentials, and :environment where it picks the feed, are accepted" do
+      transport = DpExchange.Core.Options.transport_options()
+
+      for key <- transport -- [:credentials] do
+        assert OptionKeys.check(:market_status, [{key, nil}]) ==
+                 {:error, {:unknown_option, key}}
+      end
+
+      assert OptionKeys.check(:market_status, credentials: nil) == :ok
+
+      for function <- @feed_addressing, key <- transport -- [:credentials, :environment] do
+        assert OptionKeys.check(function, [{key, nil}]) == {:error, {:unknown_option, key}},
+               "#{function} reads no #{inspect(key)}"
+      end
+
+      for function <- @feed_addressing, key <- [:credentials, :environment] do
+        assert OptionKeys.check(function, [{key, nil}]) == :ok
+      end
+    end
+
+    test "a feed call still answers for the keys it reads" do
+      feed = :no_such_gemini_feed_for_transport_key_test
+
+      assert Gemini.subscribe(["BTC-USD"], feed: feed, to: self(), environment: :sandbox) ==
+               {:error, :feed_not_started}
+
+      assert Gemini.coverage(feed: feed, credentials: nil) == %{}
+    end
+  end
+
+  describe "a call that sends a request refuses the keys it can never honour" do
+    test "a sent-once write refuses :retry_attempts on the facade and the Fake" do
+      assert Gemini.place_order(@credentials, @request, retry_attempts: 0) ==
+               {:error, {:unknown_option, :retry_attempts}}
+
+      assert Fake.place_order(@credentials, @request, retry_attempts: 0) ==
+               {:error, {:unknown_option, :retry_attempts}}
+
+      assert Gemini.cancel_order(@credentials, "1", retry_attempts: 3) ==
+               {:error, {:unknown_option, :retry_attempts}}
+
+      assert Fake.withdraw("ETH", "ethereum", @amount, "0xabc", retry_attempts: 3) !=
+               {:error, {:unknown_option, :retry_attempts}}
+    end
+
+    test "the OAuth refresh refuses the environment, the base URL and :retry_attempts" do
+      for key <- [:environment, :base_url, :retry_attempts], module <- [Gemini, Fake] do
+        assert module.refresh_access_token("client", "refresh", [{key, nil}]) ==
+                 {:error, {:unknown_option, key}}
+      end
+    end
+  end
+
+  describe "the shared transport keys reach Core.HttpClient" do
+    defmodule WeightLimiter do
+      @moduledoc false
+      @behaviour DpExchange.Core.RateLimitBehaviour
+
+      @impl true
+      def acquire(_provider, weight, _opts), do: report(weight)
+      @impl true
+      def check(_provider, weight, _opts), do: report(weight)
+      @impl true
+      def record(_provider, _weight, _opts), do: :ok
+
+      defp report(weight) do
+        send(self(), {:limiter_weight, weight})
+        :ok
+      end
+    end
+
+    @date "Fri, 28 Aug 2026 17:00:01 GMT"
+    @ticker %{
+      "bid" => "77791.77",
+      "ask" => "77791.92",
+      "last" => "77829.80",
+      "volume" => %{"BTC" => "183.72", "USD" => "14298954.22", "timestamp" => 1_787_936_340_000}
+    }
+
+    setup do
+      DpExchange.Core.Config.put_override(:rate_limit_module, WeightLimiter)
+      :ok
+    end
+
+    defp responding(body) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("date", @date)
+        |> Req.Test.json(body)
+      end
+    end
+
+    test "weight: 7 is what the limiter is asked for, on a public read" do
+      assert {:ok, _quote} =
+               Gemini.get_price("BTC-USD",
+                 plug: responding(@ticker),
+                 weight: 7,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:limiter_weight, 7}, 5_000
+    end
+
+    test "weight: 7 is what the limiter is asked for, on a signed read" do
+      assert {:ok, _balances} =
+               Gemini.get_balances(@credentials,
+                 plug: responding([]),
+                 weight: 7,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:limiter_weight, 7}, 5_000
+    end
+
+    test "max_body_bytes refuses a body over the cap, on a public and on a signed read" do
+      expected = {:error, {:exchange_error, :gemini, {:response_too_large, 10}}}
+
+      assert Gemini.get_price("BTC-USD",
+               plug: responding(@ticker),
+               max_body_bytes: 10,
+               retry_attempts: 0
+             ) == expected
+
+      assert Gemini.get_balances(@credentials,
+               plug: responding([%{"currency" => "USD", "amount" => "1", "available" => "1"}]),
+               max_body_bytes: 10,
+               retry_attempts: 0
+             ) == expected
     end
   end
 
