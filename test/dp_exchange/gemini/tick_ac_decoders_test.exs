@@ -490,7 +490,7 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
   describe "Private: fills" do
     @fill %{
       "order_id" => "1",
-      "tid" => "2",
+      "tid" => 2,
       "price" => "100",
       "amount" => "0.5",
       "type" => "Buy",

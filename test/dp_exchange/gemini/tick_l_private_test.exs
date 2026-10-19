@@ -299,13 +299,15 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
       assert {:ok, all} = Fake.get_transactions(@credentials)
       assert length(all) == 3
 
+      # The rows are the vendor's `Transaction` shapes: one trade (`type: "trade"`) and two
+      # transfers, told apart by their `eid`.
       assert {:ok, later} = Fake.get_transactions(@credentials, since: 1_700_000_000_001)
-      assert Enum.map(later, & &1["type"]) == ["Deposit", "Fee"]
+      assert Enum.map(later, & &1["eid"]) == [368_598_436_530, 368_598_436_531]
 
-      assert {:ok, [%{"type" => "Trade"}]} = Fake.get_transactions(@credentials, limit: 1)
+      assert {:ok, [%{"type" => "trade"}]} = Fake.get_transactions(@credentials, limit: 1)
 
       at = DateTime.from_unix!(1_700_000_000_002, :millisecond)
-      assert {:ok, [%{"type" => "Fee"}]} = Fake.get_transactions(@credentials, since: at)
+      assert {:ok, [%{"eid" => 368_598_436_531}]} = Fake.get_transactions(@credentials, since: at)
     end
 
     test "staking history: provider, window and limit narrow it; the row is dated" do
@@ -381,9 +383,9 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
     test "a well-formed request still reaches the venue" do
       me = self()
 
-      assert {:ok, %{"result" => "ok"}} =
+      assert {:ok, %{"message" => "Approved address addition is now waiting."}} =
                Private.request_approved_address("ethereum", "0xabc", "desk", @credentials,
-                 plug: capturing(%{"result" => "ok"}, me),
+                 plug: capturing(%{"message" => "Approved address addition is now waiting."}, me),
                  retry_attempts: 0
                )
 
@@ -400,11 +402,11 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
       "fee" => "0.001"
     }
 
-    test "a withdrawal's tx_id is a non-blank string or nil" do
-      cases = [{"0xhash", "0xhash"}, {123, nil}, {"  ", nil}, {%{"a" => 1}, nil}]
+    test "a withdrawal's tx_id is nil: the schema's reply has no txHash to read" do
+      cases = ["0xhash", 123, "  ", %{"a" => 1}]
 
-      for {sent, expected} <- cases do
-        assert {:ok, %Withdrawal{tx_id: ^expected}} =
+      for sent <- cases do
+        assert {:ok, %Withdrawal{tx_id: nil}} =
                  Private.withdraw("ETH", "ethereum", 1, "0xabc", @credentials,
                    plug: responding(Map.put(@withdrawal, "txHash", sent)),
                    retry_attempts: 0
@@ -588,7 +590,7 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
       Map.merge(
         %{
           "order_id" => "1",
-          "tid" => "2",
+          "tid" => 2,
           "price" => "100",
           "amount" => "0.5",
           "type" => "Buy",

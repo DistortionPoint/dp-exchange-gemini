@@ -160,10 +160,19 @@ defmodule DpExchange.Gemini.OptionKeys do
     live?: [],
     # --- account and trading (`Private`, signed) ---------------------------------------
     test_connection: @signed,
+    # `showPendingBalances` (rest.yaml, `/v1/balances`) is deliberately not exposed: it makes the
+    # venue slower to add `pendingDeposit` / `pendingWithdrawal`, and `Core.Types.Balance` has
+    # nowhere to carry either, so the option would cost latency for a figure dropped on arrival.
     get_balances: @signed,
     get_accounts: @signed,
     get_fees: [:symbol | @signed],
-    get_transfers: [:limit_transfers, :currency, :network, :timestamp | @signed],
+    get_transfers: [
+      :limit_transfers,
+      :currency,
+      :network,
+      :timestamp,
+      :show_completed_deposit_advances | @signed
+    ],
     place_order: @signed,
     cancel_order: @signed,
     get_order: @signed,
@@ -188,8 +197,16 @@ defmodule DpExchange.Gemini.OptionKeys do
     remove_approved_address: @signed,
     # --- staking and conversions -------------------------------------------------------
     get_staking_balances: @signed,
-    get_staking_rewards: [:since, :until, :provider_id | @signed],
-    get_staking_history: [:limit, :since, :until, :provider_id | @signed],
+    get_staking_rewards: [:since, :until, :provider_id, :currency | @signed],
+    get_staking_history: [
+      :limit,
+      :since,
+      :until,
+      :provider_id,
+      :currency,
+      :interest_only,
+      :sort_asc | @signed
+    ],
     stake: [:provider_id | @signed],
     unstake: [:provider_id | @signed],
     quote_conversion: [:symbol, :side | @signed],
@@ -222,10 +239,24 @@ defmodule DpExchange.Gemini.OptionKeys do
       :expiration_start,
       :expiration_end,
       :submission_start,
-      :submission_end | @signed
+      :submission_end,
+      :funded,
+      :status,
+      :timestamp,
+      :limit_orders | @signed
     ],
-    list_clearing_brokers: [:symbol, :expiration_start, :expiration_end | @signed],
-    list_clearing_trades: [:symbol, :limit, :since_nanos | @signed],
+    list_clearing_brokers: [
+      :symbol,
+      :expiration_start,
+      :expiration_end,
+      :submission_start,
+      :submission_end,
+      :funded,
+      :status,
+      :timestamp,
+      :limit_orders | @signed
+    ],
+    list_clearing_trades: [:symbol, :limit, :since_nanos, :timestamp, :limit_trades | @signed],
     # --- administration and OAuth ------------------------------------------------------
     create_account: [:name, :type | @group_signed],
     # `id` and `name` are positional, so a caller's `:account` / `:name` would be overwritten.

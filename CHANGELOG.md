@@ -20,6 +20,105 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **The venue's documented list filters are options.** Each is sent only when given, checked
+  before a request goes out (`{:error, {:invalid_option, key, value}}`), and refused or
+  honoured the same way by `DpExchange.Gemini.Fake` from the one `OptionKeys` table:
+  - `list_clearing_orders/1`: `:funded` (boolean), `:status` (non-blank string), `:timestamp`
+    (only orders after it; a `DateTime` is milliseconds) and `:limit_orders` (whole number
+    >= 1), beside the filters it already took. `false` for `:funded` is sent, not dropped.
+  - `list_clearing_brokers/1`: the submission window (`:submission_start` /
+    `:submission_end`, each needing both bounds) and the same four, which
+    `/v1/clearing/broker/list` documents beside `symbol` and the expiration window.
+  - `list_clearing_trades/1`: `:timestamp` and `:limit_trades`, the venue's second spelling of
+    `:since_nanos` and `:limit`. Naming both of a pair is
+    `{:error, {:conflicting_options, [first, second]}}`: the venue states no precedence, so
+    none is guessed. With `:limit_trades` the default `limit_per_account` is not sent.
+  - `get_transfers/2`: `:show_completed_deposit_advances` (boolean).
+  - `get_staking_history/1`: `:currency`, `:interest_only` (`interestOnly`) and `:sort_asc`
+    (`sortAsc`). `get_staking_rewards/1`: `:currency`.
+  - **Not exposed, on purpose:** `showPendingBalances` on `/v1/balances`. It slows the venue's
+    reply to add `pendingDeposit` / `pendingWithdrawal`, and `Core.Types.Balance` has nowhere
+    to carry either, so the option would cost latency for a figure dropped on arrival.
+- `Private.validate_clearing_trades/1` (exposed for the Fake, like its siblings).
+- A text frame on the socket that is not a JSON object raises one `:data_quality` notice
+  (`details.reason: :undecodable_frame`, `details.bytes`; never the text), as an unreadable
+  trade, book ticker or depth frame already did. It was dropped in silence. `Feed` throttles it
+  per `{kind, reason, symbol}` like the others.
+
+### Fixed
+
+- **One `link_down` per `link_up`.** `websockex` calls `handle_disconnect/2` again for every
+  failed reconnect, and the socket reported the loss each time: a venue refusing connections
+  for ten minutes sent a `:link_down` notice and a `[:dp_exchange, :link, :down]` event per
+  attempt with no `link_up` between, so a metrics consumer's link gauge counted one outage as
+  dozens. Only the first call after a connect reports the loss; every attempt is still a
+  `[:dp_exchange, :link, :reconnect_attempt]`.
+- **A subscribe answer whose `status` is not a number no longer crashes the socket.** The
+  refusal notice interpolated the venue's `status` as it came, so `"status": {}` raised
+  `Protocol.UndefinedError` in the socket process and took the connection (and a `Feed`
+  restart) with it. The status is shown bounded; an integer is unchanged.
+- **A depth diff in flight when its symbol was unsubscribed is no longer delivered as the
+  absolute book.** On a `snapshot` connection `unsubscribe/3` forgets the symbol's anchor so a
+  later resubscribe is read as a snapshot; the venue's next in-flight diff then arrived as the
+  "first frame" and was delivered as an `OrderBook` holding only the levels that diff changed.
+  A frame for a symbol with no depth subscription on such a connection is dropped.
+- **Decoders read only the field names the vendor's schema has.** `estimate_withdrawal_fee/5`
+  no longer falls back to `feeAmount` / `feeCurrency` (`/v2/transfers` row names; the estimate
+  has `fee` and `currency`), a staking stake or redemption no longer reads `id` as its
+  `transactionId`, and a withdrawal reply no longer reads `clientTransferId` or the invented
+  `txn_hash`. A reply that only had the old spelling is now `:unexpected_response_shape` /
+  `{:write_unconfirmed, _, _}` rather than a value read from a field nobody documented.
+  `withdraw/6` also no longer reads `status` or `txHash` from the reply: neither is in
+  `WithdrawCryptoFundsResponse` (`withdrawalId`, `address`, `amount`, `currency`, `fee`), and no
+  captured withdraw response in `docs/reference/gemini` carries them (they appear only on
+  `/v2/transfers` rows, rest.yaml:3330-3353 and :8942). A `Withdrawal` is always `:pending` with
+  `tx_id: nil`; `get_transfers/2` is where a transfer's status and hash are read. The tick AA
+  stated-outcome behaviour rested on those undocumented fields and is withdrawn.
+- **`DpExchange.Gemini.Fake` canned bodies match the vendor's schema.** `get_accounts` answers
+  `account` as the object the venue sends (`accountName`, `shortName`, ...) beside `users`;
+  `get_transactions` answers the vendor's `Transaction` trade and transfer shapes instead of
+  `type: "Trade" | "Deposit" | "Fee"`; `list_custody_fees` answers `txTime`, `feeAmount`,
+  `feeCurrency`, `eventType` instead of `currency`, `amount`, `timestampms`; `list_networks`
+  by asset answers `NetworkToken` (`token`, `network` list); `request_approved_address` and
+  `remove_approved_address` answer the one `message` the venue sends; `add_payment_method`
+  answers `referenceId` (US) or `result: "OK"` (CA) and no longer echoes the caller's bank
+  fields back; `get_clearing_order` / `create_clearing_order` carry `is_confirmed`, the field
+  their docs tell a caller to read; the fixed clearing orders carry `quantity`;
+  `get_notional_balances` no longer invents a `notionalCurrency` field and carries the
+  `availableForWithdrawal` pair `NotionalBalance` names.
+- The Fake now narrows the clearing listings by `:counterparty`, `:status`, both windows,
+  `:timestamp` and `:limit_orders` (it filtered only `:symbol` and `:side`), and the staking
+  reads by `:currency`, `:interest_only` and `:sort_asc`. `:funded` is validated and narrows
+  nothing: no document says what the venue filters on.
+- `Fake.get_trade_history/2` answered `[]` whatever it was asked. It now answers two `Fill`s
+  shaped as `MyTrade` decodes, and applies the real call's checks (`validate_history_opts`
+  before the credential) and filters (`:symbol`, `:since` on or after, `:limit` the most
+  recent N).
+- `get_staking_history/1` no longer reads `amountPaidSoFar` / `amountRemaining` off a history
+  row: `StakingTransaction` (rest.yaml) has neither (they belong to the unstake reply,
+  `StakingWithdrawal`). `amount_paid_so_far` / `amount_remaining` are `nil` on a history row.
+  `Fake.get_staking_history/1` states no progress either, so it is no more capable than the
+  real call.
+- `stake/4` and `unstake/4` each read only their own reply schema. `stake/4` reads
+  `StakingDeposit` (`transactionId`, `providerId`, `currency`, `amount`): it no longer reads
+  `amountPaidSoFar`, `amountRemaining` or `requestInitiated`, which that schema lacks, so
+  progress and `venue_time` are `nil` and a present-but-hostile value in them is ignored.
+  `unstake/4` reads `StakingWithdrawal` (`transactionId`, `currency`, `amount`,
+  `amountPaidSoFar`, `amountRemaining`, `requestInitiated`) and no `providerId`, which that
+  schema lacks, so its `provider_id` is `nil` (`Fake.unstake/3` states none either); an
+  unreadable field of its own is still `{:write_unconfirmed, key, :unexpected_response_shape}`.
+- Test canned bodies that used a type the schema does not state (a string `tid` on `MyTrade`,
+  a string bookTicker `E` where `NanosecondTimestamp` is an integer, a `status` on the withdraw
+  reply, a quote-shaped body for the instant-execute reply, a list for the single-object
+  `/v2/network/{token}` reply, hand-built notices with a text `reason`) were corrected to the
+  schema. The tier-2 live test now waits for the `TopOfBook` the stream delivers, not a
+  `Quote` with a `bid` and a trade-less `venue_time`.
+- Test canned bodies that used names or shapes the schema lacks were corrected to it
+  (transactions, custody fees, add-bank, approved-address, internal-transfer and account
+  replies); hostile-input bodies keep their hostile shape.
+
 ## [0.2.151] - 2026-10-18
 
 ### Changed — BREAKING

@@ -958,14 +958,16 @@ defmodule DpExchange.Gemini.FakeTest do
       assert Enum.any?(methods, &(&1["kind"] == "bank"))
     end
 
-    test "a newly added method is pending, never verified" do
-      # A fake returning a usable method would teach a consumer the first transfer works.
+    test "a newly added method answers the vendor's reference, never a usable method" do
+      # The vendor's reply (`AddBankResponse`) is only a reference id: the method is verified
+      # out of band, and a fake returning a usable method would teach a consumer the first
+      # transfer works. The caller's own bank fields are not echoed back.
       assert {:ok, method} =
                Fake.add_payment_method(%{"accountNumber" => "1"},
                  credentials: @credentials
                )
 
-      assert method["status"] == "pending"
+      assert method == %{"referenceId" => "BankAccountRefId(18428)"}
     end
 
     test "a country with no endpoint is refused" do
@@ -1006,21 +1008,24 @@ defmodule DpExchange.Gemini.FakeTest do
                  credentials: @credentials
                )
 
-      assert requested["status"] == "pending-time"
-      refute requested["status"] == "active"
+      # The vendor's reply is one `message` (`ApprovedAddressMessage`), which names the hold.
+      assert Map.keys(requested) == ["message"]
+      assert requested["message"] =~ "approval hold"
     end
 
-    test "removal answers removed" do
-      assert {:ok, %{"status" => "removed"}} =
+    test "removal answers with the vendor's one message" do
+      assert {:ok, %{"message" => message} = removed} =
                Fake.remove_approved_address("ethereum", "0xabc", credentials: @credentials)
+
+      assert Map.keys(removed) == ["message"]
+      assert message =~ "0xabc removed"
     end
 
-    test "transactions include kinds that are neither trades nor transfers" do
+    test "transactions carry both shapes the vendor names: trades and transfers" do
       assert {:ok, rows} = Fake.get_transactions(@credentials)
-      kinds = Enum.map(rows, & &1["type"])
 
-      assert "Fee" in kinds
-      assert "Trade" in kinds
+      assert Enum.any?(rows, &(&1["type"] == "trade" and is_integer(&1["tid"])))
+      assert Enum.any?(rows, &(Map.has_key?(&1, "eid") and Map.has_key?(&1, "currency")))
     end
 
     test "every one refuses without credentials" do
@@ -1038,12 +1043,16 @@ defmodule DpExchange.Gemini.FakeTest do
       # A fake that made them equal would let a consumer read either as the other and pass.
       assert {:ok, [row]} = Fake.get_notional_balances(@credentials, "usd")
       assert row["amount"] != row["amountNotional"]
-      assert row["notionalCurrency"] == "USD"
+      # The vendor's `NotionalBalance` names no notional-currency field; the currency asked for
+      # is a path segment of the request, not part of the reply.
+      refute Map.has_key?(row, "notionalCurrency")
+      assert Map.has_key?(row, "availableForWithdrawalNotional")
     end
 
-    test "a custody fee has no trade behind it" do
+    test "a custody fee has no trade behind it, and is the vendor's CustodyFeeTransfer shape" do
       assert {:ok, [fee]} = Fake.list_custody_fees(@credentials)
-      assert fee["currency"]
+      assert fee["feeCurrency"]
+      assert is_integer(fee["txTime"])
       refute Map.has_key?(fee, "order_id")
     end
 
@@ -1076,9 +1085,14 @@ defmodule DpExchange.Gemini.FakeTest do
       assert Decimal.equal?(balance.available_for_withdrawal, Decimal.new("10"))
     end
 
-    test "the history carries a redemption mid-unbond" do
+    test "the history row states an amount and a time, and no unbonding progress" do
+      # Progress is the unstake reply's (`StakingWithdrawal`), not the history row's, so the
+      # real history decoder leaves it nil and the fake must not state it.
       assert {:ok, [tx]} = Fake.get_staking_history(credentials: @credentials)
-      refute Decimal.equal?(tx.amount_remaining, Decimal.new("0"))
+      assert tx.type == :unstake
+      assert Decimal.equal?(tx.amount, Decimal.new("10"))
+      assert tx.amount_paid_so_far == nil
+      assert tx.amount_remaining == nil
     end
 
     test "a reward carries the window it accrued over" do
@@ -1214,7 +1228,8 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "and answers with one" do
-      assert {:ok, [%{"asset" => "USDC"}]} =
+      # `NetworkToken` (rest.yaml `/v2/network/{token}`): `token` and a `network` LIST.
+      assert {:ok, [%{"token" => "USDC", "network" => ["ethereum", "solana"]}]} =
                Fake.list_networks("USDC", credentials: @credentials)
     end
   end

@@ -426,15 +426,13 @@ defmodule DpExchange.Gemini.StakingTest do
       [%{"providerId" => provider_id, "transactions" => transactions}]
     end
 
-    test "requested, paid so far and remaining all survive" do
+    test "a history row states its amount; progress is not a history field, so it stays nil" do
       transactions = [
         %{
           "transactionId" => "stk-1",
           "transactionType" => "Redeem",
           "amountCurrency" => "ETH",
           "amount" => "10",
-          "amountPaidSoFar" => "4",
-          "amountRemaining" => "6",
           "dateTime" => 1_787_936_401_000
         }
       ]
@@ -448,8 +446,8 @@ defmodule DpExchange.Gemini.StakingTest do
       assert tx.type == :unstake
       assert tx.venue_type == "Redeem"
       assert Decimal.equal?(tx.amount, Decimal.new("10"))
-      assert Decimal.equal?(tx.amount_paid_so_far, Decimal.new("4"))
-      assert Decimal.equal?(tx.amount_remaining, Decimal.new("6"))
+      assert tx.amount_paid_so_far == nil
+      assert tx.amount_remaining == nil
     end
 
     test "the venue's 50-row default is never relied on, and a full 500 is refused" do

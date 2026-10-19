@@ -1514,7 +1514,7 @@ defmodule DpExchange.Gemini.FeedTest do
   describe "a notice flood is throttled" do
     defp bad_frame_notice(symbol) do
       Notice.new(:data_quality, :gemini,
-        details: %{reason: "unreadable bookTicker level", symbol: symbol}
+        details: %{reason: :unreadable_book_ticker_level, symbol: symbol}
       )
     end
 
@@ -1556,14 +1556,14 @@ defmodule DpExchange.Gemini.FeedTest do
       send(
         feed,
         {:dp_exchange, :gemini,
-         Notice.new(:data_quality, :gemini, details: %{reason: "undecodable trade"})}
+         Notice.new(:data_quality, :gemini, details: %{reason: :undecodable_trade})}
       )
 
       _settled = Feed.coverage(feed)
 
       assert_received {:dp_exchange, :gemini, %Notice{details: %{symbol: "BTC-USD"}}}
       assert_received {:dp_exchange, :gemini, %Notice{details: %{symbol: "ETH-USD"}}}
-      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: "undecodable trade"}}}
+      assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: :undecodable_trade}}}
     end
 
     test "refusals with different venue statuses are keys of their own" do

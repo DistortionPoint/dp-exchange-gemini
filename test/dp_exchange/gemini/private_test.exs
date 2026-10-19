@@ -442,7 +442,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       body = [
         %{
           "order_id" => "1",
-          "tid" => "2",
+          "tid" => 2,
           "price" => "100",
           "amount" => "0.5",
           "type" => "Buy",
@@ -475,7 +475,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       body = [
         %{
           "order_id" => "1",
-          "tid" => "2",
+          "tid" => 2,
           "price" => "100",
           "amount" => "0.5",
           "type" => "Buy",
@@ -484,7 +484,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         },
         %{
           "order_id" => "3",
-          "tid" => "4",
+          "tid" => 4,
           "price" => "10",
           "amount" => "1",
           "type" => "Sell",
@@ -508,7 +508,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       # nothing about why.
       complete = %{
         "order_id" => "1",
-        "tid" => "2",
+        "tid" => 2,
         "price" => "100",
         "amount" => "0.5",
         "type" => "Buy",
@@ -545,7 +545,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       # instead of the read being refused.
       complete = %{
         "order_id" => "1",
-        "tid" => "2",
+        "tid" => 2,
         "price" => "100",
         "amount" => "0.5",
         "type" => "Buy",
@@ -813,7 +813,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       body = [
         %{
           "order_id" => "1",
-          "tid" => "2",
+          "tid" => 2,
           "price" => "100",
           "amount" => "0.5",
           "type" => "Sell",
@@ -1112,6 +1112,40 @@ defmodule DpExchange.Gemini.PrivateTest do
       "totalSpendCurrency" => "USD"
     }
 
+    # `/v1/instant/execute`'s reply (rest.yaml, `btcusdBuy` and `ethusdSell`): `orderId`, an
+    # integer, and no `quoteId` or `maxAgeMs`; the commit carries those only on the request.
+    @exec_buy_body %{
+      "orderId" => 375_089_415,
+      "pair" => "BTCUSD",
+      "price" => "6445.07",
+      "priceCurrency" => "USD",
+      "side" => "buy",
+      "quantity" => "0.01505181",
+      "quantityCurrency" => "BTC",
+      "totalSpend" => "100",
+      "totalSpendCurrency" => "USD",
+      "fee" => "2.9900309233",
+      "feeCurrency" => "USD",
+      "depositFee" => "0",
+      "depositFeeCurrency" => "USD"
+    }
+
+    @exec_sell_body %{
+      "orderId" => 377_326_322,
+      "pair" => "ETHUSD",
+      "price" => "225.42",
+      "priceCurrency" => "USD",
+      "side" => "sell",
+      "quantity" => "1",
+      "quantityCurrency" => "ETH",
+      "totalSpend" => "0.1",
+      "totalSpendCurrency" => "ETH",
+      "fee" => "2.99",
+      "feeCurrency" => "USD",
+      "depositFee" => "0",
+      "depositFeeCurrency" => "USD"
+    }
+
     test "a quote-currency-to-base conversion is a buy of the base's pair" do
       me = self()
 
@@ -1276,7 +1310,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  price: Decimal.new("225.42"),
                  fee: Decimal.new("2.99"),
                  credentials: @credentials,
-                 plug: responding(@sell_quote_body),
+                 plug: responding(@exec_sell_body),
                  retry_attempts: 0
                )
 
@@ -1295,7 +1329,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  price: Decimal.new("6445.07"),
                  fee: Decimal.new("2.99"),
                  credentials: @credentials,
-                 plug: responding(@quote_body),
+                 plug: responding(@exec_buy_body),
                  retry_attempts: 0
                )
 
@@ -1327,7 +1361,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  price: Decimal.new("6445.07"),
                  fee: Decimal.new("2.99"),
                  credentials: @credentials,
-                 plug: capturing(@quote_body, me),
+                 plug: capturing(@exec_buy_body, me),
                  retry_attempts: 0
                )
 
@@ -1444,7 +1478,7 @@ defmodule DpExchange.Gemini.PrivateTest do
 
         conn
         |> Plug.Conn.put_resp_header("date", "Fri, 28 Aug 2026 17:00:01 GMT")
-        |> Req.Test.json([%{"token" => "USDC", "network" => ["ethereum", "solana"]}])
+        |> Req.Test.json(%{"token" => "USDC", "network" => ["ethereum", "solana"]})
       end
 
       assert {:ok, rows} =

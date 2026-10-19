@@ -28,7 +28,7 @@ defmodule DpExchange.Gemini.NaNGuardTest do
         # It used to become `bid: nil` beside a real ask. `TopOfBook` reads a `nil` level
         # as "no resting order", a claim the venue never made, so a stated but unreadable
         # level now refuses the book (2026-10-10). `Socket` reports that as `:data_quality`.
-        frame = %{"E" => "1757548800000000000", "b" => unquote(value), "a" => "100.5"}
+        frame = %{"E" => 1_757_548_800_000_000_000, "b" => unquote(value), "a" => "100.5"}
 
         assert {:error, :unexpected_frame_shape} =
                  WsDecode.to_top_of_book(frame, "BTC-USD", @observed_at)
@@ -36,7 +36,7 @@ defmodule DpExchange.Gemini.NaNGuardTest do
     end
 
     test "a real number still decodes, so the guard has not eaten the happy path" do
-      frame = %{"E" => "1757548800000000000", "b" => "99.5", "a" => "100.5"}
+      frame = %{"E" => 1_757_548_800_000_000_000, "b" => "99.5", "a" => "100.5"}
 
       assert {:ok, top} = WsDecode.to_top_of_book(frame, "BTC-USD", @observed_at)
       assert Decimal.equal?(top.bid, Decimal.new("99.5"))
@@ -45,7 +45,7 @@ defmodule DpExchange.Gemini.NaNGuardTest do
 
     test "an ask that is poison refuses the book too, whichever side carries it" do
       for value <- @poison do
-        frame = %{"E" => "1757548800000000000", "b" => "99.5", "a" => value}
+        frame = %{"E" => 1_757_548_800_000_000_000, "b" => "99.5", "a" => value}
 
         assert {:error, :unexpected_frame_shape} =
                  WsDecode.to_top_of_book(frame, "BTC-USD", @observed_at),

@@ -161,27 +161,40 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert withdrawal.status == :pending
     end
 
-    test "the venue's own completion is carried when it says so" do
+    test "a status the schema does not define is not read, even a completion" do
       assert {:ok, withdrawal} =
                Private.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc", @credentials,
                  plug: responding(%{"withdrawalId" => "w-1", "status" => "complete"}),
                  retry_attempts: 0
                )
 
-      assert withdrawal.status == :completed
+      assert withdrawal.status == :pending
     end
 
-    test "the destination and network are carried back, not just the amount" do
+    test "the destination and network are carried back; the reply is the schema's fields" do
+      # `WithdrawCryptoFundsResponse`: withdrawalId, address, amount, currency, fee. `txHash`
+      # is a `/v2/transfers` row field, so a reply carrying one gives no `tx_id`.
+      reply = %{
+        "withdrawalId" => "w-1",
+        "address" => "0xabc",
+        "amount" => "1",
+        "currency" => "ETH",
+        "fee" => "0.001",
+        "txHash" => "0xdeadbeef"
+      }
+
       assert {:ok, w} =
                Private.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc", @credentials,
-                 plug: responding(%{"withdrawalId" => "w-1", "txHash" => "0xdeadbeef"}),
+                 plug: responding(reply),
                  retry_attempts: 0
                )
 
+      assert w.id == "w-1"
       assert w.address == "0xabc"
       assert w.network == "ethereum"
       assert w.asset == "ETH"
-      assert w.tx_id == "0xdeadbeef"
+      assert Decimal.equal?(w.fee, Decimal.new("0.001"))
+      assert w.tx_id == nil
     end
   end
 
@@ -358,7 +371,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
 
       assert {:ok, _method} =
                Private.add_payment_method(%{"accountNumber" => "1"}, @credentials,
-                 plug: capturing(%{"id" => "bank-3"}, me),
+                 plug: capturing(%{"referenceId" => "BankAccountRefId(18428)"}, me),
                  retry_attempts: 0
                )
 
@@ -368,7 +381,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert {:ok, _ca} =
                Private.add_payment_method(%{"transitNumber" => "1"}, @credentials,
                  country: "CA",
-                 plug: capturing(%{"id" => "bank-4"}, me),
+                 plug: capturing(%{"result" => "OK"}, me),
                  retry_attempts: 0
                )
 
@@ -416,7 +429,17 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                  Decimal.new("1"),
                  [from: "a", to: "b"],
                  @credentials,
-                 plug: capturing(%{"ok" => true}, me),
+                 plug:
+                   capturing(
+                     %{
+                       "fromAccount" => "a",
+                       "toAccount" => "b",
+                       "amount" => "1",
+                       "uuid" => "9c153d64-83ba-4532-a159-ebe3f6797766",
+                       "message" => "Success, transfer completed."
+                     },
+                     me
+                   ),
                  retry_attempts: 0
                )
 
@@ -434,7 +457,11 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
 
       assert {:ok, _requested} =
                Private.request_approved_address("ethereum", "0xabc", "desk", @credentials,
-                 plug: capturing(%{"status" => "pending-time"}, me),
+                 plug:
+                   capturing(
+                     %{"message" => "Approved address addition is now waiting a 7-day hold."},
+                     me
+                   ),
                  retry_attempts: 0
                )
 
@@ -482,7 +509,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
 
       assert {:ok, _removed} =
                Private.remove_approved_address("ethereum", "0xabc", @credentials,
-                 plug: capturing(%{"ok" => true}, me),
+                 plug: capturing(%{"message" => "0xabc removed from approved addresses."}, me),
                  retry_attempts: 0
                )
 
@@ -499,20 +526,22 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
     # the window parameter is `timestamp_nanos`, in nanoseconds, rather than `timestamp` in
     # milliseconds.
     test "every kind the venue sends comes back" do
+      # `Transaction` (rest.yaml): a trade row (`type: "trade"`, `tid`) and transfer rows
+      # (`eid`, `currency`, `amount`, `status`).
       body = %{
         "results" => [
-          %{"type" => "Trade", "amount" => "1"},
-          %{"type" => "Deposit", "amount" => "100"},
-          %{"type" => "Fee", "amount" => "-0.5"}
+          %{"type" => "trade", "amount" => "1", "tid" => 144_115_199_446_910_513},
+          %{"eid" => 368_598_436_530, "currency" => "USD", "amount" => "100"},
+          %{"eid" => 368_598_436_531, "currency" => "USD", "amount" => "50"}
         ]
       }
 
       assert {:ok, rows} =
                Private.get_transactions(@credentials, plug: responding(body), retry_attempts: 0)
 
-      kinds = Enum.map(rows, & &1["type"])
-      assert "Trade" in kinds
-      assert "Fee" in kinds
+      assert Enum.map(rows, & &1["amount"]) == ["1", "100", "50"]
+      assert Enum.any?(rows, &(&1["type"] == "trade"))
+      assert Enum.any?(rows, &Map.has_key?(&1, "eid"))
     end
 
     test "the filters go to the venue in its own names" do
@@ -556,7 +585,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert {:ok, rows} =
                DpExchange.Gemini.Fake.get_transactions(@credentials, since: 1_700_000_000_001)
 
-      assert Enum.map(rows, & &1["type"]) == ["Deposit", "Fee"]
+      assert Enum.map(rows, & &1["eid"]) == [368_598_436_530, 368_598_436_531]
     end
   end
 
@@ -591,8 +620,8 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       me = self()
 
       responses = [
-        %{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"},
-        %{"results" => [%{"type" => "Fee"}]}
+        %{"results" => [%{"type" => "trade"}], "continuationToken" => "tok-1"},
+        %{"results" => [%{"eid" => 368_598_436_530}]}
       ]
 
       assert {:ok, rows} =
@@ -602,7 +631,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                  retry_attempts: 0
                )
 
-      assert Enum.map(rows, & &1["type"]) == ["Trade", "Fee"]
+      assert Enum.map(rows, &(&1["type"] || &1["eid"])) == ["trade", 368_598_436_530]
 
       assert_receive {:payload, first}
       assert_receive {:payload, second}
@@ -615,7 +644,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
     test "opts[:limit] returns exactly one page" do
       me = self()
 
-      responses = [%{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"}]
+      responses = [%{"results" => [%{"type" => "trade"}], "continuationToken" => "tok-1"}]
 
       assert {:ok, rows} =
                Private.get_transactions(@credentials,
@@ -633,7 +662,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
     test "a token the venue echoes back unchanged is refused, never followed forever" do
       me = self()
 
-      responses = [%{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"}]
+      responses = [%{"results" => [%{"type" => "trade"}], "continuationToken" => "tok-1"}]
 
       assert {:error, :repeated_continuation_token} =
                Private.get_transactions(@credentials,
@@ -649,11 +678,11 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       me = self()
 
       responses = [
-        %{"results" => [%{"type" => "Trade"}], "continuationToken" => "tok-1"},
+        %{"results" => [%{"type" => "trade"}], "continuationToken" => "tok-1"},
         %{"results" => [], "continuationToken" => "tok-1"}
       ]
 
-      assert {:ok, [%{"type" => "Trade"}]} =
+      assert {:ok, [%{"type" => "trade"}]} =
                Private.get_transactions(@credentials,
                  plug: paging_plug(me, responses),
                  retry_attempts: 0
@@ -728,7 +757,15 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
 
   describe "list_custody_fees/2 — a charge with no trade behind it" do
     test "the rows are the venue's own" do
-      rows = [%{"currency" => "BTC", "amount" => "0.00012", "timestampms" => 1_700_000_000_000}]
+      rows = [
+        %{
+          "txTime" => 1_700_000_000_000,
+          "feeAmount" => "0.00012",
+          "feeCurrency" => "BTC",
+          "eid" => 9016,
+          "eventType" => "CustodyFeeDebit"
+        }
+      ]
 
       assert {:ok, [fee]} =
                Private.list_custody_fees(@credentials,
@@ -736,8 +773,8 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                  retry_attempts: 0
                )
 
-      assert fee["currency"] == "BTC"
-      assert fee["amount"] == "0.00012"
+      assert fee["feeCurrency"] == "BTC"
+      assert fee["feeAmount"] == "0.00012"
     end
 
     test "an empty list is 'nothing charged', and reaches the caller as one" do
@@ -767,7 +804,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
     test "a full page with no :limit is refused, since the venue gives no cursor" do
       # Default page is 10, maximum 50 (rest.yaml:3446). A full page cannot be told from the
       # whole history, so it is not answered as one.
-      rows = for n <- 1..50, do: %{"currency" => "BTC", "amount" => "0.0001", "id" => n}
+      rows = for n <- 1..50, do: %{"feeCurrency" => "BTC", "feeAmount" => "0.0001", "eid" => n}
       me = self()
 
       assert {:error, :history_truncated} =
@@ -931,7 +968,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
     test "withdraw/6 sends a one-satoshi amount as 0.00000001, not 1E-8" do
       assert {:ok, _withdrawal} =
                Private.withdraw("BTC", "bitcoin", @tiny, "bc1q-addr", @credentials,
-                 plug: capturing(%{"withdrawalId" => "w-1", "status" => "pending"}, self()),
+                 plug: capturing(%{"withdrawalId" => "w-1"}, self()),
                  retry_attempts: 0
                )
 
@@ -958,7 +995,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
         amount: @tiny,
         price: @large,
         fee: Decimal.new("2.50"),
-        plug: capturing(%{"quoteId" => 20_930}, self()),
+        plug: capturing(%{"orderId" => 375_089_415}, self()),
         retry_attempts: 0
       )
 
@@ -984,7 +1021,7 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
                  amount: nil,
                  price: "  ",
                  fee: Decimal.new("2.50"),
-                 plug: capturing(%{"quoteId" => 20_930}, self()),
+                 plug: capturing(%{"orderId" => 375_089_415}, self()),
                  retry_attempts: 0
                )
 

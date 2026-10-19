@@ -277,8 +277,12 @@ defmodule DpExchange.Gemini.SocketTest do
       refute_received {:dp_exchange, :gemini, _anything}
     end
 
-    test "malformed JSON is ignored" do
+    test "malformed JSON does not crash, and is reported rather than dropped in silence" do
       assert {:ok, _state} = Socket.handle_frame({:text, "{not json"}, state())
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{kind: :data_quality, details: %{reason: :undecodable_frame}}}
+
       refute_received {:dp_exchange, :gemini, _anything}
     end
 

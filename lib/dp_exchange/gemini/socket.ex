@@ -124,6 +124,20 @@ defmodule DpExchange.Gemini.Socket do
   undecodable trade frame likewise raises one `:data_quality` notice (`:undecodable_trade`)
   per frame, rather than being dropped in silence.
 
+  ## What is reported when a frame cannot be read, and when the link is down
+
+  A text frame that is not a JSON object raises one `:data_quality` notice
+  (`details.reason: :undecodable_frame`, `details.bytes`: its size, never its text), as an
+  unreadable trade, book ticker or depth frame does. A depth diff that arrives for a symbol
+  with no depth subscription on a `snapshot` connection (in flight when it was unsubscribed)
+  is dropped without a notice: left to the anchor rule above it would have been delivered as
+  an absolute `OrderBook` holding only the changed levels.
+
+  One `link_down` closes one `link_up`. `websockex` calls `handle_disconnect/2` again for every
+  failed reconnect, and only the first call after a connect reports the loss (notice and
+  `[:dp_exchange, :link, :down]`); each attempt is still visible as
+  `[:dp_exchange, :link, :reconnect_attempt]`.
+
   ## Event time is nanoseconds
 
   The `E` field is **nanoseconds** since the epoch, not milliseconds. The difference is a
@@ -1070,7 +1084,10 @@ defmodule DpExchange.Gemini.Socket do
        ack_requests: [],
        ack_streams: %{},
        # When this session came up. See `handle_disconnect/2`'s short-session backoff.
-       connected_at: now_ms()
+       connected_at: now_ms(),
+       # A `link_up` was just reported, so the next `handle_disconnect/2` owes the one
+       # `link_down` that closes it. See `report_link_down/2`.
+       link_open?: true
      })}
   end
 
@@ -1564,16 +1581,7 @@ defmodule DpExchange.Gemini.Socket do
 
   @impl true
   def handle_disconnect(%{reason: reason} = status, state) do
-    # Bounded: a refused upgrade carries the venue's response inside the reason, and it went
-    # whole into every notice subscriber and every telemetry handler.
-    reason_text = inspect(reason, limit: 50, printable_limit: 1_024)
-
-    notify(
-      state,
-      Notice.new(:link_down, :gemini, details: %{reason: :disconnected, message: reason_text})
-    )
-
-    Telemetry.link_down(:gemini, reason_text)
+    state = report_link_down(state, reason)
 
     # `attempt_number` comes from `websockex` itself. It is a documented key of the
     # `connection_status_map` this function already pattern-matches on
@@ -1607,6 +1615,33 @@ defmodule DpExchange.Gemini.Socket do
     wait_to_reconnect(state, delay)
 
     {:reconnect, state}
+  end
+
+  # **One `link_down` closes one `link_up` (family rule, tick AI).** `websockex` calls
+  # `handle_disconnect/2` again for every FAILED reconnect (`on_disconnect/5` calls itself with
+  # `attempt + 1`), and this reported the loss each time: a venue refusing connections for ten
+  # minutes sent a `:link_down` notice and a `[:dp_exchange, :link, :down]` event per attempt,
+  # with no `link_up` between them, so a metrics consumer's link gauge counted a link that had
+  # been down once as down thirty times. The loss is reported when the connection that was up
+  # goes down, and not again until a `handle_connect/2` has opened another. A state that has
+  # never seen a connect (one a test built by hand) still reports, as it always did.
+  # The reconnect attempts themselves stay visible: `Telemetry.link_reconnect_attempt/3` below
+  # fires for each one.
+  defp report_link_down(state, reason) do
+    if Map.get(state, :link_open?, true) do
+      # Bounded: a refused upgrade carries the venue's response inside the reason, and it went
+      # whole into every notice subscriber and every telemetry handler.
+      reason_text = inspect(reason, limit: 50, printable_limit: 1_024)
+
+      notify(
+        state,
+        Notice.new(:link_down, :gemini, details: %{reason: :disconnected, message: reason_text})
+      )
+
+      Telemetry.link_down(:gemini, reason_text)
+    end
+
+    Map.put(state, :link_open?, false)
   end
 
   # The backoff wait, which still hears its parent stop it.
@@ -1661,12 +1696,36 @@ defmodule DpExchange.Gemini.Socket do
     Telemetry.link_event(:gemini, :frame, byte_size(raw))
 
     case Jason.decode(raw) do
-      {:ok, message} -> handle_message(message, note_answer(message, state))
-      {:error, _reason} -> {:ok, state}
+      {:ok, %{} = message} -> handle_message(message, note_answer(message, state))
+      # Not JSON, or JSON that is not an object.
+      _unreadable -> {:ok, undecodable_frame(state, raw)}
     end
   end
 
   def handle_frame(_other, state), do: {:ok, state}
+
+  # **A text frame that is not a JSON object is reported, not dropped.** Every frame the venue
+  # documents is an object (websocket.yaml), so one that is not JSON, or is JSON of another
+  # shape, is a frame this package cannot read: the same condition as the unreadable trade,
+  # book and depth frames below, which each raise a `:data_quality` notice. It was discarded in
+  # silence, so a venue that began sending something else (a proxy's error page, a framing
+  # change) looked like a quiet market. The notice carries the size and none of the text: the
+  # bytes are the venue's (or a proxy's) and could be anything. `Feed` throttles the notice per
+  # `{kind, reason, symbol}`, so a stream of them is one notice per window.
+  defp undecodable_frame(state, raw) do
+    notify(
+      state,
+      Notice.new(:data_quality, :gemini,
+        details: %{
+          reason: :undecodable_frame,
+          message: "undecodable frame",
+          bytes: byte_size(raw)
+        }
+      )
+    )
+
+    state
+  end
 
   # A `@trade` frame. **`m` is "whether the buyer is the maker", which is the opposite of
   # the taker's side** — and the opposite of what `/v1/trades` reports under `type`. The
@@ -1838,11 +1897,21 @@ defmodule DpExchange.Gemini.Socket do
   defp handle_message(%{"id" => _id, "status" => status}, state) when status != 200 do
     {symbols, state} = Map.pop(state, :answered_symbols, [])
 
+    # **`status` is whatever the venue sent.** It was interpolated and stored as it came, so a
+    # frame carrying `"status": {}` (or any term without a `String.Chars` clause) raised
+    # `Protocol.UndefinedError` in this process and took the connection, and `Feed`'s
+    # subscription state with a restart, down. The documented status is an integer
+    # (`ResponseBase`, websocket.yaml); anything else is shown bounded, as `noticed/1` shows
+    # every other venue-supplied value.
     notify(
       state,
       Notice.new(:refusal, :gemini,
-        message: "gemini refused a subscription: status #{status}",
-        details: %{reason: :subscribe_refused, subscribe_status: status, symbols: symbols}
+        message: "gemini refused a subscription: status #{noticed(status)}",
+        details: %{
+          reason: :subscribe_refused,
+          subscribe_status: if(is_integer(status), do: status, else: noticed(status)),
+          symbols: symbols
+        }
       )
     )
 
@@ -1907,6 +1976,9 @@ defmodule DpExchange.Gemini.Socket do
       MapSet.member?(Map.get(state, :depth_stopped, MapSet.new()), symbol) ->
         {:ok, state}
 
+      unsubscribed_depth?(state, symbol) ->
+        {:ok, state}
+
       symbol_resync(state, symbol) != [] ->
         resyncing_frame(message, symbol, state)
 
@@ -1923,6 +1995,22 @@ defmodule DpExchange.Gemini.Socket do
         refuse_unsequenced_depth_update(message, symbol, state)
     end
   end
+
+  # **A frame that was in flight when its symbol was unsubscribed is dropped, not taken as the
+  # anchor.** `unsubscribe/3` forgets the symbol's anchor flag (so a later resubscribe's
+  # snapshot is read as one), and on a `snapshot` connection the first frame after that is
+  # decoded as an ABSOLUTE book. The venue keeps writing for a moment after an unsubscribe, so
+  # the next in-flight diff was delivered to the consumer as a whole `OrderBook` holding only
+  # the levels that diff changed, every price real and the book wrong. A frame for a symbol
+  # with no depth subscription is dropped quietly: it is the race, not bad data.
+  #
+  # Decided from `depth_streams`, which `subscribe/3` records and every connect resets, so it
+  # applies only to a state that has one; a state fed a frame without ever recording a
+  # subscription (a bare one a test built) is delivered, as before.
+  defp unsubscribed_depth?(%{depth_snapshot?: true, depth_streams: streams}, symbol),
+    do: not Enum.any?(streams, fn {streamed, _channel} -> streamed == symbol end)
+
+  defp unsubscribed_depth?(_state, _symbol), do: false
 
   # **A diff whose `u` cannot be read does not advance the sequence, and is not delivered.**
   # `u` was stored as it came, so a frame with no `u` (or a non-integer one) overwrote the

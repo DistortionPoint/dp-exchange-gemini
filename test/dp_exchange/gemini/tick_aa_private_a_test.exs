@@ -121,7 +121,7 @@ defmodule DpExchange.Gemini.TickAAPrivateATest do
 
   @fill_row %{
     "order_id" => "1",
-    "tid" => "2",
+    "tid" => 2,
     "symbol" => "btcusd",
     "price" => "100",
     "amount" => "0.5",

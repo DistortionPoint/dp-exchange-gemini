@@ -245,6 +245,11 @@ defmodule DpExchange.Gemini.Private do
   returned transfer now carries a `network` field naming the chain; the rows are passed
   through. `:timestamp` may be a `DateTime`, sent as milliseconds, or the venue's own number.
 
+  `opts[:show_completed_deposit_advances]` is the venue's boolean of that name ("True by
+  default" at the venue, rest.yaml `/v2/transfers`). It is sent only when given, `false`
+  included, so passing nothing leaves the venue's default in force; a value that is not a
+  boolean is `{:error, {:invalid_option, :show_completed_deposit_advances, value}}`.
+
   **A full page with no `:limit_transfers` is refused, not returned as the whole history.**
   The venue's page is 10 rows by default and 50 at most (`rest.yaml:3267`), and it carries no
   cursor, so the first 10 transfers were answered as the account's complete ledger while every
@@ -267,7 +272,13 @@ defmodule DpExchange.Gemini.Private do
     # the venue's chain filter (`/v2/transfers` request schema).
     params =
       opts
-      |> take_params([:limit_transfers, :currency, :network, :timestamp])
+      |> take_params([
+        :limit_transfers,
+        :currency,
+        :network,
+        :timestamp,
+        :show_completed_deposit_advances
+      ])
       |> Map.update("timestamp", nil, &timestamp_param/1)
       |> Map.reject(fn {_key, value} -> is_nil(value) end)
       |> Map.put_new("limit_transfers", @transfers_page_max)
@@ -865,13 +876,30 @@ defmodule DpExchange.Gemini.Private do
       currency: :symbol,
       network: :symbol,
       limit_transfers: {:limit, 50},
-      timestamp: :epoch
+      timestamp: :epoch,
+      show_completed_deposit_advances: :boolean
     ],
     custody_fees: [limit: {:limit, 50}, since: :epoch],
     accounts: [limit: {:limit, 500}, since: :epoch],
-    staking_history: [limit: {:limit, 500}, since: :iso, until: :iso, provider_id: :symbol],
-    staking_rewards: [since: :iso, until: :iso, provider_id: :symbol],
-    clearing_trades: [symbol: :symbol, limit: {:limit, 300}, since_nanos: :epoch],
+    staking_history: [
+      limit: {:limit, 500},
+      since: :iso,
+      until: :iso,
+      provider_id: :symbol,
+      currency: :symbol,
+      interest_only: :boolean,
+      sort_asc: :boolean
+    ],
+    staking_rewards: [since: :iso, until: :iso, provider_id: :symbol, currency: :symbol],
+    clearing_trades: [
+      symbol: :symbol,
+      limit: {:limit, 300},
+      since_nanos: :epoch,
+      timestamp: :epoch,
+      limit_trades: :count
+    ],
+    # The venue documents no maximum for `limit_orders` / `limit_trades` on the clearing reads,
+    # so `:count` is a whole number of at least 1 and nothing is clamped.
     clearing_orders: [
       symbol: :symbol,
       counterparty: :symbol,
@@ -879,9 +907,23 @@ defmodule DpExchange.Gemini.Private do
       expiration_start: :epoch,
       expiration_end: :epoch,
       submission_start: :epoch,
-      submission_end: :epoch
+      submission_end: :epoch,
+      funded: :boolean,
+      status: :symbol,
+      timestamp: :epoch,
+      limit_orders: :count
     ],
-    clearing_brokers: [symbol: :symbol, expiration_start: :epoch, expiration_end: :epoch],
+    clearing_brokers: [
+      symbol: :symbol,
+      expiration_start: :epoch,
+      expiration_end: :epoch,
+      submission_start: :epoch,
+      submission_end: :epoch,
+      funded: :boolean,
+      status: :symbol,
+      timestamp: :epoch,
+      limit_orders: :count
+    ],
     transactions: [limit: {:limit, 300}, since: :epoch],
     funding_payments: [since: :epoch, to: :epoch]
   }
@@ -907,8 +949,11 @@ defmodule DpExchange.Gemini.Private do
   `:limit` (`:limit_transfers` for transfers) is a whole number from 1 to the venue's maximum
   for that endpoint; `:since`, `:timestamp`, `:to` and `:since_nanos` a `DateTime`, a
   non-negative integer or a string of digits; the staking windows a `DateTime` or an ISO 8601
-  string; `:symbol`, `:currency`, `:network`, `:counterparty` and `:provider_id` a non-blank
-  string; a clearing `:side` `:buy` or `:sell`. Anything else is
+  string; `:symbol`, `:currency`, `:network`, `:counterparty`, `:provider_id` and a clearing
+  `:status` a non-blank string; a clearing `:side` `:buy` or `:sell`; `:funded`,
+  `:interest_only`, `:sort_asc` and `:show_completed_deposit_advances` a boolean (`false` is
+  sent, not dropped); the clearing page sizes `:limit_orders` and `:limit_trades` a whole
+  number of at least 1 (the venue states no maximum, so none is enforced). Anything else is
   `{:error, {:invalid_option, key, value}}`. `nil` is absent.
 
   `:orders` checks only a `history: true` read: the resting-orders endpoint takes none of
@@ -940,6 +985,9 @@ defmodule DpExchange.Gemini.Private do
   defp history_value?({:limit, max}, value) do
     is_integer(value) and value >= 1 and value <= max
   end
+
+  defp history_value?(:count, value), do: is_integer(value) and value >= 1
+  defp history_value?(:boolean, value), do: is_boolean(value)
 
   defp history_value?(:epoch, %DateTime{}), do: true
   defp history_value?(:epoch, value) when is_integer(value), do: value >= 0
@@ -3027,7 +3075,7 @@ defmodule DpExchange.Gemini.Private do
         {:ok,
          %{
            fee: fee,
-           fee_currency: text_or_nil(body["currency"] || body["feeCurrency"]),
+           fee_currency: text_or_nil(body["currency"]),
            network: network,
            address: address
          }}
@@ -3038,9 +3086,11 @@ defmodule DpExchange.Gemini.Private do
   # **An estimate with no readable fee is not an estimate.** `decimal/1` answers `nil` for an
   # absent, blank or non-numeric `fee`, and that `nil` was returned inside `{:ok, _}` — a
   # caller deciding whether a withdrawal is affordable read "no fee stated" as "no fee". The
-  # vendor's `FeeEstimateV2Response` always carries `fee` (a JSON number, e.g. `0.001`).
+  # vendor's `FeeEstimateV2Response` always carries `fee` (a JSON number, e.g. `0.001`) and
+  # `currency`. It has no `feeAmount` or `feeCurrency` (those are `/v2/transfers` row names):
+  # this used to fall back to them, accepting a reply that was not this endpoint's.
   defp estimated_fee(body) do
-    case decimal(body["fee"] || body["feeAmount"]) do
+    case decimal(body["fee"]) do
       nil -> {:error, :unexpected_response_shape}
       fee -> {:ok, fee}
     end
@@ -3370,8 +3420,7 @@ defmodule DpExchange.Gemini.Private do
   # money a second time. The key that went out is a real id for this withdrawal: the venue
   # documents it as the idempotency reference for exactly this request. The body is read for
   # anything better, and a body that cannot be read adds nothing but takes nothing away.
-  # The status stays `:pending`, which `withdrawal_status/1` already answers for a withdrawal
-  # the venue did not describe.
+  # The status is always `:pending` (see `build_withdrawal/3`).
   #
   # **A 2xx body that SAYS it failed is a refusal, not a withdrawal.** The spec documents
   # errors as non-2xx (`BadRequest` and friends: `{result: "error", reason, message}`) and
@@ -3414,7 +3463,7 @@ defmodule DpExchange.Gemini.Private do
     body = if is_map(body), do: body, else: %{}
 
     id =
-      Enum.find_value([body["withdrawalId"], body["clientTransferId"], transfer_id], fn value ->
+      Enum.find_value([body["withdrawalId"], transfer_id], fn value ->
         case required_id(value, :id) do
           {:ok, id} -> id
           _unreadable -> nil
@@ -3422,44 +3471,31 @@ defmodule DpExchange.Gemini.Private do
       end)
 
     with {:ok, fee} <- stated_number(body["fee"]) do
-      {:ok, build_withdrawal(body, id, {asset, network, address, amount, memo}, fee)}
+      {:ok, build_withdrawal(id, {asset, network, address, amount, memo}, fee)}
     end
   end
 
-  defp build_withdrawal(body, id, {asset, network, address, amount, memo}, fee) do
+  defp build_withdrawal(id, {asset, network, address, amount, memo}, fee) do
     %Withdrawal{
       id: id,
-      # The venue accepting a withdrawal is not the chain confirming it. `:pending` unless
-      # the venue says otherwise, because `:completed` on an unconfirmed transfer would
-      # tell a caller the money has arrived.
-      status: withdrawal_status(body["status"]),
+      # Always `:pending`, and `tx_id` always `nil`. The venue accepting a withdrawal is not
+      # the chain confirming it, and `WithdrawCryptoFundsResponse` (rest.yaml, the three
+      # examples at `/v2/withdraw/{network}/{ticker}`) carries only `withdrawalId`, `address`,
+      # `amount`, `currency` and `fee`. `status` and `txHash` are `/v2/transfers` row fields;
+      # no captured withdraw response in docs/reference/gemini shows either on this reply, so
+      # reading them would be a substitute source. `get_transfers/2` is where they are read.
+      status: :pending,
       asset: asset,
       amount: amount,
       network: network,
       address: address,
       memo: memo,
       fee: fee,
-      tx_id: tx_hash(body["txHash"]) || tx_hash(body["txn_hash"]),
+      tx_id: nil,
       requested_at: DateTime.utc_now(),
       provider: :gemini
     }
   end
-
-  # `Withdrawal.tx_id` is `String.t() | nil`. A non-blank string is a hash; anything else the
-  # venue put there (a number, a map, `""`) is no hash, and `nil` says so.
-  defp tx_hash(hash) when is_binary(hash) do
-    if String.trim(hash) == "", do: nil, else: hash
-  end
-
-  defp tx_hash(_not_a_hash), do: nil
-
-  defp withdrawal_status("complete"), do: :completed
-  defp withdrawal_status("completed"), do: :completed
-  defp withdrawal_status("failed"), do: :failed
-  defp withdrawal_status("cancelled"), do: :cancelled
-  # Anything else, including nothing, is pending. A withdrawal the venue has not described
-  # has not arrived.
-  defp withdrawal_status(_other), do: :pending
 
   @doc """
   The funding sources this account can move fiat through — `/v1/payments/methods`.
@@ -4178,7 +4214,8 @@ defmodule DpExchange.Gemini.Private do
   alongside `request` and `nonce`) — refused here as `{:error, {:missing_option, :since}}`
   before a request goes out, rather than sent without it or defaulted to a window this
   package invented. `opts[:until]` is the same format and stays optional, matching the
-  venue.
+  venue. `opts[:provider_id]` and `opts[:currency]` (a non-blank string) narrow it, sent only
+  when given.
   """
   @spec get_staking_rewards(map(), keyword()) ::
           {:ok, [StakingReward.t()]} | {:error, term()} | {:refused, term()}
@@ -4189,6 +4226,7 @@ defmodule DpExchange.Gemini.Private do
         %{"since" => iso_timestamp_param(since)}
         |> put_present("until", iso_timestamp_param(Keyword.get(opts, :until)))
         |> put_present("providerId", Keyword.get(opts, :provider_id))
+        |> put_present("currency", Keyword.get(opts, :currency))
 
       with {:ok, body, _headers} <- post("/v1/staking/rewards", params, credentials, opts),
            {:ok, periods} <- reward_periods(body) do
@@ -4317,6 +4355,12 @@ defmodule DpExchange.Gemini.Private do
   this asks for 500, and a reply that full is `{:error, :history_truncated}` (no payload):
   narrow with
   `:since`/`:until`, or pass `:limit` to take exactly one page on purpose.
+
+  The venue's other filters are reachable too, sent only when given: `opts[:currency]` (a
+  non-blank string), `opts[:interest_only]` (`interestOnly`: only the daily interest rows) and
+  `opts[:sort_asc]` (`sortAsc`: oldest first). The two booleans are sent as given, `false`
+  included; anything else is `{:error, {:invalid_option, key, value}}`. `:sort_asc` changes
+  which rows a full page holds, and the venue's page has no cursor.
   """
   @spec get_staking_history(map(), keyword()) ::
           {:ok, [StakingTransaction.t()]} | {:error, term()} | {:refused, term()}
@@ -4329,6 +4373,9 @@ defmodule DpExchange.Gemini.Private do
       |> put_present("until", iso_timestamp_param(Keyword.get(opts, :until)))
       |> put_present("limit", limit || @staking_history_page_max)
       |> put_present("providerId", Keyword.get(opts, :provider_id))
+      |> put_present("currency", Keyword.get(opts, :currency))
+      |> put_present("interestOnly", Keyword.get(opts, :interest_only))
+      |> put_present("sortAsc", Keyword.get(opts, :sort_asc))
 
     with :ok <- validate_history_opts(:staking_history, opts),
          {:ok, groups, _headers} <- post("/v1/staking/history", params, credentials, opts),
@@ -4466,7 +4513,7 @@ defmodule DpExchange.Gemini.Private do
   # "nothing moved" would be false. `staking_reply_id/1` is the `transactionId` the reply did
   # carry, so the caller has something to look the transaction up by.
   defp staking_reply_id(row) when is_map(row) do
-    case required_id(row["transactionId"] || row["id"], :id) do
+    case required_id(row["transactionId"], :id) do
       {:ok, id} -> id
       {:error, _reason} -> nil
     end
@@ -4475,16 +4522,14 @@ defmodule DpExchange.Gemini.Private do
   defp staking_reply_id(_row), do: nil
 
   defp to_staking_transaction(row, type) when is_map(row) do
-    with {:ok, id} <- required_id(row["transactionId"] || row["id"], :id),
+    with {:ok, id} <- required_id(row["transactionId"], :id),
          {:ok, asset} <- required_id(row["currency"], :asset),
          {:ok, amount} <- required_decimal(row["amount"], :amount),
          # Strict: a figure or time the venue sent and this package cannot read refuses. The
          # caller (`staking_write/6`) turns that into `{:write_unconfirmed, key, reason}`, so it
          # never reads as "nothing moved" and never carries a `nil` for something the venue sent.
-         {:ok, paid} <- order_decimal(row, "amountPaidSoFar"),
-         {:ok, remaining} <- order_decimal(row, "amountRemaining"),
-         {:ok, at} <- stated_time(row["requestInitiated"]) do
-      {:ok, build_staking_transaction(row, id, asset, amount, type, {paid, remaining, at})}
+         {:ok, extras} <- staking_reply_extras(row, type) do
+      {:ok, build_staking_transaction(row, id, asset, amount, type, extras)}
     end
   end
 
@@ -4493,6 +4538,21 @@ defmodule DpExchange.Gemini.Private do
   # no id, no asset and no amount is not a degraded record, it is a placeholder wearing the
   # shape of one.
   defp to_staking_transaction(_row, _type), do: {:error, :unexpected_response_shape}
+
+  # **Each reply is read for its own schema's fields.** `StakingDeposit` (the stake reply) has
+  # `transactionId`, `providerId`, `currency`, `amount`, `accrualTotal` and `rates`: no progress
+  # and no time. `StakingWithdrawal` (the unstake reply) has `transactionId`, `amount`,
+  # `amountPaidSoFar`, `amountRemaining`, `currency` and `requestInitiated`: no `providerId`.
+  # Reading the other's fields off either was a source the schema does not define.
+  defp staking_reply_extras(_row, :stake), do: {:ok, {nil, nil, nil}}
+
+  defp staking_reply_extras(row, :unstake) do
+    with {:ok, paid} <- order_decimal(row, "amountPaidSoFar"),
+         {:ok, remaining} <- order_decimal(row, "amountRemaining"),
+         {:ok, at} <- stated_time(row["requestInitiated"]) do
+      {:ok, {paid, remaining, at}}
+    end
+  end
 
   # `type` comes from **which endpoint was called**, not from a `transactionType` field —
   # `StakingDeposit` (`rest.yaml:9466-9497`) and `StakingWithdrawal` (`:9663-9692`) are
@@ -4515,7 +4575,7 @@ defmodule DpExchange.Gemini.Private do
       amount: amount,
       amount_paid_so_far: paid,
       amount_remaining: remaining,
-      provider_id: row["providerId"],
+      provider_id: if(type == :stake, do: row["providerId"]),
       venue_time: at,
       provider: :gemini
     }
@@ -4553,8 +4613,6 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, id} <- required_id(txn["transactionId"], :id),
          {:ok, asset} <- required_id(txn["amountCurrency"], :asset),
          {:ok, amount} <- required_decimal(txn["amount"], :amount),
-         {:ok, paid} <- order_decimal(txn, "amountPaidSoFar"),
-         {:ok, remaining} <- order_decimal(txn, "amountRemaining"),
          {:ok, at} <- stated_time(txn["dateTime"]) do
       {:ok,
        %StakingTransaction{
@@ -4563,8 +4621,10 @@ defmodule DpExchange.Gemini.Private do
          venue_type: txn["transactionType"],
          asset: String.upcase(asset),
          amount: amount,
-         amount_paid_so_far: paid,
-         amount_remaining: remaining,
+         # `StakingTransaction` (rest.yaml, the history row) has no `amountPaidSoFar` or
+         # `amountRemaining`; those are `StakingWithdrawal`'s (the unstake reply). Not read here.
+         amount_paid_so_far: nil,
+         amount_remaining: nil,
          provider_id: provider_id,
          venue_time: at,
          provider: :gemini
@@ -5775,27 +5835,47 @@ defmodule DpExchange.Gemini.Private do
   set", and the same for `submission_*`). One bound alone is
   `{:error, {:window_needs_both_bounds, :expiration | :submission}}` before a request goes
   out, rather than a request the venue refuses or reads as unbounded.
+
+  The rest of the venue's documented filters are reachable too, each sent only when given:
+  `opts[:funded]` (a boolean; the venue's default is `false` when it is absent, so `false`
+  and nothing are the same ask, and `true` is sent as `true`), `opts[:status]` (a non-blank
+  string, the venue's own status word), `opts[:timestamp]` (only orders after it; a
+  `DateTime` is sent as milliseconds) and `opts[:limit_orders]` (the page size, a whole
+  number of at least 1). **There is no cursor and the venue states no maximum**, so a
+  reply as long as an explicit `:limit_orders` may be the first slice of a longer list; the
+  caller who set it took one page on purpose. A value of the wrong type is
+  `{:error, {:invalid_option, key, value}}` before a request goes out.
   """
   @spec list_clearing_orders(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_orders(credentials, opts) do
-    with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration),
-         :ok <- window_pair(opts, :submission_start, :submission_end, :submission),
-         :ok <- validate_history_opts(:clearing_orders, opts) do
+    with :ok <- validate_clearing_list(:orders, opts) do
       params =
         %{}
         |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
         |> put_present("counterparty", Keyword.get(opts, :counterparty))
         |> put_present("side", clearing_side(Keyword.get(opts, :side)))
-        |> put_present("expiration_start", timestamp_param(Keyword.get(opts, :expiration_start)))
-        |> put_present("expiration_end", timestamp_param(Keyword.get(opts, :expiration_end)))
-        |> put_present("submission_start", timestamp_param(Keyword.get(opts, :submission_start)))
-        |> put_present("submission_end", timestamp_param(Keyword.get(opts, :submission_end)))
+        |> put_clearing_list_filters(opts)
 
       with {:ok, body, _headers} <- post("/v1/clearing/list", params, credentials, opts) do
         clearing_rows(body, "orders")
       end
     end
+  end
+
+  # The filters the two clearing listings share: the expiration and submission windows (in the
+  # venue's own milliseconds), `funded`, `status`, `timestamp` and `limit_orders`. Each is
+  # sent only when given; `funded: false` is a value, not an absence.
+  defp put_clearing_list_filters(params, opts) do
+    params
+    |> put_present("expiration_start", timestamp_param(Keyword.get(opts, :expiration_start)))
+    |> put_present("expiration_end", timestamp_param(Keyword.get(opts, :expiration_end)))
+    |> put_present("submission_start", timestamp_param(Keyword.get(opts, :submission_start)))
+    |> put_present("submission_end", timestamp_param(Keyword.get(opts, :submission_end)))
+    |> put_present("funded", Keyword.get(opts, :funded))
+    |> put_present("status", Keyword.get(opts, :status))
+    |> put_present("timestamp", timestamp_param(Keyword.get(opts, :timestamp)))
+    |> put_present("limit_orders", Keyword.get(opts, :limit_orders))
   end
 
   defp window_pair(opts, start_key, end_key, window) do
@@ -5814,17 +5894,20 @@ defmodule DpExchange.Gemini.Private do
   order names a **source** and a **target** counterparty and a `source_side`, where a
   bilateral order names one counterparty and one side. Merging the two would leave a caller
   reading `side` on a row that has none.
+
+  Takes the same windows and filters as `list_clearing_orders/2` except `:counterparty` and
+  `:side`, which this endpoint does not document: `:symbol`, both windows (the submission
+  one is new here; each needs both of its bounds), `:funded`, `:status`, `:timestamp` and
+  `:limit_orders`, under the same checks.
   """
   @spec list_clearing_brokers(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_brokers(credentials, opts) do
-    with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration),
-         :ok <- validate_history_opts(:clearing_brokers, opts) do
+    with :ok <- validate_clearing_list(:brokers, opts) do
       params =
         %{}
         |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
-        |> put_present("expiration_start", timestamp_param(Keyword.get(opts, :expiration_start)))
-        |> put_present("expiration_end", timestamp_param(Keyword.get(opts, :expiration_end)))
+        |> put_clearing_list_filters(opts)
 
       with {:ok, body, _headers} <- post("/v1/clearing/broker/list", params, credentials, opts) do
         clearing_rows(body, "orders")
@@ -5848,26 +5931,71 @@ defmodule DpExchange.Gemini.Private do
   trades were answered as the whole list. With no `:limit` this asks for 300, and a reply
   that full is `{:error, :history_truncated}` (no payload): narrow with `:since_nanos`,
   or pass `:limit` to take exactly one page on purpose.
+
+  The venue documents a second pair of spellings for the same two asks, and both are
+  reachable: `opts[:timestamp]` (the venue's `timestamp`, milliseconds, "only return trades
+  after this timestamp"; a `DateTime` is converted) beside `:since_nanos`, and
+  `opts[:limit_trades]` ("the maximum number of trades to return", a whole number of at
+  least 1, no maximum stated) beside `:limit`. **A pair is never sent together**: the venue
+  states no precedence between `timestamp` and `timestamp_nanos`, or between `limit_trades`
+  and `limit_per_account`, so naming both is
+  `{:error, {:conflicting_options, [:since_nanos, :timestamp]}}` (or `[:limit, :limit_trades]`)
+  before a request goes out, never a guess at which the venue honours. An explicit
+  `:limit_trades` is one page taken on purpose, as `:limit` is, and then `limit_per_account`
+  is not sent at all.
   """
   @spec list_clearing_trades(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_clearing_trades(credentials, opts) do
-    limit = Keyword.get(opts, :limit)
+    page = Keyword.get(opts, :limit) || Keyword.get(opts, :limit_trades)
 
-    with :ok <- validate_history_opts(:clearing_trades, opts),
+    with :ok <- validate_clearing_trades(opts),
          {:ok, body, _headers} <-
            post("/v1/clearing/trades", clearing_trades_params(opts), credentials, opts),
          {:ok, rows} <- clearing_rows(body, "results"),
-         :ok <- page_complete(rows, limit, @clearing_trades_page_max) do
+         :ok <- page_complete(rows, page, @clearing_trades_page_max) do
       {:ok, rows}
     end
+  end
+
+  @doc """
+  What `list_clearing_trades/2` refuses before it signs: a malformed filter
+  (`{:error, {:invalid_option, key, value}}`), then a pair of options the venue gives no
+  precedence between, named together as `{:error, {:conflicting_options, [first, second]}}`
+  (`[:since_nanos, :timestamp]` before `[:limit, :limit_trades]`). Exposed so
+  `DpExchange.Gemini.Fake` refuses with this function, in this order.
+  """
+  @spec validate_clearing_trades(keyword()) :: :ok | {:error, term()}
+  def validate_clearing_trades(opts) do
+    with :ok <- validate_history_opts(:clearing_trades, opts),
+         :ok <- exclusive_options(opts, :since_nanos, :timestamp) do
+      exclusive_options(opts, :limit, :limit_trades)
+    end
+  end
+
+  defp exclusive_options(opts, first, second) do
+    if Keyword.get(opts, first) != nil and Keyword.get(opts, second) != nil,
+      do: {:error, {:conflicting_options, [first, second]}},
+      else: :ok
   end
 
   defp clearing_trades_params(opts) do
     %{}
     |> put_present("symbol", clearing_symbol(Keyword.get(opts, :symbol)))
     |> put_present("timestamp_nanos", nanos_param(Keyword.get(opts, :since_nanos)))
-    |> put_present("limit_per_account", Keyword.get(opts, :limit) || @clearing_trades_page_max)
+    |> put_present("timestamp", timestamp_param(Keyword.get(opts, :timestamp)))
+    |> put_present("limit_trades", Keyword.get(opts, :limit_trades))
+    |> put_present("limit_per_account", per_account_limit(opts))
+  end
+
+  # The documented default and maximum when the caller named neither page size; absent when
+  # the caller chose `limit_trades`, whose interplay with `limit_per_account` the venue does
+  # not state.
+  defp per_account_limit(opts) do
+    case {Keyword.get(opts, :limit), Keyword.get(opts, :limit_trades)} do
+      {nil, nil} -> @clearing_trades_page_max
+      {limit, _none} -> limit
+    end
   end
 
   # The four terms the venue requires on every clearing write, and none of them defaulted.
@@ -6026,6 +6154,7 @@ defmodule DpExchange.Gemini.Private do
 
   def validate_clearing_list(:brokers, opts) do
     with :ok <- window_pair(opts, :expiration_start, :expiration_end, :expiration),
+         :ok <- window_pair(opts, :submission_start, :submission_end, :submission),
          do: validate_history_opts(:clearing_brokers, opts)
   end
 

@@ -1211,7 +1211,7 @@ named subaccount could not reach the venue and the token's own account would ans
 | `live?/1` | none (and only `:credentials` and `:environment` beyond them) |
 | `get_balances/2`, `get_accounts/2`, `place_order/3`, `cancel_order/3`, `get_order/3`, `test_connection/2`, `get_notional_balances/3`, `get_trade_volume/2`, `get_fx_rate/3`, `list_payment_methods/2`, `transfer_internal/4`, `remove_approved_address/3`, `get_staking_balances/1`, `get_positions/1`, `get_margin_rates/1`, `preview_margin_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`, `confirm_clearing_order/3` | none |
 | `get_fees/2` | `:symbol` |
-| `get_transfers/2` | `:limit_transfers`, `:currency`, `:network`, `:timestamp` |
+| `get_transfers/2` | `:limit_transfers`, `:currency`, `:network`, `:timestamp`, `:show_completed_deposit_advances` (boolean) |
 | `get_orders/2` | `:history`, `:symbol`, `:limit`, `:since` |
 | `get_trade_history/2` | `:symbol`, `:limit`, `:since` |
 | `cancel_all_orders/2` | `:scope` |
@@ -1222,8 +1222,8 @@ named subaccount could not reach the venue and the token's own account would ans
 | `withdraw/5` | `:memo`, `:memo_required`, `:client_transfer_id` |
 | `add_payment_method/2` | `:country` |
 | `request_approved_address/4` | `:memo` |
-| `get_staking_rewards/1` | `:since`, `:until`, `:provider_id` |
-| `get_staking_history/1` | `:limit`, `:since`, `:until`, `:provider_id` |
+| `get_staking_rewards/1` | `:since`, `:until`, `:provider_id`, `:currency` |
+| `get_staking_history/1` | `:limit`, `:since`, `:until`, `:provider_id`, `:currency`, `:interest_only` (boolean), `:sort_asc` (boolean) |
 | `stake/3`, `unstake/3` | `:provider_id` |
 | `quote_conversion/4`, `convert/4` | `:symbol`, `:side` |
 | `commit_conversion/2` | `:symbol`, `:side`, `:amount`, `:price`, `:fee` |
@@ -1232,9 +1232,9 @@ named subaccount could not reach the venue and the token's own account would ans
 | `funding_payment_report/1`, `funding_payment_report_file/1`, `funding_amount_report/2` | `:from`, `:to`, `:rows` (no `:symbol`: a payment report takes none and a stray one used to be dropped; the amount report's symbol is its argument) |
 | `create_clearing_order/2` | `:counterparty_id`, `:expires_in_hrs` |
 | `create_broker_clearing_order/2` | `:source_counterparty_id`, `:target_counterparty_id`, `:expires_in_hrs` |
-| `list_clearing_orders/1` | `:symbol`, `:counterparty`, `:side`, `:expiration_start`, `:expiration_end`, `:submission_start`, `:submission_end` |
-| `list_clearing_brokers/1` | `:symbol`, `:expiration_start`, `:expiration_end` |
-| `list_clearing_trades/1` | `:symbol`, `:limit`, `:since_nanos` |
+| `list_clearing_orders/1` | `:symbol`, `:counterparty`, `:side`, `:expiration_start`, `:expiration_end`, `:submission_start`, `:submission_end`, `:funded` (boolean), `:status`, `:timestamp`, `:limit_orders` (whole number >= 1) |
+| `list_clearing_brokers/1` | `:symbol`, `:expiration_start`, `:expiration_end`, `:submission_start`, `:submission_end`, `:funded`, `:status`, `:timestamp`, `:limit_orders` |
+| `list_clearing_trades/1` | `:symbol`, `:limit`, `:since_nanos`, `:timestamp`, `:limit_trades` (`:since_nanos` with `:timestamp`, or `:limit` with `:limit_trades`, is `{:error, {:conflicting_options, [first, second]}}`) |
 | `create_account/1` | `:name`, `:type` |
 | `rename_account/3` | `:shortname` (`id` and `name` are arguments) |
 | `list_accounts/1` | `:limit`, `:since` |
@@ -1277,7 +1277,9 @@ Lifecycle notices (`:link_up`, `:link_down`, `:coverage_change`) are never throt
 * **`:data_quality`** is a sequence gap (`:sequence_gap`, `:sequence_restart`) or data this
   package cannot decode (`:undecodable_depth_update`, `:unreadable_partial_depth_snapshot`,
   `:unattributable_partial_depth_snapshot`, `:undecodable_book_ticker`,
-  `:unreadable_book_ticker_level`, `:undecodable_trade`). **`:degraded`** stays for "a slower
+  `:unreadable_book_ticker_level`, `:undecodable_trade`, and `:undecodable_frame` for a text
+  frame that is not a JSON object: `details.bytes` is its size, never its text).
+  **`:degraded`** stays for "a slower
   path is in use or the link is not serving" (`:silent_connection`, `:subscribe_unanswered`,
   a dropped slow subscriber). This moved: a gap and an undecodable depth update were
   `:degraded` (BREAKING for a consumer matching the kind).

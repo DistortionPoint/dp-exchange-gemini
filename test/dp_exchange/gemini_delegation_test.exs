@@ -281,7 +281,10 @@ defmodule DpExchange.GeminiDelegationTest do
     test "get_accounts/2", %{opts: opts} do
       assert {:ok, [_account]} =
                Gemini.get_accounts(@credentials,
-                 plug: responding(%{"account" => "primary"}),
+                 plug:
+                   responding(%{
+                     "account" => %{"accountName" => "Primary", "shortName" => "primary"}
+                   }),
                  limiter: opts[:limiter],
                  retry_attempts: 0
                )
@@ -372,7 +375,7 @@ defmodule DpExchange.GeminiDelegationTest do
       body = [
         %{
           "order_id" => "1",
-          "tid" => "2",
+          "tid" => 2,
           "price" => "100",
           "amount" => "0.5",
           "type" => "Buy",
@@ -546,7 +549,7 @@ defmodule DpExchange.GeminiDelegationTest do
       assert {:ok, _added} =
                Gemini.add_payment_method(
                  %{"accountNumber" => "1"},
-                 money_opts(sup, %{"id" => "b-2"})
+                 money_opts(sup, %{"referenceId" => "BankAccountRefId(18428)"})
                )
     end
 
@@ -556,7 +559,13 @@ defmodule DpExchange.GeminiDelegationTest do
                  "BTC",
                  Decimal.new("1"),
                  [from: "a", to: "b"],
-                 money_opts(sup, %{"ok" => true})
+                 money_opts(sup, %{
+                   "fromAccount" => "a",
+                   "toAccount" => "b",
+                   "amount" => "1",
+                   "uuid" => "9c153d64-83ba-4532-a159-ebe3f6797766",
+                   "message" => "Success, transfer completed."
+                 })
                )
     end
 
@@ -566,27 +575,31 @@ defmodule DpExchange.GeminiDelegationTest do
                  "ethereum",
                  "0xabc",
                  "desk",
-                 money_opts(sup, %{"status" => "pending-time"})
+                 money_opts(sup, %{"message" => "Approved address addition is now waiting."})
                )
 
       assert {:ok, _removed} =
                Gemini.remove_approved_address(
                  "ethereum",
                  "0xabc",
-                 money_opts(sup, %{"ok" => true})
+                 money_opts(sup, %{"message" => "0xabc removed from approved addresses."})
                )
     end
 
     test "get_transactions/2", %{opts: sup} do
       # The reply wraps its rows under `"results"` — `rest.yaml`, 2026-09-29 — rather than
       # being the bare array this fixture used to send.
-      body = %{"results" => [%{"type" => "Trade"}]}
+      body = %{"results" => [%{"type" => "trade", "tid" => 144_115_199_446_910_513}]}
 
       assert {:ok, [_row]} = Gemini.get_transactions(@money_creds, money_opts(sup, body))
     end
 
     test "list_networks/2 and list_fee_promos/1", %{opts: sup} do
-      assert {:ok, [_row]} = Gemini.list_networks("USDC", money_opts(sup, [%{"token" => "USDC"}]))
+      assert {:ok, [_row]} =
+               Gemini.list_networks(
+                 "USDC",
+                 money_opts(sup, %{"token" => "USDC", "network" => ["ethereum"]})
+               )
 
       assert {:ok, [_promo]} =
                Gemini.list_fee_promos(money_opts(sup, %{"symbols" => ["btcusd"]}))
@@ -616,7 +629,7 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "list_custody_fees/2", %{opts: sup} do
-      rows = [%{"currency" => "BTC", "amount" => "0.0001"}]
+      rows = [%{"feeCurrency" => "BTC", "feeAmount" => "0.0001", "eid" => 1}]
       assert {:ok, [_fee]} = Gemini.list_custody_fees(@money_creds, money_opts(sup, rows))
     end
 

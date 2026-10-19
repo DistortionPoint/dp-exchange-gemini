@@ -839,6 +839,7 @@ defmodule DpExchange.Gemini do
 
   History options are validated before any request is sent. See
   `DpExchange.Gemini.Private.get_transfers/2` and `c:DpExchange.Core.Venue.get_transfers/2`.
+  `:show_completed_deposit_advances` (a boolean) is the venue's own filter of that name.
   """
   @impl true
   def get_transfers(credentials, opts),
@@ -1552,6 +1553,12 @@ defmodule DpExchange.Gemini do
 
   See `DpExchange.Gemini.Private.list_clearing_orders/2`. Expiration and submission are
   different windows.
+
+  Every filter the venue documents for `/v1/clearing/list` is an option: `:symbol`,
+  `:counterparty`, `:side`, the two windows (`:expiration_start` / `:expiration_end`,
+  `:submission_start` / `:submission_end`, each needing both bounds), `:funded`, `:status`,
+  `:timestamp` and `:limit_orders`. Each is sent only when given and checked before a request
+  goes out.
   """
   @spec list_clearing_orders(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -1564,7 +1571,9 @@ defmodule DpExchange.Gemini do
   @doc """
   Broker clearing orders — a different row shape from `list_clearing_orders/1`.
 
-  See `DpExchange.Gemini.Private.list_clearing_brokers/2`.
+  See `DpExchange.Gemini.Private.list_clearing_brokers/2`. Takes the same filters as
+  `list_clearing_orders/1` except `:counterparty` and `:side`, which this endpoint does not
+  document.
   """
   @spec list_clearing_brokers(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -1578,7 +1587,9 @@ defmodule DpExchange.Gemini do
   Clearing trades — the orders that completed.
 
   See `DpExchange.Gemini.Private.list_clearing_trades/2`. `opts[:since_nanos]` is
-  nanoseconds, unlike every other timestamp on this venue.
+  nanoseconds, unlike every other timestamp on this venue; `opts[:timestamp]` is the venue's
+  second spelling, in milliseconds, and `opts[:limit_trades]` its second page size. Naming both
+  of either pair is `{:error, {:conflicting_options, [first, second]}}`.
   """
   @spec list_clearing_trades(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -1618,7 +1629,8 @@ defmodule DpExchange.Gemini do
   Rewards accrued over a window.
 
   See `DpExchange.Gemini.Private.get_staking_rewards/2`. The window travels with the number,
-  because the same number is a good day or a poor quarter without it.
+  because the same number is a good day or a poor quarter without it. `:provider_id` and
+  `:currency` narrow it.
   """
   @impl true
   def get_staking_rewards(opts \\ []),
@@ -1631,7 +1643,8 @@ defmodule DpExchange.Gemini do
   Movements in and out of staked positions.
 
   See `DpExchange.Gemini.Private.get_staking_history/2`. A redemption's progress travels
-  with it; `nil` is "not reported", not "complete".
+  with it; `nil` is "not reported", not "complete". `:provider_id`, `:currency`,
+  `:interest_only` and `:sort_asc` are the venue's own filters.
   """
   @impl true
   def get_staking_history(opts \\ []),

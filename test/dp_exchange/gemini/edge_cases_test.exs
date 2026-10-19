@@ -411,8 +411,10 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
       # a call naming no symbol; the venue never did.
       credentials = %{api_key: "k", api_secret: "s"}
 
-      assert {:ok, []} = Fake.get_trade_history(credentials, [])
-      assert {:ok, []} = Fake.get_trade_history(credentials, symbol: "BTC-USD")
+      assert {:ok, [_btc, _eth]} = Fake.get_trade_history(credentials, [])
+
+      assert {:ok, [%{symbol: "BTC-USD"}]} =
+               Fake.get_trade_history(credentials, symbol: "BTC-USD")
     end
 
     test "it answers the same identity questions as the real package" do

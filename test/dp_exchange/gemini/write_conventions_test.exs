@@ -429,6 +429,8 @@ defmodule DpExchange.Gemini.WriteConventionsTest do
     end
 
     test "a present but unreadable optional field is write_unconfirmed, never a nil" do
+      # `StakingWithdrawal` (the unstake reply): `amountPaidSoFar`, `amountRemaining`,
+      # `requestInitiated`.
       body = %{
         "transactionId" => "tx-1",
         "currency" => "ETH",
@@ -438,7 +440,7 @@ defmodule DpExchange.Gemini.WriteConventionsTest do
       }
 
       assert {:error, {:write_unconfirmed, "tx-1", :unexpected_response_shape}} =
-               Private.stake("ETH", Decimal.new("1"), @credentials,
+               Private.unstake("ETH", Decimal.new("1"), @credentials,
                  provider_id: "p",
                  plug: answering(200, Jason.encode!(body))
                )
@@ -446,9 +448,36 @@ defmodule DpExchange.Gemini.WriteConventionsTest do
       absent = Map.drop(body, ["amountPaidSoFar", "amountRemaining"])
 
       assert {:ok, %StakingTransaction{id: "tx-1", amount_paid_so_far: nil}} =
-               Private.stake("ETH", Decimal.new("1"), @credentials,
+               Private.unstake("ETH", Decimal.new("1"), @credentials,
                  provider_id: "p",
                  plug: answering(200, Jason.encode!(absent))
+               )
+    end
+
+    test "a stake reply is read for StakingDeposit's fields only: progress fields are ignored" do
+      # `StakingDeposit` has no `amountPaidSoFar` / `amountRemaining` / `requestInitiated`, so
+      # an unreadable one is not a field this decoder reads, and the stake carries none.
+      body = %{
+        "transactionId" => "tx-2",
+        "providerId" => "p",
+        "currency" => "ETH",
+        "amount" => "1",
+        "amountPaidSoFar" => "not a number",
+        "amountRemaining" => %{"x" => 1},
+        "requestInitiated" => "bad"
+      }
+
+      assert {:ok,
+              %StakingTransaction{
+                id: "tx-2",
+                provider_id: "p",
+                amount_paid_so_far: nil,
+                amount_remaining: nil,
+                venue_time: nil
+              }} =
+               Private.stake("ETH", Decimal.new("1"), @credentials,
+                 provider_id: "p",
+                 plug: answering(200, Jason.encode!(body))
                )
     end
 

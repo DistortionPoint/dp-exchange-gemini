@@ -75,12 +75,11 @@ defmodule DpExchange.Gemini.TickAAFakeTest do
   end
 
   describe "add_payment_method/2 for Canada" do
-    test "registers the account as pending through the Canadian endpoint" do
+    test "answers the Canadian endpoint's own reply, not the US one's and not the bank fields" do
       details = %{"accountNumber" => "1"}
       opts = [country: "CA", credentials: @credentials]
-      expected = %{"id" => "bank-3", "status" => "pending", "accountNumber" => "1"}
 
-      assert Fake.add_payment_method(details, opts) == {:ok, expected}
+      assert Fake.add_payment_method(details, opts) == {:ok, %{"result" => "OK"}}
     end
   end
 
@@ -90,7 +89,7 @@ defmodule DpExchange.Gemini.TickAAFakeTest do
       as_integer = [since: 1_700_000_000_001]
 
       assert {:ok, rows} = Fake.get_transactions(@credentials, as_string)
-      assert Enum.map(rows, & &1["type"]) == ["Deposit", "Fee"]
+      assert Enum.map(rows, & &1["eid"]) == [368_598_436_530, 368_598_436_531]
       assert Fake.get_transactions(@credentials, as_integer) == {:ok, rows}
     end
   end

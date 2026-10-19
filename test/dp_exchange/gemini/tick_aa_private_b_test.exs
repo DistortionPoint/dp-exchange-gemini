@@ -54,13 +54,9 @@ defmodule DpExchange.Gemini.TickAAPrivateBTest do
 
   defp opts(plug), do: [plug: plug, retry_attempts: 0]
 
-  describe "withdraw/6 carries the venue's stated outcome" do
-    test "completed, failed and cancelled are each the venue's own word, not pending" do
-      for {venue, status} <- [
-            {"completed", :completed},
-            {"failed", :failed},
-            {"cancelled", :cancelled}
-          ] do
+  describe "withdraw/6 states only what WithdrawCryptoFundsResponse states" do
+    test "a status the schema does not define on the reply is not a source: always pending" do
+      for venue <- ["completed", "failed", "cancelled", "complete"] do
         body = %{"withdrawalId" => "w-1", "status" => venue}
 
         assert {:ok, withdrawal} =
@@ -73,7 +69,7 @@ defmodule DpExchange.Gemini.TickAAPrivateBTest do
                    opts(responding(body))
                  )
 
-        assert withdrawal.status == status
+        assert withdrawal.status == :pending
       end
     end
   end
@@ -104,7 +100,7 @@ defmodule DpExchange.Gemini.TickAAPrivateBTest do
           |> Jason.decode!()
 
         token = (payload["continuation_token"] || "tok") <> "-"
-        body = %{"results" => [%{"type" => "Fee"}], "continuationToken" => token}
+        body = %{"results" => [%{"eid" => 1}], "continuationToken" => token}
         responding(body).(conn)
       end
 
@@ -112,14 +108,14 @@ defmodule DpExchange.Gemini.TickAAPrivateBTest do
     end
 
     test "an empty token is the last page" do
-      body = %{"results" => [%{"type" => "Trade"}], "continuationToken" => ""}
+      body = %{"results" => [%{"type" => "trade"}], "continuationToken" => ""}
 
-      assert {:ok, [%{"type" => "Trade"}]} =
+      assert {:ok, [%{"type" => "trade"}]} =
                Private.get_transactions(@credentials, opts(responding(body)))
     end
 
     test "a token that is not a string is unreadable" do
-      body = %{"results" => [%{"type" => "Trade"}], "continuationToken" => 5}
+      body = %{"results" => [%{"type" => "trade"}], "continuationToken" => 5}
 
       assert {:error, :unexpected_response_shape} =
                Private.get_transactions(@credentials, opts(responding(body)))

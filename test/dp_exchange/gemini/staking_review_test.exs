@@ -89,10 +89,16 @@ defmodule DpExchange.Gemini.StakingReviewTest do
       [%{"providerId" => "p", "transactions" => [Map.merge(base, txn)]}]
     end
 
-    test "unreadable progress amounts and times fail the page" do
+    test "unreadable times fail the page; progress fields are not history fields, so ignored" do
+      assert {:ok, [tx]} =
+               Private.get_staking_history(
+                 @credentials,
+                 [plug: json(history(%{"amountRemaining" => "soon"}))] ++ @opts
+               )
+
+      assert tx.amount_remaining == nil
+
       for txn <- [
-            %{"amountRemaining" => "soon"},
-            %{"amountPaidSoFar" => false},
             %{"dateTime" => "yesterday"},
             %{"dateTime" => 0},
             %{"dateTime" => -5}

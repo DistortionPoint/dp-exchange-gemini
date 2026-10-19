@@ -168,11 +168,13 @@ defmodule DpExchange.GeminiLiveTest do
 
       :ok = DpExchange.Gemini.Feed.subscribe(feed, ["BTC-USD"], to: self())
 
-      assert_receive {:dp_exchange, :gemini, %Types.Quote{symbol: "BTC-USD"} = quote_struct},
+      # The book arrives as a `TopOfBook`, dated from the frame's `E`; a `Quote` is only the
+      # last trade (`c`) and states no time of its own.
+      assert_receive {:dp_exchange, :gemini, %Types.TopOfBook{symbol: "BTC-USD"} = top},
                      30_000
 
-      assert quote_struct.venue_time.year == DateTime.utc_now().year
-      assert Decimal.positive?(quote_struct.bid)
+      assert top.venue_time.year == DateTime.utc_now().year
+      assert Decimal.positive?(top.bid)
     end
   end
 
@@ -222,7 +224,7 @@ defmodule DpExchange.GeminiLiveTest do
 
       :ok = DpExchange.Gemini.Feed.subscribe(feed, ["BTC-USD"], to: self())
 
-      assert_receive {:dp_exchange, :gemini, %Types.Quote{symbol: "BTC-USD"}}, 30_000
+      assert_receive {:dp_exchange, :gemini, %Types.TopOfBook{symbol: "BTC-USD"}}, 30_000
     end
 
     test "production and demo are genuinely different venues" do
