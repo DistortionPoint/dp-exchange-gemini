@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.153] - 2026-10-19
+
 ### Dependencies
 
 - **Requires `dp_exchange_core ~> 0.3.111`** (was `~> 0.3.109`). That release refuses a GET with a body
