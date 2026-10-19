@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.152] - 2026-10-19
+
 ### Added
 
 - **The venue's documented list filters are options.** Each is sent only when given, checked
