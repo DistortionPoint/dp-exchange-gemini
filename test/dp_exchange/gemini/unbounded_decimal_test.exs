@@ -65,10 +65,14 @@ defmodule DpExchange.Gemini.UnboundedDecimalTest do
       body = ~s([{"tid": 1, "timestampms": 1787936377000, "price": 1e999999999,
                   "amount": 1, "type": "buy"}])
 
-      # The decoder itself refuses the body (Decimal will not build that number), so the
-      # refusal is the whole reply's, before any price is read.
-      assert {:error, {:undecodable_response, :gemini}} =
-               Rest.get_trades("BTC-USD", plug: raw(body), retry_attempts: 0)
+      # Refused either way, and which refusal depends on the decimal the consumer resolved.
+      # Under decimal 3 the decoder itself will not build that number (its parse limits are the
+      # default), so the whole reply is refused before any price is read. Under decimal 2, down
+      # to the 2.0.0 floor, it builds, and the exponent bound refuses the price.
+      assert {:error, reason} = Rest.get_trades("BTC-USD", plug: raw(body), retry_attempts: 0)
+
+      assert reason == {:undecodable_response, :gemini} or
+               match?({:invalid_decimal, :price, %Decimal{}}, reason)
     end
 
     test "REST: a book level with that exponent refuses the book instead of sorting it" do

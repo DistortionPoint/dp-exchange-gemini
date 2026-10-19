@@ -93,7 +93,7 @@ before a request is made.
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
 `Core.Types.TopOfBook` has always had. `dp_exchange_core 0.2.1` introduced the fields; this
-package now requires `~> 0.3.95`.
+package requires `~> 0.3.109` (its floor is in `mix.exs`; `0.3.95` is where this change landed).
 
 ```elixir
 # before
@@ -415,6 +415,26 @@ package saw it. Public REST bodies are now decoded as `Decimal`s exactly (`float
 :decimals`), as private ones have been since 0.2.108; the WebSocket channels send decimal
 **strings** (`DecimalString` in the AsyncAPI document) and are unaffected. This needs
 `dp_exchange_core ~> 0.3.65`, the first release that lets a venue decode its own bodies.
+
+**A number of more than 34 significant digits is unreadable, under decimal 2 and 3 alike.**
+This package accepts `decimal ~> 2.0 or ~> 3.0`, and the two differ here: decimal 3 refuses to
+parse 35 digits and decimal 2 (down to its 2.0.0 floor) parses any length, so the same venue
+string used to be a number under one and `nil` under the other. Every decoder here now refuses a
+coefficient of 35 digits or more (a price, size or amount never has them), as it already refused
+NaN, Infinity and an exponent past 100 either way. As a string that is the usual refusal of
+that field (`{:invalid_decimal, field, value}`, or `nil` where the field is optional). As a bare
+JSON number the refusal differs by version, and both are refusals: decimal 3 will not build the
+number, so the whole reply is `{:error, {:undecodable_response, :gemini}}`; decimal 2 builds it
+and the field is refused as above. An amount you pass in (`Decimal` or integer) is held to the
+same bound: `{:error, {:invalid_quantity, value}}` and its kin, never a raise.
+
+**A fractional JSON number where an object belongs is a shape error.** `floats: :decimals` makes
+`1.5` a `%Decimal{}`, which is a struct and so also a map. A body such as `[1.5]` or `1.5` where
+rows or an object belong used to reach `row["field"]` and raise in the calling process (on
+`withdraw/5`, after the money moved). It is `{:error, :unexpected_response_shape}` now, or, for
+the once-only writes, `{:error, {:write_unconfirmed, key, :unexpected_response_shape}}`;
+`withdraw/5` keeps its documented answer for a 2xx it cannot read, `{:ok, %Withdrawal{}}` with
+the `clientTransferId` it sent.
 
 ## A 404 on a market-data call is a refusal, not a retryable error
 
@@ -835,6 +855,23 @@ DpExchange.Gemini.get_balances(credentials, nonce_mode: :incremental)
 A mismatch fails loudly on the first request with `InvalidNonce` — a 400, not a wrong
 answer.
 
+Where the nonce comes from, so you can reason about two callers using one key. Every
+incremental mode draws from a node-wide counter shared by every process on the node and every
+key (`max(now, previous + 1)`, a compare-and-exchange, so two processes never draw equal or
+decreasing values, and a clock that steps backwards never lowers it). **Every attempt is signed
+afresh**, so a retry after a transport error never re-sends a used nonce. Nothing coordinates
+two nodes, or another client, using one key: that is the case `seed_nonce/1` and the finer
+modes below exist for. A refusal the venue makes of a nonce is `{:refused, {:invalid_nonce,
+message}}` (or `{:nonce_mark_out_of_reach, message}` under the finer modes), as above.
+
+Three refusals are made here, before anything is signed or sent, and are never retried:
+`{:error, {:unsupported_nonce_mode, mode}}` for a `nonce_mode:` this package has no nonce for (a
+typo such as `:incremental_ms`, a scale outside 1 to 12, anything that is not a mode; judged
+under an API key only, because an OAuth call carries no nonce), which `DpExchange.Gemini.Fake`
+answers too; `{:error, :nonce_exhausted}` when the counter has reached `2^64 - 1` (rotate the
+key); and `{:error, :unencodable_payload}` for a payload the JSON encoder cannot write (a pid or
+a tuple inside `add_payment_method/2`'s details).
+
 Note that a seconds-granularity nonce on an *incremental* key caps that key at **one
 request per second**, a tenth of the private ceiling (600 per minute, ten a second). That is why the mode is
 not something this package can paper over.
@@ -1209,7 +1246,7 @@ named subaccount could not reach the venue and the token's own account would ans
 | `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `coverage_by_kind/1`, `wanted/1` | `:feed` |
 | `subscribe_notices/1` | `:to`, `:feed` |
 | `live?/1` | none (and only `:credentials` and `:environment` beyond them) |
-| `get_balances/2`, `get_accounts/2`, `place_order/3`, `cancel_order/3`, `get_order/3`, `test_connection/2`, `get_notional_balances/3`, `get_trade_volume/2`, `get_fx_rate/3`, `list_payment_methods/2`, `transfer_internal/4`, `remove_approved_address/3`, `get_staking_balances/1`, `get_positions/1`, `get_margin_rates/1`, `preview_margin_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`, `confirm_clearing_order/3` | none |
+| `get_balances/2`, `get_accounts/2`, `place_order/3`, `cancel_order/3`, `get_order/3`, `test_connection/2`, `get_notional_balances/3`, `get_trade_volume/2`, `get_fx_rate/3`, `list_payment_methods/2`, `transfer_internal/4`, `remove_approved_address/3`, `get_staking_balances/1`, `get_positions/1`, `get_margin_rates/1`, `preview_margin_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`, `confirm_clearing_order/3`, `get_roles/1` | none |
 | `get_fees/2` | `:symbol` |
 | `get_transfers/2` | `:limit_transfers`, `:currency`, `:network`, `:timestamp`, `:show_completed_deposit_advances` (boolean) |
 | `get_orders/2` | `:history`, `:symbol`, `:limit`, `:since` |
@@ -1452,7 +1489,9 @@ variable), is refused before anything is sent
 (`{:error, :client_id_required}`, `{:error, :refresh_token_required}`). The shape of a
 successful reply is **unmeasured**: the vendor's OpenAPI document does not describe
 `/auth/token`, so the decoded body is returned as the venue sent it and is not checked for an
-`access_token`. Check it yourself before replacing the token you hold.
+`access_token`. Check it yourself before replacing the token you hold. It must be a JSON
+object: a `2xx` whose body is a list, a string, `null` or a number is
+`{:error, :unexpected_response_shape}`, and the outcome is as unknown as any other error here.
 
 `revoke_access_token/1` needs an OAuth token and refuses an API key
 (`{:error, :oauth_token_required}`): an API-key-signed call there would revoke nothing and
@@ -1523,7 +1562,11 @@ Applies to every state-changing call that is not an order: `withdraw/5`, `transf
 `convert/4`, `commit_conversion/2`, `stake/3`, `unstake/3`, `create_clearing_order/2`,
 `create_broker_clearing_order/2`, `confirm_clearing_order/3`, `cancel_clearing_order/2`,
 `add_payment_method/2`, `request_approved_address/4`, `remove_approved_address/3`,
-`cancel_all_orders/2` and `revoke_access_token/1`.
+`cancel_all_orders/2`, `revoke_access_token/1`, and (since tick AN; each used to answer a bare
+`{:error, _}` after a send) `get_deposit_address/3`, `create_account/1` and `rename_account/3`.
+For `create_account/1` and `rename_account/3` a `2xx` that is not an object is unconfirmed
+too; `get_deposit_address/3` keeps `{:error, :unexpected_response_shape}` for one (a new
+address is the venue's to mint again, and none was handed back to lose).
 
 A failure after the request may have reached the venue -- a timeout or connection failure, a
 5xx, a `2xx` that is not JSON or whose body cannot show what was done -- is never a bare
@@ -1630,6 +1673,16 @@ package could not decode. The realistic cause is not malformed JSON from the ven
 answering `200 text/html`. **Worth retrying**: nothing about the request was wrong. This
 package used to substitute an empty object for such a body, which then decoded into a
 well-formed value with every field `nil` and was returned as success.
+
+`{:error, :unexpected_response_shape}` is also what a `2xx` JSON body of the wrong kind answers
+on every call that returns the venue's own object or rows (tick AN; each used to hand back
+`{:ok, garbage}`): `get_roles/1`, `get_account_margin/1`, `get_margin_account/1`,
+`preview_margin_order/2`, `get_clearing_order/2`, `get_fees/2` and `test_connection/2` need an
+object (`test_connection/2` used to report `reachable: true` for a reply that proved nothing),
+and `get_transfers/2`, `get_transactions/2`, `list_custody_fees/2`, `get_notional_balances/3`,
+`get_trade_volume/2`, `list_funding_payments/1`, `funding_payment_report/1`,
+`list_accounts/1`, `get_margin_rates/1`, `list_clearing_orders/1`, `list_clearing_brokers/1`
+and `list_clearing_trades/1` need a list whose every row is one.
 
 `{:error, :unexpected_response_shape}` from `get_balances/2` — a balance row the venue did
 not attribute to an asset refuses the whole reply. An amount you cannot name an asset for

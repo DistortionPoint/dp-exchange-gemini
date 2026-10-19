@@ -114,9 +114,13 @@ defmodule DpExchange.Gemini.StakingReviewTest do
         ~s([{"providerId":"p","transactions":[{"transactionId":"t1","amountCurrency":"ETH",) <>
           ~s("amount":"1","dateTime":1E+999999999}]}])
 
-      # Refused by the decoder, which will not build that number, before any row is read.
-      assert {:error, {:undecodable_response, :gemini}} =
+      # Refused either way. Under decimal 3 the decoder will not build that number, so the reply
+      # is refused before any row is read; under decimal 2 (down to the 2.0.0 floor) it builds,
+      # and the exponent bound refuses the time without building the integer.
+      assert {:error, reason} =
                Private.get_staking_history(@credentials, [plug: raw(bytes)] ++ @opts)
+
+      assert reason in [{:undecodable_response, :gemini}, :unexpected_response_shape]
     end
 
     test "absent progress and time stay nil" do

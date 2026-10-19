@@ -136,6 +136,14 @@ defmodule DpExchange.Gemini.Private do
 
   alias DpExchange.Gemini.{Auth, Environment, Rest, SymbolFormat}
 
+  # **A JSON object, and not a `Decimal`.** Bodies are decoded with `floats: :decimals`
+  # (`decoded_body/1`), so a fractional JSON number is a `%Decimal{}`: a struct, and therefore
+  # also `is_map/1`. A reply holding `1.5` where a row belongs passed an `is_map/1` check and
+  # then raised in the caller's process on `row["field"]` (`Access` refuses structs), or on
+  # enumerating it, on a call that may already have moved money. Every "is this an object" test
+  # in this module is this guard.
+  defguardp is_object(value) when is_map(value) and not is_struct(value)
+
   @doc "Every currency the account holds, with what is available and what is on hold."
   @spec get_balances(map(), keyword()) ::
           {:ok, [Balance.t()]} | {:error, term()} | {:refused, term()}
@@ -160,11 +168,8 @@ defmodule DpExchange.Gemini.Private do
   # account has no record of itself", "this account cannot move anything on that network")
   # and a bare string or number into a one-row list holding it. Both are plausible answers
   # the venue never gave.
-  defp object_rows(%{} = body), do: {:ok, [body]}
-
-  defp object_rows(rows) when is_list(rows) do
-    if Enum.all?(rows, &is_map/1), do: {:ok, rows}, else: {:error, :unexpected_response_shape}
-  end
+  defp object_rows(body) when is_object(body), do: {:ok, [body]}
+  defp object_rows(rows) when is_list(rows), do: object_list(rows)
 
   defp object_rows(_unreadable), do: {:error, :unexpected_response_shape}
 
@@ -291,6 +296,7 @@ defmodule DpExchange.Gemini.Private do
     # is one row honestly, and anything else is unreadable rather than wrapped.
     with {:ok, body, _headers} <- post("/v2/transfers", params, credentials, opts),
          {:ok, rows} <- Rest.list(body),
+         {:ok, rows} <- object_list(rows),
          :ok <- transfers_complete(rows, Keyword.get(opts, :limit_transfers)) do
       {:ok, rows}
     end
@@ -685,7 +691,12 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp wire_number(value) when is_integer(value), do: {:ok, Decimal.new(value)}
+  defp wire_number(value) when is_integer(value) do
+    case bounded(Decimal.new(value)) do
+      nil -> :error
+      bounded -> {:ok, bounded}
+    end
+  end
 
   # NaN, Infinity and an exponent no amount has are refused. The last matters here as it does
   # for a venue string: `Decimal.to_string(1E999999999, :normal)` writes a billion digits into
@@ -1070,7 +1081,7 @@ defmodule DpExchange.Gemini.Private do
   def cancel_scope(nil), do: {:error, :scope_required}
   def cancel_scope(other), do: {:error, {:unsupported_scope, other}}
 
-  defp cancel_all_result(%{"details" => details}) when is_map(details) do
+  defp cancel_all_result(%{"details" => details}) when is_object(details) do
     with {:ok, cancelled} <- ids(details["cancelledOrders"]),
          {:ok, rejected} <- ids(details["cancelRejects"]) do
       {:ok, %{cancelled: cancelled, rejected: rejected}}
@@ -1176,7 +1187,11 @@ defmodule DpExchange.Gemini.Private do
   """
   @spec test_connection(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def test_connection(credentials, opts) do
-    with {:ok, body, _headers} <- post("/v1/heartbeat", %{}, credentials, opts) do
+    # The heartbeat answers an object (`{"result": "ok"}`). A 200 that is JSON of any other
+    # shape (`null`, a string) is not the venue's answer, and `reachable: true` on it would
+    # claim the key, the signature and the nonce mode were proven by a reply that proved none.
+    with {:ok, body, _headers} <- post("/v1/heartbeat", %{}, credentials, opts),
+         {:ok, body} <- Rest.object(body) do
       {:ok, %{reachable: true, environment: Environment.resolve(opts), response: body}}
     end
   end
@@ -1923,7 +1938,8 @@ defmodule DpExchange.Gemini.Private do
   # kind of required: an unknown quantity is still a balance, an unattributable one is not.
   # `available` and `hold` stay unguarded for the same reason — both are optional on this
   # type.
-  defp to_balance(row, _timestamp) when not is_map(row), do: {:error, :unexpected_response_shape}
+  defp to_balance(row, _timestamp) when not is_object(row),
+    do: {:error, :unexpected_response_shape}
 
   defp to_balance(row, timestamp) do
     # `amount` and `available` are optional in the vendor's `Balance` schema: absent or `null`
@@ -2002,7 +2018,7 @@ defmodule DpExchange.Gemini.Private do
   # `fee`, `fee_currency` and `liquidity` are not enforced, so an ABSENT one stays `nil`: a
   # venue that did not state a fee has not stated one. A fee the venue sent and this package
   # cannot read refuses the page (`decode_fill/2`); `nil` would read as "no fee".
-  defp to_fill(row, _requested_symbol) when not is_map(row),
+  defp to_fill(row, _requested_symbol) when not is_object(row),
     do: {:error, :unexpected_response_shape}
 
   # `symbol` used to be the CALLER's own argument, echoed onto every row unread — safe only
@@ -2437,7 +2453,7 @@ defmodule DpExchange.Gemini.Private do
   # does, passing `nil, nil` — so a body without `totalSpendCurrency` produced a conversion
   # naming neither side of itself. A conversion that does not say what was sold, what was
   # bought, or which quote it belongs to cannot be reconciled against anything.
-  defp to_conversion(%{} = body, from, to, status, headers, requested_side) do
+  defp to_conversion(body, from, to, status, headers, requested_side) when is_object(body) do
     # `quoteId` OR `orderId`. The quote-and-commit endpoints name it `quoteId`; the one-step
     # wrap endpoint (`convert/4`) names it `orderId` and sends no `quoteId` at all — so
     # reading only the first meant EVERY wrap conversion came back with `id: nil`, on a
@@ -2644,11 +2660,11 @@ defmodule DpExchange.Gemini.Private do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_trade_volume(credentials, opts) do
     # The venue nests one list per symbol inside the outer list. Every flattened entry must
-    # be a volume object: `List.flatten/1` hands a bare scalar straight back, and a row that
-    # is not an object is a reply this package could not read, not a volume row.
-    with {:ok, rows, _headers} <- post("/v1/tradevolume", %{}, credentials, opts),
-         {:ok, flat} <- flattened_rows(rows) do
-      if Enum.all?(flat, &is_map/1), do: {:ok, flat}, else: {:error, :unexpected_response_shape}
+    # be a volume object (`flattened_rows/1` checks it): `List.flatten/1` hands a bare scalar
+    # straight back, and a row that is not an object is a reply this package could not read,
+    # not a volume row.
+    with {:ok, rows, _headers} <- post("/v1/tradevolume", %{}, credentials, opts) do
+      flattened_rows(rows)
     end
   end
 
@@ -2858,6 +2874,11 @@ defmodule DpExchange.Gemini.Private do
   reply whose own `network` differs from the one asked for is
   `{:error, {:network_mismatch, requested, returned}}` — an address on another chain is never
   handed back as the requested one.
+
+  Sent once. A request that may have created an address without the reply proving it (a
+  timeout or connection failure after the send, a 5xx) is `{:error, {:write_unconfirmed, nil,
+  reason}}`: the venue gives this call no key, and this package lists no deposit addresses, so
+  check the account's deposit addresses at the venue before asking again.
   """
   @spec get_deposit_address(String.t(), String.t(), map(), keyword()) ::
           {:ok, DepositAddress.t()} | {:error, term()} | {:refused, term()}
@@ -2872,8 +2893,16 @@ defmodule DpExchange.Gemini.Private do
          # Once: every call generates a NEW address, and nothing in the request lets the venue
          # tell a retry from a second ask, so a retried timeout would create an address the
          # caller never saw. See `post_once/4`.
+         #
+         # **An outcome that may have created an address is `{:write_unconfirmed, nil, _}`** (W1),
+         # as for every other once-only write: a timeout after the send is not "no address was
+         # made", and a bare error reads as that and invites the second ask this call refuses to
+         # make for itself. The venue gives the call no key, so the caller checks the account's
+         # deposit addresses at the venue before asking again.
          {:ok, body, _headers} <-
-           post_once("/v1/deposit/#{network_segment}/newAddress", params, credentials, opts),
+           "/v1/deposit/#{network_segment}/newAddress"
+           |> post_once(params, credentials, opts)
+           |> after_send(nil),
          # An object, or a refusal — `body["address"]` on a list raises. See
          # `Rest.object/1`.
          {:ok, body} <- Rest.object(body),
@@ -2974,7 +3003,7 @@ defmodule DpExchange.Gemini.Private do
   # this family, so that check never ran. An allowlist entry with no address is the one shape
   # this type must not take: a caller checking whether a withdrawal destination is approved
   # would be comparing against nothing.
-  defp to_approved_address(row, _network) when not is_map(row),
+  defp to_approved_address(row, _network) when not is_object(row),
     do: {:error, :unexpected_response_shape}
 
   defp to_approved_address(row, network) do
@@ -3441,7 +3470,7 @@ defmodule DpExchange.Gemini.Private do
       else: accepted_withdrawal(body, transfer_id, details)
   end
 
-  defp withdrawal_error_body?(%{} = body) do
+  defp withdrawal_error_body?(body) when is_object(body) do
     failed_result?(body["result"]) or
       (not has_withdrawal_id?(body) and
          (error_text?(body["reason"]) or error_text?(body["message"])))
@@ -3460,7 +3489,7 @@ defmodule DpExchange.Gemini.Private do
     do: match?({:ok, _id}, required_id(body["withdrawalId"], :id))
 
   defp accepted_withdrawal(body, transfer_id, {asset, network, address, amount, memo}) do
-    body = if is_map(body), do: body, else: %{}
+    body = if is_object(body), do: body, else: %{}
 
     id =
       Enum.find_value([body["withdrawalId"], transfer_id], fn value ->
@@ -3525,7 +3554,7 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp payment_rows(%{} = body) do
+  defp payment_rows(body) when is_object(body) do
     with {:ok, balances} <- payment_kind_rows(body["balances"], "balance"),
          {:ok, banks} <- payment_kind_rows(body["banks"], "bank") do
       {:ok, balances ++ banks}
@@ -3542,7 +3571,7 @@ defmodule DpExchange.Gemini.Private do
 
   defp payment_kind_rows(_unreadable, _kind), do: {:error, :unexpected_response_shape}
 
-  defp payment_kind_row(%{} = row, kind), do: {:ok, Map.put(row, "kind", kind)}
+  defp payment_kind_row(row, kind) when is_object(row), do: {:ok, Map.put(row, "kind", kind)}
   defp payment_kind_row(_unreadable, _kind), do: {:error, :unexpected_response_shape}
 
   @doc """
@@ -3990,11 +4019,13 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp transactions_body(%{"results" => rows} = body) when is_list(rows) do
-    case body["continuationToken"] do
-      token when is_binary(token) and token != "" -> {:ok, rows, token}
-      nil -> {:ok, rows, nil}
-      "" -> {:ok, rows, nil}
-      _unreadable -> {:error, :unexpected_response_shape}
+    with {:ok, rows} <- object_list(rows) do
+      case body["continuationToken"] do
+        token when is_binary(token) and token != "" -> {:ok, rows, token}
+        nil -> {:ok, rows, nil}
+        "" -> {:ok, rows, nil}
+        _unreadable -> {:error, :unexpected_response_shape}
+      end
     end
   end
 
@@ -4146,7 +4177,7 @@ defmodule DpExchange.Gemini.Private do
   # `to_staking_transaction/1` was fixed for: `""` is not a weaker answer but a different
   # kind of wrong, because it passes every `nil` check a consumer might write while naming
   # no asset at all. The fix went into one of the three functions that shared the line.
-  defp to_staking_balance(row, at) when is_map(row) do
+  defp to_staking_balance(row, at) when is_object(row) do
     # Optional fields: absent is `nil`, but one the venue SENT and this package cannot read
     # fails the row — `nil` would claim the venue did not say.
     with {:ok, asset} <- required_id(row["currency"], :asset),
@@ -4181,7 +4212,7 @@ defmodule DpExchange.Gemini.Private do
   # present a partial split as the whole one.
   defp by_provider(nil), do: {:ok, %{}}
 
-  defp by_provider(%{} = breakdown) do
+  defp by_provider(breakdown) when is_object(breakdown) do
     Enum.reduce_while(breakdown, {:ok, %{}}, fn
       {provider_id, %{"balance" => balance}}, {:ok, acc} when not is_nil(balance) ->
         case decimal(balance) do
@@ -4247,7 +4278,7 @@ defmodule DpExchange.Gemini.Private do
   # is "the rate at accrual", which only a period has, and its window is the period's first
   # and last accrual. The provider and currency come from the keys the venue nested them
   # under. Anything that is not the documented nesting is refused.
-  defp reward_periods(%{} = body) do
+  defp reward_periods(body) when is_object(body) do
     body
     |> Enum.reduce_while({:ok, []}, fn {provider_id, currencies}, {:ok, acc} ->
       case provider_periods(provider_id, currencies) do
@@ -4263,7 +4294,7 @@ defmodule DpExchange.Gemini.Private do
 
   defp reward_periods(_other), do: {:error, :unexpected_response_shape}
 
-  defp provider_periods(provider_id, %{} = currencies) do
+  defp provider_periods(provider_id, currencies) when is_object(currencies) do
     currencies
     |> Enum.reduce_while({:ok, []}, fn
       {currency, %{"ratePeriods" => periods}}, {:ok, acc} when is_list(periods) ->
@@ -4283,7 +4314,7 @@ defmodule DpExchange.Gemini.Private do
 
   # `:asset` and `:amount` are both in `StakingReward`'s `@enforce_keys`. Same `""` asset
   # substitution as `to_staking_balance/2` and `to_staking_transaction/1`; same answer.
-  defp to_staking_reward({provider_id, currency, period}) when is_map(period) do
+  defp to_staking_reward({provider_id, currency, period}) when is_object(period) do
     with {:ok, asset} <- required_id(currency, :asset),
          {:ok, amount} <- required_decimal(period["accrualTotal"], :amount),
          {:ok, apy} <- order_decimal(period, "apyPct"),
@@ -4512,7 +4543,7 @@ defmodule DpExchange.Gemini.Private do
   # at the caller (W1/W3), never a hard error**: the venue accepted the stake or redemption, so
   # "nothing moved" would be false. `staking_reply_id/1` is the `transactionId` the reply did
   # carry, so the caller has something to look the transaction up by.
-  defp staking_reply_id(row) when is_map(row) do
+  defp staking_reply_id(row) when is_object(row) do
     case required_id(row["transactionId"], :id) do
       {:ok, id} -> id
       {:error, _reason} -> nil
@@ -4521,7 +4552,7 @@ defmodule DpExchange.Gemini.Private do
 
   defp staking_reply_id(_row), do: nil
 
-  defp to_staking_transaction(row, type) when is_map(row) do
+  defp to_staking_transaction(row, type) when is_object(row) do
     with {:ok, id} <- required_id(row["transactionId"], :id),
          {:ok, asset} <- required_id(row["currency"], :asset),
          {:ok, amount} <- required_decimal(row["amount"], :amount),
@@ -4609,7 +4640,7 @@ defmodule DpExchange.Gemini.Private do
   # own `TimestampType` allows — an epoch number (the field's own example,
   # `1667418560153`, and its description "in milliseconds") or an ISO string, should the
   # venue ever send one here the way `requestInitiated` does elsewhere.
-  defp to_staking_history_transaction(txn, provider_id) when is_map(txn) do
+  defp to_staking_history_transaction(txn, provider_id) when is_object(txn) do
     with {:ok, id} <- required_id(txn["transactionId"], :id),
          {:ok, asset} <- required_id(txn["amountCurrency"], :asset),
          {:ok, amount} <- required_decimal(txn["amount"], :amount),
@@ -4790,7 +4821,7 @@ defmodule DpExchange.Gemini.Private do
   #
   # A quantity that could not be READ is still a refusal, and that distinction is the one
   # this must not blur: one is a decode failure, the other a fact about the account.
-  defp to_position(row, at) when is_map(row) do
+  defp to_position(row, at) when is_object(row) do
     with {:ok, symbol} <- required_position_symbol(position_symbol(row["symbol"])),
          {:ok, quantity} <- required_decimal(row["quantity"], :quantity) do
       case position_side(quantity) do
@@ -4917,7 +4948,7 @@ defmodule DpExchange.Gemini.Private do
       params = %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
 
       with {:ok, body, _headers} <- post("/v1/margin", params, credentials, opts) do
-        {:ok, body}
+        Rest.object(body)
       end
     end
   end
@@ -5179,7 +5210,7 @@ defmodule DpExchange.Gemini.Private do
       params = %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
 
       with {:ok, body, _headers} <- post("/v1/margin/account", params, credentials, opts) do
-        {:ok, body}
+        Rest.object(body)
       end
     end
   end
@@ -5204,9 +5235,9 @@ defmodule DpExchange.Gemini.Private do
   end
 
   # Unreadable is not empty: `{:ok, []}` for a reply without its list said no rates.
-  defp margin_rate_rows(%{"rates" => rates}) when is_list(rates), do: {:ok, rates}
+  defp margin_rate_rows(%{"rates" => rates}) when is_list(rates), do: object_list(rates)
   defp margin_rate_rows(%{"rates" => nil}), do: {:ok, []}
-  defp margin_rate_rows(rates) when is_list(rates), do: {:ok, rates}
+  defp margin_rate_rows(rates) when is_list(rates), do: object_list(rates)
   defp margin_rate_rows(_other), do: {:error, :unexpected_response_shape}
 
   @doc """
@@ -5232,7 +5263,7 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, params} <- margin_preview_params(request) do
       with {:ok, body, _headers} <-
              post("/v1/margin/order/preview", params, credentials, opts) do
-        {:ok, body}
+        Rest.object(body)
       end
     end
   end
@@ -5350,9 +5381,14 @@ defmodule DpExchange.Gemini.Private do
     # a second subaccount is an artifact only an Administrator can clear up. A caller whose
     # call times out re-issues it deliberately, which is the right way round; guessing that
     # the venue would have refused the duplicate is not.
+    #
+    # An outcome that may have created the subaccount is `{:write_unconfirmed, nil, _}` (W1):
+    # a bare error reads as "no account was made", and a second one is what this call refuses
+    # to make for itself. List the accounts (`list_accounts/2`) before creating it again.
     with {:ok, params} <- create_account_params(name, opts),
-         {:ok, body, _headers} <- post_once("/v1/account/create", params, credentials, opts),
-         do: {:ok, body}
+         {:ok, body, _headers} <-
+           "/v1/account/create" |> post_once(params, credentials, opts) |> after_send(nil),
+         do: object_write(body, nil)
   end
 
   @doc """
@@ -5402,9 +5438,13 @@ defmodule DpExchange.Gemini.Private do
   def rename_account(credentials, opts) do
     # Once: `account` names the CURRENT shortname, so a rename that took effect and lost its
     # reply, sent again, finds no such account and reads as a refusal. See `post_once/4`.
+    #
+    # An outcome that may have renamed it is `{:write_unconfirmed, nil, _}` (W1): read
+    # `list_accounts/2` to see which name stands.
     with {:ok, params} <- rename_account_params(opts),
-         {:ok, body, _headers} <- post_once("/v1/account/rename", params, credentials, opts),
-         do: {:ok, body}
+         {:ok, body, _headers} <-
+           "/v1/account/rename" |> post_once(params, credentials, opts) |> after_send(nil),
+         do: object_write(body, nil)
   end
 
   @typedoc "The options `rename_account_params/1` checks."
@@ -5499,7 +5539,8 @@ defmodule DpExchange.Gemini.Private do
   """
   @spec get_roles(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_roles(credentials, opts) do
-    with {:ok, body, _headers} <- post("/v1/roles", %{}, credentials, opts), do: {:ok, body}
+    with {:ok, body, _headers} <- post("/v1/roles", %{}, credentials, opts),
+         do: Rest.object(body)
   end
 
   # --- OAuth token lifecycle ----------------------------------------------
@@ -5596,8 +5637,12 @@ defmodule DpExchange.Gemini.Private do
     form_body = URI.encode_query(form)
 
     case HttpClient.request(:post, url, headers, form_body, http_opts) do
+      # The token reply is an object. Anything else that decodes (a list, a string, `null`) is
+      # not a token pair, and handing it back inside `{:ok, _}` told the caller to replace the
+      # token it holds with it. The outcome of the refresh is then unknown, like any `{:error, _}`
+      # here: the doc says to try the refresh token held.
       {:ok, %{status: status, body: body}} when status in 200..299 ->
-        decoded_body(body)
+        with {:ok, decoded} <- decoded_body(body), do: Rest.object(decoded)
 
       {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
         {:refused, refused_token_body(body)}
@@ -5644,7 +5689,7 @@ defmodule DpExchange.Gemini.Private do
                "/v1/oauth/revokeByToken"
                |> post_once(%{}, credentials, Keyword.put(opts, :auth_scheme, :oauth))
                |> after_send(nil),
-             do: {:ok, body}
+             do: object_write(body, nil)
 
       _other ->
         {:error, :oauth_token_required}
@@ -5737,7 +5782,7 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, clearing_id} <- clearing_id_arg(clearing_id),
          {:ok, body, _headers} <-
            post("/v1/clearing/status", %{"clearing_id" => clearing_id}, credentials, opts),
-         do: {:ok, body}
+         do: Rest.object(body)
   end
 
   # A clearing id is a non-blank string. A `nil`, atom or number was a `FunctionClauseError`
@@ -6036,14 +6081,14 @@ defmodule DpExchange.Gemini.Private do
   # could retry.
   defp clearing_rows(%{} = body, key) do
     case Map.fetch(body, key) do
-      {:ok, rows} when is_list(rows) -> {:ok, rows}
+      {:ok, rows} when is_list(rows) -> object_list(rows)
       {:ok, nil} -> {:ok, []}
       {:ok, _unreadable} -> {:error, :unexpected_response_shape}
       :error -> {:error, :unexpected_response_shape}
     end
   end
 
-  defp clearing_rows(rows, _key) when is_list(rows), do: {:ok, rows}
+  defp clearing_rows(rows, _key) when is_list(rows), do: object_list(rows)
   defp clearing_rows(_body, _key), do: {:error, :unexpected_response_shape}
 
   # **A reply that is a genuine JSON array decodes as sent; anything else is unreadable.**
@@ -6059,7 +6104,18 @@ defmodule DpExchange.Gemini.Private do
   # flattening a wrapped scalar would still be `list_rows/1`'s substitution, just delayed a
   # step.
   defp flattened_rows(rows) do
-    with {:ok, rows} <- list_rows(rows), do: {:ok, List.flatten(rows)}
+    with {:ok, rows} <- list_rows(rows), do: object_list(List.flatten(rows))
+  end
+
+  # **A row is an object.** Every list this module hands back as `[map()]` (transfers, custody
+  # fees, funding payments, accounts, margin rates, clearing orders) holds the venue's own rows,
+  # and a reply whose list held strings, numbers or `null` was returned inside `{:ok, rows}`:
+  # a caller reading `row["amount"]` raised on it, or read a `nil` for a figure the venue never
+  # sent. A list with anything but objects in it is a reply this package could not read.
+  defp object_list(rows) do
+    if Enum.all?(rows, fn row -> is_object(row) end),
+      do: {:ok, rows},
+      else: {:error, :unexpected_response_shape}
   end
 
   # --- request validation, exposed for the Fake ----------------------------
@@ -6341,7 +6397,7 @@ defmodule DpExchange.Gemini.Private do
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
-  defp decimal(value) when is_integer(value), do: Decimal.new(value)
+  defp decimal(value) when is_integer(value), do: value |> Decimal.new() |> bounded()
   # No float clause: every value read here comes from a body `decoded_body/1` decoded with
   # `floats: :decimals`, or from a caller string (`wire_number/1`), so a float never arrives;
   # one would fall to the `nil` catch-all below rather than be guessed at.
@@ -6380,8 +6436,16 @@ defmodule DpExchange.Gemini.Private do
   # parses, and `Decimal.compare/2` or `Decimal.add/2` against it aligns exponents by building
   # an integer of that many digits: one venue string stalls the caller's process. NaN and
   # Infinity carry no integer coefficient and are refused here too.
+  #
+  # A coefficient of more than 34 digits is refused as well, so decimal 2 (which parses any
+  # length, down to the 2.0.0 floor) and decimal 3 (which refuses 35 significant digits) read
+  # the same numbers. It also keeps `Decimal.to_string(value, :normal)` on an amount this package
+  # signs inside what decimal 3 will write (it raises past 6,178 digits), where a caller's
+  # `Decimal` or integer of thousands of digits raised in the calling process.
+  @max_coefficient 10_000_000_000_000_000_000_000_000_000_000_000
+
   defp bounded(%Decimal{coef: coef, exp: exp} = value)
-       when is_integer(coef) and exp >= -100 and exp <= 100,
+       when is_integer(coef) and coef < @max_coefficient and exp >= -100 and exp <= 100,
        do: value
 
   defp bounded(_nan_infinite_or_unbounded), do: nil

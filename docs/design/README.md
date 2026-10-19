@@ -75,8 +75,8 @@ docs/design/
 │   └── iteration-cycles.md             # Review and iteration process
 ├── ideas/                              # Non-blocking discoveries (idea docs)
 │   └── <topic>.md                      # No date prefix; deleted when work lands
-├── closed/                             # Historical archive — completed plans
-│   ├── README.md                       # Explains archive-only purpose
+├── closed/                             # Historical archive — completed plans (empty until the
+│   │                                   #   first plan closes; there is no README here yet)
 │   └── YYYY-MM-DD_topic-name.md        # Same filenames, preserved chronology
 │       + YYYY-MM-DD_topic-name/        # Matching code samples directory moves too
 └── [Active Design Documents]           # Open plans currently being worked on

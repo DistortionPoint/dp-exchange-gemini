@@ -20,6 +20,62 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fractional JSON number where an object belongs raised in the caller's process.** Bodies
+  are decoded with `floats: :decimals`, so `1.5` is a `%Decimal{}`: a struct, and so also
+  `is_map/1`. A reply of `[1.5]` or `1.5` where rows or an object belong passed every
+  `is_map/1` / `%{} = row` check and then raised on `row["field"]` (`Access` refuses structs) or
+  on enumerating it: in `get_balances/2`, `get_trade_history/2`, `get_positions/1`, the staking
+  reads and `Rest.get_staking_rates/1`, and in `withdraw/5` after the money had moved. One
+  guard (`is_object`: a map and not a struct) now decides "is this an object" in `Rest` and
+  `Private`. A shape error (`{:error, :unexpected_response_shape}`) for a read, an
+  unconfirmed write for the once-only writes, and `withdraw/5` keeps its documented
+  `{:ok, %Withdrawal{}}` carrying the `clientTransferId` it sent. `Rest.get_staking_rates/1`
+  also stopped building an all-`nil` `StakingRate` out of such a value.
+- **A reply of the wrong JSON kind was `{:ok, garbage}` on calls typed `{:ok, map()}` or
+  `{:ok, [map()]}`.** `get_roles/1`, `get_account_margin/1`, `get_margin_account/1`,
+  `preview_margin_order/2` and `get_clearing_order/2` returned whatever decoded;
+  `test_connection/2` reported `reachable: true` for a `null` or a string;
+  `refresh_access_token/3` handed back a list or a string as the token reply. All are
+  `{:error, :unexpected_response_shape}` now. `get_transfers/2`, `get_transactions/2`,
+  `list_custody_fees/2`, `get_notional_balances/3`, `list_funding_payments/1`,
+  `funding_payment_report/1`, `list_accounts/1`, `get_margin_rates/1` and the clearing lists
+  returned a list of strings or numbers as rows; a row that is not an object refuses the reply.
+- **`get_deposit_address/3`, `create_account/1` and `rename_account/3` answered a bare
+  `{:error, _}` after a send** although `usage-rules.md` lists all three as sent once and
+  every other once-only write answers `{:error, {:write_unconfirmed, key, reason}}`. A timeout, a
+  reset, a 5xx or an unreadable `2xx` after the request left is `{:error, {:write_unconfirmed,
+  nil, reason}}` now (the venue gives these calls no key): read `list_accounts/1` (or check the
+  account's deposit addresses at the venue) before asking again. `create_account/1` and `rename_account/3` also refuse a `2xx` that is not
+  an object that way instead of returning it in `{:ok, _}`; `revoke_access_token/1` likewise.
+- **decimal 2.0.0 and 3.x read different numbers.** decimal 3 refuses to parse 35 significant
+  digits; decimal 2, down to the 2.0.0 floor this package admits, parses any length. The same
+  venue string was a `Decimal` under one and `nil` under the other, and a caller's integer or
+  `Decimal` of thousands of digits reached `Decimal.to_string(value, :normal)`, which raises on
+  decimal 3 past 6,178 digits, in the calling process. Every `bounded/1` (`Rest`, `Private`,
+  `WsDecode`) now refuses a coefficient of 35 digits or more, and integers pass through it too, so
+  `place_order/3` and the other money writes answer `{:error, {:invalid_quantity, value}}` and
+  its kin instead. Two tests that asserted a decimal-3-only refusal (a JSON number with an
+  exponent of 999999999 is an undecodable body only under decimal 3) accept either refusal.
+- `DpExchange.Gemini.Fake` accepted any `:nonce_mode`; the real call refuses a value it has no
+  nonce for as `{:error, {:unsupported_nonce_mode, mode}}`, after the credentials and only under
+  an API key. The fake refuses it the same way, from `Auth.check_nonce_mode/1`.
+
+### Added
+
+- `Auth.check_nonce_mode/1`: whether a `:nonce_mode` can be drawn for, without drawing one.
+  Exposed for the fake.
+
+### Changed
+
+- `usage-rules.md`: where a nonce comes from and what two callers of one key can rely on; the
+  three refusals made before signing (`:unsupported_nonce_mode`, `:nonce_exhausted`,
+  `:unencodable_payload`); the 34-digit bound and the decimal 2/3 difference; the wrong-kind
+  `2xx` answers; the once-only writes that answer `:write_unconfirmed`; the stale core floor
+  (`~> 0.3.109`); `get_roles/1` in the option table. `docs/design/README.md` no longer lists a
+  `closed/README.md` that does not exist.
+
 ## [0.2.152] - 2026-10-19
 
 ### Added

@@ -1173,9 +1173,21 @@ defmodule DpExchange.Gemini.Fake do
       :ok
     else
       scheme = Config.opt(opts, :auth_scheme, Private.credential_scheme(credentials))
-      authenticated_venue_faithful(scheme, credentials)
+
+      with :ok <- authenticated_venue_faithful(scheme, credentials) do
+        nonce_mode_faithful(scheme, opts)
+      end
     end
   end
+
+  # `Auth.headers/5` refuses a `:nonce_mode` it cannot draw a nonce for
+  # (`{:unsupported_nonce_mode, mode}`), after the credentials and only under an API key: an
+  # OAuth call carries no nonce. The fake accepted any value, so a consumer's test passed with
+  # a typo (`:incremental_ms`) that the real call refuses on its first request.
+  defp nonce_mode_faithful(:api_key, opts),
+    do: opts |> Keyword.get(:nonce_mode) |> Auth.check_nonce_mode()
+
+  defp nonce_mode_faithful(_scheme, _opts), do: :ok
 
   # dp-exchange-core issue #38. A master-scoped key must name the subaccount on every
   # account-level call, and the venue answers `MissingAccounts` when it does not. A fake

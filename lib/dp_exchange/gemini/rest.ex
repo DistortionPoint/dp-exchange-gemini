@@ -103,6 +103,13 @@ defmodule DpExchange.Gemini.Rest do
 
   alias DpExchange.Gemini.{Environment, SymbolFormat}
 
+  # **A JSON object, and not a `Decimal`.** Bodies are decoded with `floats: :decimals`
+  # (`decoded_body/1`), so a fractional JSON number is a `%Decimal{}`, which is a struct and so
+  # also `is_map/1`. A reply holding `1.5` where an object belongs matched `%{} = row` and then
+  # raised in the caller's process on the first `row["field"]`, since `Access` refuses structs.
+  # Every "is this an object" test here is this guard, never `is_map/1` or a bare `%{}`.
+  defguardp is_object(value) when is_map(value) and not is_struct(value)
+
   # The venue's refusal vocabulary, written down at compile time so that decoding one can
   # never mint an atom from venue-supplied text. See `refusal_reason/1` for why that
   # matters more than it looks.
@@ -959,7 +966,7 @@ defmodule DpExchange.Gemini.Rest do
   # `WsDecode.to_trade/2` — the socket arm of the same type — already used the nil-preserving
   # form. It was the one that did not guard `price` and `quantity`, which this function did.
   # Each file held the fix the other needed.
-  defp to_trade(row, _symbol) when not is_map(row), do: {:error, :unexpected_response_shape}
+  defp to_trade(row, _symbol) when not is_object(row), do: {:error, :unexpected_response_shape}
 
   defp to_trade(row, symbol) do
     with {:ok, timestamp} <- trade_time(row),
@@ -1100,7 +1107,7 @@ defmodule DpExchange.Gemini.Rest do
   defp promo_rows(%{"symbols" => nil}), do: {:ok, []}
   defp promo_rows(%{"symbols" => _unreadable}), do: {:error, :unexpected_response_shape}
   defp promo_rows(rows) when is_list(rows), do: {:ok, rows}
-  defp promo_rows(%{} = row), do: {:ok, [row]}
+  defp promo_rows(row) when is_object(row), do: {:ok, [row]}
   defp promo_rows(_other), do: {:error, :unexpected_response_shape}
 
   @doc """
@@ -1153,7 +1160,7 @@ defmodule DpExchange.Gemini.Rest do
   # a provider as offering nothing, and a row as a `StakingRate` with every number `nil`,
   # asserting the provider stakes that asset. A caller choosing where to stake then chose
   # among what this package could read, believing it was everything the venue offered.
-  defp staking_rates(%{} = body) do
+  defp staking_rates(body) when is_object(body) do
     body
     |> Enum.reduce_while({:ok, []}, fn {provider_id, assets}, {:ok, acc} ->
       case rates_for_provider(provider_id, assets) do
@@ -1169,10 +1176,10 @@ defmodule DpExchange.Gemini.Rest do
 
   defp staking_rates(_other), do: {:error, :unexpected_response_shape}
 
-  defp rates_for_provider(provider_id, %{} = assets) do
+  defp rates_for_provider(provider_id, assets) when is_object(assets) do
     assets
     |> Enum.reduce_while({:ok, []}, fn
-      {asset, %{} = row}, {:ok, acc} ->
+      {asset, row}, {:ok, acc} when is_object(row) ->
         case staking_rate(asset, provider_id, row) do
           {:ok, rate} -> {:cont, {:ok, [rate | acc]}}
           error -> {:halt, error}
@@ -1387,7 +1394,7 @@ defmodule DpExchange.Gemini.Rest do
   # already uses for the same condition in `quoted_price/1` and `to_fx_rate/3`.
   @doc false
   @spec object(term()) :: {:ok, map()} | {:error, :unexpected_response_shape}
-  def object(%{} = body), do: {:ok, body}
+  def object(body) when is_object(body), do: {:ok, body}
   def object(_other), do: {:error, :unexpected_response_shape}
 
   @doc false
@@ -2064,7 +2071,7 @@ defmodule DpExchange.Gemini.Rest do
   #
   # Absent or `null` is `nil` ("not stated"); a `volume` that is not an object, or a base figure
   # the venue sent and this package cannot read, refuses the reply instead of reading as nil.
-  defp base_volume(%{"volume" => volume}, native) when is_map(volume) do
+  defp base_volume(%{"volume" => volume}, native) when is_object(volume) do
     base =
       native
       |> SymbolFormat.to_canonical_symbol()
@@ -2080,7 +2087,7 @@ defmodule DpExchange.Gemini.Rest do
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
-  defp decimal(value) when is_integer(value), do: Decimal.new(value)
+  defp decimal(value) when is_integer(value), do: value |> Decimal.new() |> bounded()
 
   # No float clause: every value read here comes from a body decoded with
   # `floats: :decimals` (`decoded_body/1`), which yields a `Decimal` or an integer and never a
@@ -2125,8 +2132,16 @@ defmodule DpExchange.Gemini.Rest do
   # Infinity carry no integer coefficient and are refused here too. Bodies are decoded with
   # `floats: :decimals`, so a JSON number reaches here as a `Decimal` with whatever exponent
   # the venue wrote.
+  #
+  # **And a coefficient of more than 34 digits is refused too**, so decimal 2 and 3 read the same
+  # numbers. decimal 3 refuses to parse a string of more than 34 significant digits (the
+  # decimal128 precision), decimal 2 down to the 2.0.0 floor parses any length, so the same venue
+  # string was a `Decimal` under one and `nil` under the other. No price, size or amount has 35
+  # digits; a number that long is unreadable on both.
+  @max_coefficient 10_000_000_000_000_000_000_000_000_000_000_000
+
   defp bounded(%Decimal{coef: coef, exp: exp} = value)
-       when is_integer(coef) and exp >= -100 and exp <= 100,
+       when is_integer(coef) and coef < @max_coefficient and exp >= -100 and exp <= 100,
        do: value
 
   defp bounded(_nan_infinite_or_unbounded), do: nil

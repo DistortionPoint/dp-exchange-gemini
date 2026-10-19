@@ -260,6 +260,20 @@ defmodule DpExchange.Gemini.Auth do
   defp known_mode?(mode), do: mode in @nonce_modes
 
   @doc """
+  Whether `mode` is a `:nonce_mode` this module can draw a nonce for, without drawing one:
+  `:ok`, or `{:error, {:unsupported_nonce_mode, mode}}` for a typo (`:incremental_ms`), a scale
+  outside 1 to 12, or anything that is not a mode. `nil` is `:time_based`.
+
+  `headers/5` runs this after the credentials and before anything is signed, so a call never
+  draws a nonce for a mode it cannot honour. Exposed so `DpExchange.Gemini.Fake` refuses with
+  this function, in the same place, rather than accepting what the real call refuses.
+  """
+  @spec check_nonce_mode(term()) :: :ok | {:error, {:unsupported_nonce_mode, term()}}
+  def check_nonce_mode(mode) do
+    if known_mode?(mode), do: :ok, else: {:error, {:unsupported_nonce_mode, mode}}
+  end
+
+  @doc """
   Headers for a private request, for the scheme the host named.
 
   `path` is the endpoint the payload declares as `request` — Gemini requires it *inside*

@@ -653,7 +653,7 @@ defmodule DpExchange.Gemini.WsDecode do
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: bounded(value)
-  defp decimal(value) when is_integer(value), do: Decimal.new(value)
+  defp decimal(value) when is_integer(value), do: value |> Decimal.new() |> bounded()
   # Bounded like every other branch: `1.0e300` is a float the socket's `Jason.decode/1` can
   # hand over, and `Decimal.from_float/1` keeps its exponent (`1E+300`).
   defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> bounded()
@@ -689,8 +689,14 @@ defmodule DpExchange.Gemini.WsDecode do
   # parses, and sorting or comparing it aligns exponents by building an integer of that many
   # digits: one frame stalls the socket process. NaN and Infinity carry no integer coefficient
   # and are refused here too.
+  #
+  # A coefficient of more than 34 digits is refused as well, so decimal 2 (which parses any
+  # length, down to the 2.0.0 floor) and decimal 3 (which refuses 35 significant digits) read the
+  # same frames. No price or size has 35 digits.
+  @max_coefficient 10_000_000_000_000_000_000_000_000_000_000_000
+
   defp bounded(%Decimal{coef: coef, exp: exp} = value)
-       when is_integer(coef) and exp >= -100 and exp <= 100,
+       when is_integer(coef) and coef < @max_coefficient and exp >= -100 and exp <= 100,
        do: value
 
   defp bounded(_nan_infinite_or_unbounded), do: nil
