@@ -93,7 +93,7 @@ before a request is made.
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
 `Core.Types.TopOfBook` has always had. `dp_exchange_core 0.2.1` introduced the fields; this
-package requires `~> 0.3.109` (its floor is in `mix.exs`; `0.3.95` is where this change landed).
+package requires `~> 0.3.111` (its floor is in `mix.exs`; `0.3.95` is where this change landed).
 
 ```elixir
 # before

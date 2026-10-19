@@ -20,6 +20,12 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Dependencies
+
+- **Requires `dp_exchange_core ~> 0.3.111`** (was `~> 0.3.109`). That release refuses a GET with a body
+  before sending (Req 0.7.0-0.7.2, which the Core floor admits, sent it as a retried POST) and
+  refuses URL userinfo over plain http.
+
 ### Fixed
 
 - **A fractional JSON number where an object belongs raised in the caller's process.** Bodies
