@@ -283,6 +283,21 @@ defmodule DpExchange.Gemini.Feed do
   the resubscribe latch, and pass untouched. The data-path `:degraded` notice for a stalled
   subscriber is sent from `deliver/2`, not here, and already latches.
 
+  ## A resubscribe never blocks this process, and a held call never outlives its caller
+
+  The periodic and reconnect resubscribe send from a worker process this feed monitors, and the
+  outcome returns as a message judged here (`start_resubscribe/2`). It used to send inside the
+  callback, up to WebSockex's 5s window per frame, while every `bookTicker` frame the socket
+  received queued in this mailbox. One resubscribe is in flight at a time; a request made
+  meanwhile is folded into it and runs once more when it settles. A worker that dies unanswered
+  is a failed send. A symbol unsubscribed while its subscribe was in flight is queued for a wire
+  unsubscribe, as a failed subscribe's are.
+
+  A call held behind a dial is replayed only when its worst case (one 5s window per frame it
+  sends) still fits before its caller's `@call_timeout`; otherwise it is answered
+  `{:error, :dial_deadline_exceeded}` with nothing sent or recorded. Before this, replays ran
+  back to back and a caller far enough back the queue exited while its request was applied.
+
   ## Stopping the feed stops its socket
 
   The socket this feed dialled is linked to it and does not trap exits, so a `:normal` stop
@@ -603,6 +618,9 @@ defmodule DpExchange.Gemini.Feed do
        # by the socket process itself and never inside a callback here. See the moduledoc's
        # "A dial never blocks this process" section and `start_dial/1`.
        dial: nil,
+       # The resubscribe whose wire sends are in flight in a worker process, or nil. See
+       # `start_resubscribe/2`: a resubscribe never blocks this process on a send.
+       resub: nil,
        # The one live periodic-resubscribe timer, `{ref, timer}`. A tick whose ref is not this
        # one is stale and does nothing, so a second tick message can never start a second chain.
        resubscribe_timer: schedule_tick(),
@@ -610,7 +628,7 @@ defmodule DpExchange.Gemini.Feed do
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
        # Symbols whose wire unsubscribe failed, retried on the next resubscribe tick. Cleared
-       # by any new connection, which carries no subscriptions. See `retry_unsubscribe/2`.
+       # by any new connection, which carries no subscriptions. See `start_resubscribe/2`.
        unsubscribe_pending: MapSet.new(),
        # The subset of `unsubscribe_pending` queued by a FAILED SUBSCRIBE (`queue_unsubscribe/2`):
        # symbols whose subscribe frame may still land. A `:reconnected` keeps these pending and
@@ -887,6 +905,29 @@ defmodule DpExchange.Gemini.Feed do
     {:noreply, %{state | delivering_by_kind: empty_delivery(), link_down?: true}}
   end
 
+  # The resubscribe worker answered (see `start_resubscribe/2`). Only the flight the state
+  # names is honoured: a result for a cancelled or replaced one matches nothing here.
+  def handle_info(
+        {:resubscribe_done, token, {unsubscribe, subscribe}},
+        %{resub: %{token: token} = flight} = state
+      ) do
+    Process.demonitor(flight.monitor, [:flush])
+    state = Map.put(state, :resub, nil)
+    {:noreply, settle_resubscribe(state, flight, unsubscribe, subscribe)}
+  end
+
+  # The worker died before it answered: what it was sending is not known to have gone out.
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, reason},
+        %{resub: %{monitor: monitor} = flight} = state
+      ) do
+    failed = {:error, {:resubscribe_worker_down, reason}}
+    unsubscribe = if flight.unsubscribe == [], do: :skipped, else: failed
+    subscribe = if flight.subscribe == [], do: :skipped, else: failed
+    state = Map.put(state, :resub, nil)
+    {:noreply, settle_resubscribe(state, flight, unsubscribe, subscribe)}
+  end
+
   # A subscriber that died. Dropped from both sets, and its monitor forgotten.
   #
   # Without this, nothing ever removed a subscriber pid: `Core.Fanout.resolve/1` skips a dead
@@ -1065,6 +1106,8 @@ defmodule DpExchange.Gemini.Feed do
   # `:socket` handed in through the options is the caller's, and may be the caller itself.
   @impl true
   def terminate(_reason, state) do
+    _state = cancel_resubscribe(state)
+
     case Map.get(state, :dialled_socket) do
       socket when is_pid(socket) -> Process.exit(socket, :shutdown)
       _none -> true
@@ -1090,22 +1133,11 @@ defmodule DpExchange.Gemini.Feed do
   defp resubscribe(%{dial: %{} = dial} = state), do: %{state | dial: %{dial | resubscribe?: true}}
 
   defp resubscribe(%{socket: socket} = state) when is_pid(socket) do
-    state = retry_unsubscribe(socket, state)
-
-    if Process.alive?(socket) and not state.link_down? and MapSet.size(state.wanted) > 0 do
-      case subscribe_channels(socket, MapSet.to_list(state.wanted), state) do
-        :ok ->
-          resubscribe_recovered(state)
-
-        {:error, reason} ->
-          Logger.warning("[Gemini Feed] periodic resubscribe failed: #{reason_text(reason)}")
-          resubscribe_failed(state, reason)
-      end
-    else
-      # Nothing was attempted — a dead socket or an empty `wanted` set is not a fact about
-      # whether resubscribing works, so the latch is left exactly as it was. Only an actual
-      # `Socket.subscribe/2` result may set or clear it.
-      state
+    case Map.get(state, :resub) do
+      # One resubscribe in flight at a time. A request made meanwhile (a tick, a reconnect
+      # report) is folded into it: when it settles, one more runs, from the then-current state.
+      %{} = flight -> Map.put(state, :resub, %{flight | again?: true})
+      nil -> start_resubscribe(state, socket)
     end
   end
 
@@ -1116,8 +1148,8 @@ defmodule DpExchange.Gemini.Feed do
   # subscription frame, since `Socket.start_link/1` opens without one) but is not the
   # ordinary path — a `subscribe/3` normally dials first. The dial is asynchronous: this
   # clause only starts it and marks it `resubscribe?`, and `dial_connected/1` then runs the
-  # `is_pid(socket)` clause above, so the actual `Socket.subscribe/2` call — and the
-  # recovery/failure latch — still only ever happens in one place.
+  # `is_pid(socket)` clause above, so the sends — and the recovery/failure latch — still
+  # only ever happen in one place.
   defp resubscribe(%{socket: nil} = state) do
     if MapSet.size(state.wanted) > 0 do
       case start_dial(state) do
@@ -1130,6 +1162,127 @@ defmodule DpExchange.Gemini.Feed do
       end
     else
       state
+    end
+  end
+
+  # **A resubscribe never blocks this process on the wire.** It used to send in the callback:
+  # `Socket.subscribe/3` waits up to WebSockex's 5s send window per frame (two frames with
+  # `:trades`, plus the retried unsubscribe), and every `bookTicker` frame the socket received
+  # meanwhile queued in this mailbox, unbounded, behind a send that was itself waiting on a
+  # socket too busy to answer. The sends now run in a worker process this feed monitors, and
+  # the outcome comes back as a message (`{:resubscribe_done, token, results}`) that is judged
+  # here, by token: the latch, the recovery notice and the pending-unsubscribe bookkeeping are
+  # exactly what they were, applied when the answer arrives instead of while this process
+  # waited for it. The ack deadline for each subscribe is the socket's (`Socket`), unchanged.
+  #
+  # What is attempted is decided here, at launch: a dead socket or an empty `wanted` set is not
+  # a fact about whether resubscribing works, so with nothing to send the latch is left exactly
+  # as it was, and only an actual `Socket.subscribe/3` result may set or clear it.
+  defp start_resubscribe(state, socket) do
+    pending = MapSet.difference(state.unsubscribe_pending, state.wanted)
+    state = put_pending(state, pending)
+    wire? = Process.alive?(socket) and not state.link_down?
+    unsubscribe = if wire?, do: MapSet.to_list(pending), else: []
+    subscribe = if wire?, do: MapSet.to_list(state.wanted), else: []
+
+    if unsubscribe == [] and subscribe == [] do
+      state
+    else
+      launch_resubscribe(state, socket, unsubscribe, subscribe)
+    end
+  end
+
+  defp launch_resubscribe(state, socket, unsubscribe, subscribe) do
+    feed = self()
+    token = make_ref()
+    channels = active_socket_channels(state)
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        results = wire_resubscribe(socket, channels, unsubscribe, subscribe)
+        send(feed, {:resubscribe_done, token, results})
+      end)
+
+    flight = %{
+      token: token,
+      pid: pid,
+      monitor: monitor,
+      socket: socket,
+      unsubscribe: unsubscribe,
+      subscribe: subscribe,
+      again?: false
+    }
+
+    Map.put(state, :resub, flight)
+  end
+
+  # Runs in the worker. The unsubscribe goes first, as it always did, and the subscribe is
+  # sent whatever became of it.
+  defp wire_resubscribe(socket, channels, unsubscribe, subscribe) do
+    {send_symbols(socket, unsubscribe, channels, &Socket.unsubscribe/3),
+     send_symbols(socket, subscribe, channels, &Socket.subscribe/3)}
+  end
+
+  defp send_symbols(_socket, [], _channels, _send), do: :skipped
+
+  defp send_symbols(socket, symbols, channels, send),
+    do: send_over(socket, symbols, channels, send)
+
+  # The worker answered. A result for a flight this state no longer holds (the socket crashed
+  # and the flight was cancelled) never matches and is dropped by the catch-all.
+  defp settle_resubscribe(state, flight, unsubscribe_result, subscribe_result) do
+    if state.socket == flight.socket do
+      state
+      |> settled_unsubscribe(flight.unsubscribe, unsubscribe_result)
+      |> settled_subscribe(flight.subscribe, subscribe_result)
+      |> resubscribe_again(flight)
+    else
+      state
+    end
+  end
+
+  # An unsubscribe that went out is no longer pending. Only the symbols it carried: others may
+  # have been queued while it was in flight.
+  defp settled_unsubscribe(state, sent, :ok) do
+    sent = MapSet.new(sent)
+
+    state
+    |> Map.put(:unsubscribe_pending, MapSet.difference(state.unsubscribe_pending, sent))
+    |> Map.put(:late_subscribes, MapSet.difference(late_subscribes(state), sent))
+  end
+
+  defp settled_unsubscribe(state, _sent, _skipped_or_failed), do: state
+
+  defp settled_subscribe(state, _sent, :skipped), do: state
+
+  defp settled_subscribe(state, sent, result) do
+    # A symbol unsubscribed while the frame was in flight must not stay on the wire because the
+    # frame landed after the unsubscribe did: it is queued for one, as a failed subscribe's are.
+    state = queue_unsubscribe(state, Enum.reject(sent, &MapSet.member?(state.wanted, &1)))
+
+    case result do
+      :ok ->
+        resubscribe_recovered(state)
+
+      {:error, reason} ->
+        Logger.warning("[Gemini Feed] periodic resubscribe failed: #{reason_text(reason)}")
+        resubscribe_failed(state, reason)
+    end
+  end
+
+  defp resubscribe_again(state, %{again?: true}), do: resubscribe(state)
+  defp resubscribe_again(state, _flight), do: state
+
+  # The flight's worker is no longer wanted (its socket is gone, or this feed is stopping).
+  defp cancel_resubscribe(state) do
+    case Map.get(state, :resub) do
+      %{pid: pid, monitor: monitor} ->
+        Process.demonitor(monitor, [:flush])
+        Process.exit(pid, :kill)
+        Map.put(state, :resub, nil)
+
+      _none ->
+        state
     end
   end
 
@@ -1206,7 +1359,13 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   defp send_to_channels(socket, symbols, state, send) do
-    Enum.reduce_while(active_socket_channels(state), :ok, fn channel, :ok ->
+    send_over(socket, symbols, active_socket_channels(state), send)
+  end
+
+  # The same fail-fast walk over an explicit channel list, which a resubscribe worker has
+  # (it runs outside this process and holds no state).
+  defp send_over(socket, symbols, channels, send) do
+    Enum.reduce_while(channels, :ok, fn channel, :ok ->
       case send.(socket, symbols, channel) do
         :ok -> {:cont, :ok}
         {:error, _reason} = error -> {:halt, error}
@@ -1306,7 +1465,11 @@ defmodule DpExchange.Gemini.Feed do
     if dial.waiting >= @max_dial_waiters do
       {:reply, {:error, :dial_backlog_full}, state}
     else
-      waiting = %{dial | waiters: [{from, call} | dial.waiters], waiting: dial.waiting + 1}
+      # When the caller stops waiting: its own `GenServer.call/3` started about now and gives
+      # up after `@call_timeout`. Replaying a call past that point answers nobody.
+      expires_at = System.monotonic_time(:millisecond) + @call_timeout
+      held = {from, call, expires_at}
+      waiting = %{dial | waiters: [held | dial.waiters], waiting: dial.waiting + 1}
       {:noreply, %{state | dial: waiting}}
     end
   end
@@ -1323,11 +1486,36 @@ defmodule DpExchange.Gemini.Feed do
     dial.waiters |> Enum.reverse() |> Enum.reduce(state, &replay_waiter/2)
   end
 
-  defp replay_waiter({from, call}, state) do
+  # **A held call is replayed only if it can finish before its caller gives up.** The replays
+  # run one after another inside this process, and each may wait out WebSockex's 5s send window
+  # once per frame (`replay_budget_ms/2`). A caller held behind a slow dial and a few slow
+  # replays exited at `@call_timeout` while its request was applied afterwards: told "no
+  # answer" for a subscription that then existed. A call whose worst case no longer fits is
+  # refused, by name, before anything is sent or recorded, so the caller hears `{:error,
+  # :dial_deadline_exceeded}` (a subscribe registered nothing; retry it) and the wire is not
+  # spent on someone who has gone.
+  defp replay_waiter({from, call, expires_at}, state) do
+    if System.monotonic_time(:millisecond) + replay_budget_ms(call, state) <= expires_at do
+      replay_unchecked(from, call, state)
+    else
+      GenServer.reply(from, {:error, :dial_deadline_exceeded})
+      state
+    end
+  end
+
+  defp replay_unchecked(from, call, state) do
     {:reply, reply, state} = handle_call(call, from, state)
     GenServer.reply(from, reply)
     state
   end
+
+  # The longest a replayed call can hold this process: one send window per frame, and
+  # `update_symbols/2` sends an unsubscribe and a subscribe on each active channel.
+  defp replay_budget_ms({:update_symbols, _symbols}, state),
+    do: 2 * length(active_socket_channels(state)) * @frame_window_ms
+
+  defp replay_budget_ms(_call, state),
+    do: length(active_socket_channels(state)) * @frame_window_ms
 
   # The dial did not connect. A held `subscribe` is refused with the reason and, because
   # nothing was registered for it, there is nothing to take back. A held `unsubscribe` or
@@ -1349,12 +1537,14 @@ defmodule DpExchange.Gemini.Feed do
     dial.waiters |> Enum.reverse() |> Enum.reduce(state, &refuse_waiter(&1, &2, reason))
   end
 
-  defp refuse_waiter({from, {:subscribe, _symbols, _subscriber}}, state, reason) do
+  defp refuse_waiter({from, {:subscribe, _symbols, _subscriber}, _expires_at}, state, reason) do
     GenServer.reply(from, {:error, reason})
     state
   end
 
-  defp refuse_waiter(waiter, state, _reason), do: replay_waiter(waiter, state)
+  # No wire is involved (there is no socket), so no deadline applies: it is answered locally.
+  defp refuse_waiter({from, call, _expires_at}, state, _reason),
+    do: replay_unchecked(from, call, state)
 
   defp dial_exit_reason({:error, reason}), do: reason
   defp dial_exit_reason(reason), do: reason
@@ -1373,6 +1563,9 @@ defmodule DpExchange.Gemini.Feed do
   # unsubscribe.
   defp isolate_crashed_socket(state, reason) do
     report_link_down_metric(state, reason)
+
+    # A resubscribe in flight was sending to the socket that just died.
+    state = cancel_resubscribe(state)
 
     state = %{
       state
@@ -1500,28 +1693,12 @@ defmodule DpExchange.Gemini.Feed do
       | unsubscribe_pending: MapSet.union(state.unsubscribe_pending, MapSet.new(symbols))
     }
 
-  # A symbol wanted again since is left subscribed: retrying its old unsubscribe would undo
-  # the newer subscribe.
-  defp retry_unsubscribe(socket, state) do
-    pending = MapSet.difference(state.unsubscribe_pending, state.wanted)
-
-    cond do
-      MapSet.size(pending) == 0 or state.link_down? or not Process.alive?(socket) ->
-        put_pending(state, pending)
-
-      unsubscribe_channels(socket, MapSet.to_list(pending), state) == :ok ->
-        state
-        |> Map.put(:late_subscribes, MapSet.new())
-        |> Map.put(:unsubscribe_pending, MapSet.new())
-
-      true ->
-        put_pending(state, pending)
-    end
-  end
-
+  # (`start_resubscribe/2` drops a symbol wanted again since from the pending set before it
+  # retries: retrying its old unsubscribe would undo the newer subscribe.)
+  #
   # **`late_subscribes` only ever describes symbols still in `unsubscribe_pending`.** It was
   # written by `queue_unsubscribe/2` and emptied only by a retry that SUCCEEDED, so a symbol
-  # whose failed subscribe was later made good (wanted again, which `retry_unsubscribe/2` takes
+  # whose failed subscribe was later made good (wanted again, which `start_resubscribe/2` takes
   # out of the pending set) stayed in it for the life of the feed. That is a set that grows by
   # one for every symbol that ever failed to subscribe, and it also gave a LATER failed
   # unsubscribe of the same symbol the "may still land" treatment on reconnect that only a
@@ -1732,8 +1909,14 @@ defmodule DpExchange.Gemini.Feed do
 
   defp track_delivery(state, _other), do: state
 
+  # **The stamp is monotonic, not the wall clock.** A delivery record says only "a frame for this
+  # symbol arrived on this session", and nothing reads the instant today; but a stored instant
+  # is read for age sooner or later (a staleness window), and `:os.system_time/1` jumps with
+  # every NTP step, so an age computed from it can be negative or hours long. Elapsed time is
+  # measured on `System.monotonic_time/1` everywhere else in this package (the socket's
+  # liveness, the notice window, the crash run), and this record is the same kind of reading.
   defp put_delivery(state, kind, symbol) do
-    timestamp = :os.system_time(:millisecond)
+    timestamp = System.monotonic_time(:millisecond)
 
     %{
       state

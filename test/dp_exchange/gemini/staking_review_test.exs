@@ -109,6 +109,49 @@ defmodule DpExchange.Gemini.StakingReviewTest do
       end
     end
 
+    test "a dateTime is seconds or milliseconds only inside the 2015 to 2099 window of either" do
+      # rest.yaml:7900-7920 `TimestampType` allows both units and the payload names neither, so
+      # the unit is read from the value, and only where one unit has an answer and the other
+      # none. A value plausible in neither unit is refused.
+      read = fn value ->
+        assert {:ok, [tx]} =
+                 Private.get_staking_history(
+                   @credentials,
+                   [plug: json(history(%{"dateTime" => value}))] ++ @opts
+                 )
+
+        DateTime.to_unix(tx.venue_time)
+      end
+
+      assert read.(1_667_418_560) == 1_667_418_560
+      assert read.(1_667_418_560_000) == 1_667_418_560
+      # The window's own edges, in both units.
+      assert read.(1_420_070_400) == 1_420_070_400
+      assert read.(4_102_444_799) == 4_102_444_799
+      assert read.(1_420_070_400_000) == 1_420_070_400
+      assert read.(4_102_444_799_999) == 4_102_444_799
+
+      # 10^11 is 1973 as milliseconds and the year 5138 as seconds: the old "10^12 and up is
+      # milliseconds" rule dated it without complaint. The others sit just outside an edge, or
+      # in between the two windows, or far past both.
+      for implausible <- [
+            100_000_000_000,
+            1_420_070_399,
+            4_102_444_800,
+            1_420_070_399_999,
+            4_102_444_800_000,
+            10_000_000_000_000,
+            1_000
+          ] do
+        assert {:error, :unexpected_response_shape} =
+                 Private.get_staking_history(
+                   @credentials,
+                   [plug: json(history(%{"dateTime" => implausible}))] ++ @opts
+                 ),
+               "#{implausible} was dated"
+      end
+    end
+
     test "a dateTime with an absurd exponent is refused without building the integer" do
       bytes =
         ~s([{"providerId":"p","transactions":[{"transactionId":"t1","amountCurrency":"ETH",) <>

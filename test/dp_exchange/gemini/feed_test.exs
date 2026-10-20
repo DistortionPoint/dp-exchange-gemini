@@ -3,7 +3,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
   alias DpExchange.Core.Notice
   alias DpExchange.Core.Types.{Quote, TopOfBook}
-  alias DpExchange.Gemini.Feed
+  alias DpExchange.Gemini.{Feed, FeedSync}
 
   @moduletag :capture_log
 
@@ -811,8 +811,10 @@ defmodule DpExchange.Gemini.FeedTest do
       # once on the transition INTO failure, never once per tick while it continues.
       send(feed, :resubscribe)
       send(feed, :resubscribe)
-      # A call queues behind both `:resubscribe` messages, so by the time it answers the feed
-      # has processed them and any notice they would emit is already in this mailbox.
+      # The resubscribes run in a worker and their outcome is judged when it arrives: wait for
+      # the in-flight one (and the one folded in behind it), then a call queues behind any
+      # notice they would emit.
+      FeedSync.await_resubscribe(feed)
       _settled = Feed.coverage(feed)
       refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
@@ -845,6 +847,7 @@ defmodule DpExchange.Gemini.FeedTest do
       # A further successful resubscribe must not re-emit the recovery notice — it
       # already fired on the transition back out, and the latch reads `:ok` again.
       send(feed, :resubscribe)
+      FeedSync.await_resubscribe(feed)
       _settled = Feed.coverage(feed)
       refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
@@ -858,6 +861,7 @@ defmodule DpExchange.Gemini.FeedTest do
       send(feed, :resubscribe)
 
       assert_receive {:frame_sent, %{"method" => "subscribe"}}, 5_000
+      FeedSync.await_resubscribe(feed)
       _settled = Feed.coverage(feed)
       refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
     end
@@ -1340,7 +1344,9 @@ defmodule DpExchange.Gemini.FeedTest do
                       %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}},
                      5_000
 
-      # Settled by a call that queues behind the `:resubscribe`, not by a refute window.
+      # Settled by waiting for the worker and then a call behind its answer, not by a refute
+      # window.
+      FeedSync.await_resubscribe(feed)
       _settled = Feed.coverage(feed)
       refute_received {:frame_sent, %{"method" => "subscribe"}}
     end
@@ -1358,6 +1364,7 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
       assert_receive {:frame_sent, %{"method" => "subscribe"}}, 5_000
+      FeedSync.await_resubscribe(feed)
       _settled = Feed.coverage(feed)
       refute_received {:frame_sent, %{"method" => "unsubscribe"}}
     end
@@ -1443,6 +1450,7 @@ defmodule DpExchange.Gemini.FeedTest do
                       %{"method" => "unsubscribe", "params" => ["btcusd@bookTicker"]}},
                      5_000
 
+      FeedSync.await_resubscribe(feed)
       _settled = Feed.coverage(feed)
       refute_received {:frame_sent, %{"method" => "subscribe"}}
     end

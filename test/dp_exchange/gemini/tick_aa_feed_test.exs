@@ -9,7 +9,7 @@ defmodule DpExchange.Gemini.TickAAFeedTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Gemini.Feed
+  alias DpExchange.Gemini.{Feed, FeedSync}
 
   @moduletag :capture_log
 
@@ -85,6 +85,9 @@ defmodule DpExchange.Gemini.TickAAFeedTest do
       assert_receive {:client_text, %{"method" => "subscribe", "params" => params}}, 5_000
       assert params == ["btcusd@bookTicker"]
 
+      # The subscribe went out from the resubscribe worker; its outcome is applied once it
+      # answers, so the latch is read after that.
+      FeedSync.await_resubscribe(feed)
       state = :sys.get_state(feed)
       assert is_pid(state.socket)
       assert state.resubscribe_notice_state == :ok
@@ -123,6 +126,7 @@ defmodule DpExchange.Gemini.TickAAFeedTest do
 
       assert_receive {:frame_sent, %{"method" => "unsubscribe", "params" => params}}, 5_000
       assert params == ["ethusd@bookTicker"]
+      FeedSync.await_resubscribe(feed)
       assert :sys.get_state(feed).unsubscribe_pending == MapSet.new()
     end
   end

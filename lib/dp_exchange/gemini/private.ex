@@ -144,6 +144,12 @@ defmodule DpExchange.Gemini.Private do
   # in this module is this guard.
   defguardp is_object(value) when is_map(value) and not is_struct(value)
 
+  # 2015-01-01T00:00:00Z in milliseconds. Every venue-supplied millisecond time here is read at or
+  # above it: nothing on this venue is dated earlier, and a value below it is another unit (a
+  # seconds epoch is 1970 as milliseconds) or not a time. See `epoch_ms/1`.
+  @min_epoch_ms 1_420_070_400_000
+  @min_epoch_ns 1_420_070_400_000_000_000
+
   @doc "Every currency the account holds, with what is available and what is on hold."
   @spec get_balances(map(), keyword()) ::
           {:ok, [Balance.t()]} | {:error, term()} | {:refused, term()}
@@ -905,7 +911,9 @@ defmodule DpExchange.Gemini.Private do
     clearing_trades: [
       symbol: :symbol,
       limit: {:limit, 300},
-      since_nanos: :epoch,
+      # `:epoch_ns`: nanoseconds (`timestamp_nanos`), and the venue is told only that field,
+      # so a milliseconds value here reads as January 1970. See `history_value?/2`.
+      since_nanos: :epoch_ns,
       timestamp: :epoch,
       limit_trades: :count
     ],
@@ -935,7 +943,9 @@ defmodule DpExchange.Gemini.Private do
       timestamp: :epoch,
       limit_orders: :count
     ],
-    transactions: [limit: {:limit, 300}, since: :epoch],
+    # `:epoch_ms`, not `:epoch`: `get_transactions/2` converts `:since` to nanoseconds by
+    # multiplying, so the unit is ASSUMED here and must hold. See `history_value?/2`.
+    transactions: [limit: {:limit, 300}, since: :epoch_ms],
     funding_payments: [since: :epoch, to: :epoch]
   }
 
@@ -1005,6 +1015,38 @@ defmodule DpExchange.Gemini.Private do
 
   defp history_value?(:epoch, value) when is_binary(value) do
     String.match?(value, ~r/\A[0-9]+\z/)
+  end
+
+  # **A millisecond bound is read as milliseconds, so one that is not is refused.** The venue's
+  # `TimestampType` takes seconds or milliseconds and every other bound is passed through for it
+  # to judge, but `/v1/transactions` takes `timestamp_nanos` and this package multiplies the
+  # caller's milliseconds into it (`transactions_nanos/1`). A seconds value (1.7e9) is January
+  # 1970 once multiplied, and the venue answered the whole history for a recent bound. Below
+  # 2015 (`@min_epoch_ms`) it is another unit, or not a time.
+  defp history_value?(:epoch_ms, %DateTime{}), do: true
+  defp history_value?(:epoch_ms, value) when is_integer(value), do: value >= @min_epoch_ms
+
+  defp history_value?(:epoch_ms, value) when is_binary(value) do
+    case Integer.parse(value) do
+      {milliseconds, ""} -> String.match?(value, ~r/\A[0-9]+\z/) and milliseconds >= @min_epoch_ms
+      _not_digits -> false
+    end
+  end
+
+  # The same for a bound named in NANOSECONDS (`timestamp_nanos`): sent as given, so a value
+  # below 2015 in nanoseconds (`@min_epoch_ns`) is a milliseconds or seconds epoch in the wrong
+  # field, and the venue would read it as 1970.
+  defp history_value?(:epoch_ns, %DateTime{}), do: true
+  defp history_value?(:epoch_ns, value) when is_integer(value), do: value >= @min_epoch_ns
+
+  defp history_value?(:epoch_ns, value) when is_binary(value) do
+    case Integer.parse(value) do
+      {nanoseconds, ""} ->
+        String.match?(value, ~r/\A[0-9]+\z/) and nanoseconds >= @min_epoch_ns
+
+      _not_digits ->
+        false
+    end
   end
 
   defp history_value?(:iso, %DateTime{}), do: true
@@ -2845,7 +2887,7 @@ defmodule DpExchange.Gemini.Private do
   # the instant requested when `asOf` is absent — the venue may answer for a nearby moment,
   # so the instant asked for is not a stand-in for the one it answered for — and must not
   # date a non-positive `asOf` to 1970 or raise on one outside `DateTime`'s range.
-  defp fx_as_of(ms) when is_integer(ms) and ms > 0 do
+  defp fx_as_of(ms) when is_integer(ms) and ms >= @min_epoch_ms do
     case DateTime.from_unix(ms, :millisecond) do
       {:ok, at} -> {:ok, at}
       {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
@@ -3061,7 +3103,10 @@ defmodule DpExchange.Gemini.Private do
   # microseconds is `invalid Unix time`), and zero or negative quietly becomes 1970 or
   # earlier. `nil` here means "the venue did not state one", which is what every caller of
   # this already handles.
-  defp epoch_ms_to_datetime(ms) when is_integer(ms) and ms > 0 do
+  #
+  # Milliseconds from 2015 on (`@min_epoch_ms`): a seconds value in a milliseconds field is
+  # January 1970 — a valid `DateTime` in the wrong century — and is another unit, not a time.
+  defp epoch_ms_to_datetime(ms) when is_integer(ms) and ms >= @min_epoch_ms do
     case DateTime.from_unix(ms, :millisecond) do
       {:ok, at} -> at
       {:error, _out_of_range} -> nil
@@ -3929,9 +3974,11 @@ defmodule DpExchange.Gemini.Private do
   credits and adjustments alongside deposits and fills. Rows are the venue's own, because
   the kinds do not share a shape.
 
-  `opts[:since]` and `opts[:limit]` narrow it. `:since` is milliseconds, like every other
-  `:since` here (or a `DateTime`), and is sent as the venue's `timestamp_nanos`, converted
-  to nanoseconds.
+  `opts[:since]` and `opts[:limit]` narrow it. `:since` is a `DateTime` or **milliseconds**, an
+  integer or a string of digits, and is sent as the venue's `timestamp_nanos`, converted to
+  nanoseconds. Unlike the other history reads, whose bound goes to the venue as given for it to
+  read as seconds or milliseconds, this one multiplies it, so a value before 2015 (a seconds
+  epoch, say) is `{:error, {:invalid_option, :since, value}}` rather than a 1970 window.
 
   **Summing this is not a balance.** `get_balances/2` is the authority; this explains it.
   """
@@ -4673,21 +4720,33 @@ defmodule DpExchange.Gemini.Private do
   # nearest atom that fits would be a guess a caller cannot see it made.
   defp staking_type(_other), do: :other
 
-  # Gemini mixes seconds and milliseconds across its endpoints and the payload does not say
-  # which. Anything at or past 10^12 is milliseconds; below it is seconds. A ms value read
-  # as seconds lands past the epoch ceiling and raises.
+  # **Both units are in the schema, so the unit is read from the value, within a window.**
+  # `StakingTransaction.dateTime` is `$ref: TimestampType` (rest.yaml:9528-9532, "The time of
+  # the transaction in milliseconds"), and `TimestampType` (rest.yaml:7900-7920) lists the
+  # whole-number forms `1495127793` as "whole number (seconds)" and `1495127793000` as "whole
+  # number (milliseconds)", and the same two as strings (rest.yaml:7909-7910). The payload
+  # carries no unit marker, so the unit cannot be read from anywhere but the value.
+  #
+  # It is read from the value only where one unit has an answer and the other has none: a value
+  # is seconds if it dates 2015 to 2099 (`@staking_seconds`), milliseconds if the same window
+  # holds it in milliseconds (`@staking_milliseconds`), and anything else is plausible in
+  # neither unit and is refused (`nil`). The two windows are a factor of 1000 apart and do not
+  # overlap. The old rule was "10^12 and up is milliseconds, below is seconds", which dated
+  # `10^11` (1973 as milliseconds, the year 5138 as seconds) without complaint.
+  @staking_seconds 1_420_070_400..4_102_444_799
+  @staking_milliseconds 1_420_070_400_000..4_102_444_799_999
+
   defp staking_time(nil), do: nil
 
-  # Zero and negatives are valid Unix times and would date a movement to 1970 — refused, as
-  # `epoch_ms/1` refuses them (falls through to the `nil` catch-all below).
-  defp staking_time(value) when is_integer(value) and value > 0 do
-    unit = if value >= 1_000_000_000_000, do: :millisecond, else: :second
+  # Zero, negatives and everything else outside both windows fall to `nil`: refused, as
+  # `epoch_ms/1` refuses them, never dated to 1970.
+  defp staking_time(value) when is_integer(value) and value in @staking_seconds,
+    do: unix_or_nil(value, :second)
 
-    case DateTime.from_unix(value, unit) do
-      {:ok, at} -> at
-      {:error, _reason} -> nil
-    end
-  end
+  defp staking_time(value) when is_integer(value) and value in @staking_milliseconds,
+    do: unix_or_nil(value, :millisecond)
+
+  defp staking_time(value) when is_integer(value), do: nil
 
   # A fractional epoch (`1667418560.153` seconds) arrives as a `Decimal` under
   # `floats: :decimals`; truncated to a whole number, then read like any integer epoch. There
@@ -4719,6 +4778,13 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp staking_time(_other), do: nil
+
+  defp unix_or_nil(value, unit) do
+    case DateTime.from_unix(value, unit) do
+      {:ok, at} -> at
+      {:error, _out_of_range} -> nil
+    end
+  end
 
   defp staking_iso_time(value) do
     case DateTime.from_iso8601(value) do
@@ -6287,7 +6353,11 @@ defmodule DpExchange.Gemini.Private do
 
   # Positive only. Zero and negatives are not a venue instant: they dated a fill to 1970 and
   # slipped past `required_time/1`'s refusal, which waits for the `nil` this now answers.
-  defp epoch_ms(value) when is_integer(value) and value > 0 do
+  #
+  # And from 2015 on (`@min_epoch_ms`): `timestampms` is milliseconds, and a seconds value in it
+  # (1.7e9) is January 1970, a valid `DateTime` in the wrong century. The same floor the REST
+  # readers use; nothing on this venue is dated earlier.
+  defp epoch_ms(value) when is_integer(value) and value >= @min_epoch_ms do
     case DateTime.from_unix(value, :millisecond) do
       {:ok, datetime} -> datetime
       _error -> nil

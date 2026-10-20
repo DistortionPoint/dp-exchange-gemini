@@ -20,6 +20,73 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A feed's delivery record was stamped with the wall clock.** `Feed` kept `:os.system_time/1`
+  beside each symbol it had seen a frame for. Nothing reads the instant today, but a stored
+  instant is read for age sooner or later, and the wall clock steps with NTP, so an age from it can
+  be negative or hours long. It is `System.monotonic_time(:millisecond)` now, like every other
+  interval here (the socket's liveness and resync windows, the notice window, the crash run).
+  `coverage/1` and `coverage_by_kind/1` answers are unchanged.
+- **A resubscribe blocked the feed on the wire.** The 60 s tick, a reconnect report and a crash
+  redial sent their frames inside the feed's callback, up to WebSockex's 5 s window per frame (two
+  frames with `:trades`, plus the retried unsubscribe), while every `bookTicker` frame the socket
+  received queued in the feed's mailbox, unbounded, behind a send that was itself waiting on a
+  socket too busy to answer. The sends now run in a worker the feed monitors
+  (`{:resubscribe_done, token, results}` is judged by token): the feed keeps delivering and
+  answering, one resubscribe is in flight at a time, a request made meanwhile runs once more when
+  it settles, a worker that dies unanswered is a failed send, and a symbol unsubscribed while its
+  subscribe was in flight is queued for a wire unsubscribe. The failure latch, the recovery
+  notice and the pending-unsubscribe bookkeeping are what they were, applied when the answer
+  arrives. The socket's 15 s ack deadline is unchanged. Tests: `tick_ap_test.exs` (the feed
+  handles frames and calls while a send is unanswered, the fold, the dead worker) and
+  `test/support/feed_sync.ex`, which the tests that read the outcome of a resubscribe now wait on.
+- **A call held behind a dial could outlive its caller.** The held `subscribe/3`,
+  `unsubscribe/2` and `update_symbols/2` were replayed one after another inside the feed, each
+  waiting out up to 5 s per frame, so a caller far enough back in the queue exited at its 25 s call
+  timeout and its request was applied afterwards: told "no answer" for a subscription that then
+  existed. A held call is now replayed only if its worst case still fits before its own deadline;
+  otherwise it is answered `{:error, :dial_deadline_exceeded}` with nothing sent or recorded.
+  Test: `tick_ap_test.exs` "a waiter whose deadline has passed is refused by name".
+- **A seconds epoch in a milliseconds field was read as January 1970.** `timestampms`,
+  `fundingTimestampMilliSecs`, `nextFundingTimestamp`, a candle's time, a fill's, an order's and
+  an approved address's `createdAt`, and an FX `asOf` accepted any positive integer, so
+  `1787270400` (seconds) was `1970-01-21`: a valid `DateTime` in the wrong century. Nothing on
+  this venue is dated before 2015, so a millisecond time below `1_420_070_400_000` (and a seconds
+  time below `1_420_070_400`) is refused as another unit. (The socket's nanosecond `E` has had its
+  window since tick AC.) Tests: `tick_ap_test.exs`.
+- **`get_transactions/2` read a seconds `:since` as 1970.** It multiplies the caller's
+  milliseconds into the venue's `timestamp_nanos`, the one place this package assumes a unit,
+  and a seconds epoch became a 1970 window answered with the whole history. A `:since` below 2015
+  in milliseconds is `{:error, {:invalid_option, :since, value}}`, on the real call and the Fake;
+  `:since_nanos` on `list_clearing_trades/2` is refused the same way below 2015 in nanoseconds.
+  Other window bounds go to the venue as given (its `TimestampType` takes seconds or
+  milliseconds). `tick_am_test.exs` used `since_nanos: 1` to reach the conflict check and now uses
+  a real value.
+- **A staking `dateTime` was dated by "10^12 and up is milliseconds".** The schema allows both units
+  (`rest.yaml:7900-7920`) and the payload names neither, so the unit is still read from the value,
+  but only inside the window 2015 to 2099 in either unit; `10^11` (1973 as milliseconds, the year
+  5138 as seconds) used to be dated and is refused now. The schema lines are cited in the code.
+
+### Documentation
+
+- **The socket's liveness claims now say what the venue's reference says.** The moduledoc said
+  the venue "documents no heartbeat of its own". Its AsyncAPI does list request methods `ping`,
+  `time` and `conninfo`, with the request envelope only: the reply to `ping` is not enumerated and
+  none has been measured, which is why the socket keeps using the WebSocket protocol's own ping
+  and pong. The venue pushes no heartbeat frame and no `socket_sequence`; the only sequence on the
+  wire is a depth diff's `U`/`u`. Also stated, in the moduledoc and `usage-rules.md`: silence is
+  judged on the 30 s ping tick, so a silent connection is closed between 90 s and just under
+  120 s after it was last heard, not at 90 s to the second.
+  `tick_ap_test.exs` fails if the reference ever models a pong, heartbeat or sequence.
+
+### Tests
+
+- **A candle-window test no longer sleeps out the end of the UTC day.** "the window's edge is the
+  real one" read the clock itself and the fake read it again, so it waited up to eleven real
+  seconds when started within ten seconds of midnight. It now repeats the two answers if the day
+  turned over while they were taken, and sleeps never.
+
 ## [0.2.154] - 2026-10-20
 
 ### Dependencies

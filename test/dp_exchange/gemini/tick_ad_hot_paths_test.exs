@@ -10,7 +10,7 @@ defmodule DpExchange.Gemini.TickADHotPathsTest do
 
   alias DpExchange.Core.Notice
   alias DpExchange.Core.Types.Trade
-  alias DpExchange.Gemini.{Feed, Socket}
+  alias DpExchange.Gemini.{Feed, FeedSync, Socket}
 
   @moduletag :capture_log
 
@@ -63,6 +63,7 @@ defmodule DpExchange.Gemini.TickADHotPathsTest do
       })
 
       send(feed, :resubscribe)
+      FeedSync.await_resubscribe(feed)
       state = :sys.get_state(feed)
 
       assert state.unsubscribe_pending == MapSet.new()
@@ -80,6 +81,7 @@ defmodule DpExchange.Gemini.TickADHotPathsTest do
       })
 
       send(feed, :resubscribe)
+      FeedSync.await_resubscribe(feed)
       state = :sys.get_state(feed)
 
       assert state.unsubscribe_pending == MapSet.new(["ETH-USD"])

@@ -217,7 +217,11 @@ The `delay_ms` metadata on the `[:dp_exchange, :link, :reconnect_attempt]` telem
 the delay actually waited, after the shortening. The wait ends if `Feed` stops the socket. A connection that goes 90 s
 without a frame or a pong, or that answers pings but not a subscribe for 15 s, raises a
 `:degraded` notice (`details.reason` `:silent_connection` or `:subscribe_unanswered`) and is
-closed and reconnected.
+closed and reconnected. Silence is judged on the socket's 30 s ping tick, so a silent
+connection is closed between 90 s and just under 120 s after it was last heard. The liveness
+check is the WebSocket protocol's own ping and pong: the venue's AsyncAPI lists a `ping` request
+method but does not enumerate its reply, so none is sent, and the venue pushes no heartbeat or
+stream sequence number of its own. These timers run on the monotonic clock.
 
 **Notice floods are throttled.** For `:data_quality`, `:refusal` and `:degraded`, the first
 notice per `{kind, reason, symbol}` reaches you at once, repeats within 30 s are counted, and
@@ -304,7 +308,11 @@ always did: `:ok` once the subscribe frame has gone out, or `{:error, reason}` (
 own reason, such as a `%WebSockex.ConnError{}`) with nothing recorded. The wait is bounded by
 the connect and receive timeouts (3 s and 2 s unless you pass `:socket_connect_timeout` /
 `:socket_recv_timeout`). At most 1_000 such calls are held at once; one more is refused with
-`{:error, :dial_backlog_full}`. A first connect that fails raises no `:link_down` notice,
+`{:error, :dial_backlog_full}`. A held call is replayed only if it can still finish before its
+own 25 s call budget runs out (one 5 s send window per frame it sends, so a slow dial leaves
+less room); one that cannot is answered `{:error, :dial_deadline_exceeded}` with nothing sent
+or recorded, and a `subscribe/2` that gets it registered nothing, so retry it. A first connect
+that fails raises no `:link_down` notice,
 since there was no link to lose; the next periodic resubscribe (60 s) dials again, and a
 failed attempt there is the usual one-shot `:coverage_change` notice.
 
@@ -955,7 +963,11 @@ without it.
 `get_staking_history/1`'s reply is nested, not a flat list of rows: an array of
 `{providerId, transactions: [...]}` (`rest.yaml:6770-6794`), one entry per provider the
 account has staked with. `provider_id` on each `StakingTransaction` this call returns comes
-from the parent entry; the transaction itself carries none.
+from the parent entry; the transaction itself carries none. A transaction's `dateTime` is read
+as seconds or milliseconds, because the vendor's `TimestampType` (`rest.yaml:7900-7920`) allows
+both and the payload names neither: only a value that dates 2015 to 2099 in one of the two units
+is read, and anything plausible in neither (`10^11`, which is 1973 as milliseconds and the year
+5138 as seconds) refuses the reply.
 
 `get_transfers/2` is one exception: its filters (`currency:`, `timestamp:`,
 `limit_transfers:`) are the venue's own field names and units unchanged, not translated —
@@ -968,7 +980,12 @@ most, with no cursor, so with no `limit_transfers:` this asks for 50 and a full 
 `get_transactions/2` is the other. `POST /v1/transactions` names its window parameter
 `timestamp_nanos` and takes nanoseconds, but this call's `:since` is **milliseconds** (or a
 `DateTime`) like every other `:since` above, and is converted (x 1_000_000) before it is
-sent; only the clearing reads' explicitly named `:since_nanos` is nanoseconds. Without `opts[:limit]` this call also follows
+sent; only the clearing reads' explicitly named `:since_nanos` is nanoseconds. Because this one
+call multiplies your number, its unit has to hold: a `:since` integer (or digit string) before
+2015 in milliseconds, a seconds epoch for instance, is `{:error, {:invalid_option, :since,
+value}}` instead of a 1970 window, and `:since_nanos` is refused the same way below 2015 in
+nanoseconds. Every other window bound goes to the venue as given, and the venue reads it as
+seconds or milliseconds. Without `opts[:limit]` this call also follows
 the venue's own `continuationToken` across pages itself, at the documented maximum page of
 300, and refuses (`{:error, {:too_many_pages, 50}}` or `{:error, :repeated_continuation_token}`)
 rather than truncate or loop forever — `Core.Venue` types the result `[map()]`, so there is
@@ -1718,7 +1735,10 @@ the vendor still published had stopped working, and only a live check said so.
 A dropped connection (no crash, just the venue or the network closing it) reconnects
 inside the same socket, and a reconnected socket carries no subscriptions. This package
 resends your `wanted` set the moment the socket reports it is back. A 60-second
-unconditional resend also runs, as a safety net.
+unconditional resend also runs, as a safety net. Both are sent from a worker process, so the
+feed keeps handling frames and calls while a send waits on a busy socket (it used to wait
+itself, and every frame queued behind it); one is in flight at a time and a request made
+meanwhile runs once more when it settles.
 
 **The first reconnect after a live session drops is immediate; every failed attempt after it
 waits longer.** The wait doubles from 1s to a 30s ceiling, each wait shortened by a random

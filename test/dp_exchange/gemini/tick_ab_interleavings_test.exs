@@ -10,7 +10,7 @@ defmodule DpExchange.Gemini.TickABInterleavingsTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Gemini.Feed
+  alias DpExchange.Gemini.{Feed, FeedSync}
 
   @moduletag :capture_log
 
@@ -88,8 +88,9 @@ defmodule DpExchange.Gemini.TickABInterleavingsTest do
       flush_frames()
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
 
-      # The handler has finished once `get_state` answers, and its frames were forwarded to
-      # this process before the fake socket answered the feed.
+      # The resubscribe runs in a worker; its answer is applied when it arrives, so wait for it.
+      # Its frames were forwarded to this process before the fake socket answered the worker.
+      FeedSync.await_resubscribe(feed)
       state = :sys.get_state(feed)
 
       assert_receive {:frame_sent,
@@ -111,6 +112,7 @@ defmodule DpExchange.Gemini.TickABInterleavingsTest do
       owe_late_unsubscribe(feed, ["SOL-USD"])
 
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
+      FeedSync.await_resubscribe(feed)
       state = :sys.get_state(feed)
 
       assert_receive {:frame_sent,
@@ -127,6 +129,7 @@ defmodule DpExchange.Gemini.TickABInterleavingsTest do
       owe_late_unsubscribe(feed, ["SOL-USD"], %{wanted: MapSet.new(["SOL-USD"])})
 
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
+      FeedSync.await_resubscribe(feed)
       state = :sys.get_state(feed)
 
       assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["solusd@bookTicker"]}},

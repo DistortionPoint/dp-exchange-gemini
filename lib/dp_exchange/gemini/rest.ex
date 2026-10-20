@@ -1017,14 +1017,31 @@ defmodule DpExchange.Gemini.Rest do
   # rather than returned by it. **Zero and negative do NOT raise**: they become 1970 and
   # earlier, which this package has already ruled out in as many words — see
   # `defensive_branches_test.exs`, "an unreadable level timestamp does not become the epoch".
-  defp from_unix_or_undated(value, unit) when value > 0 do
+  #
+  # **And a value that cannot be a time in THIS unit is refused.** `timestampms` and `timestamp`
+  # are one typo apart (rest.yaml: `timestampms` milliseconds, `timestamp` seconds), and a
+  # seconds value in a milliseconds field is `1970-01-21`: a valid `DateTime`, in the wrong
+  # century. Nothing on this venue is dated before 2015 (`@min_epoch_seconds`), so a value
+  # below that floor, in either unit, is another unit or not a time.
+  defp from_unix_or_undated(value, unit) when value >= 0 do
+    if value >= epoch_floor(unit), do: from_unix_floored(value, unit), else: undated()
+  end
+
+  defp from_unix_or_undated(_negative, _unit), do: undated()
+
+  defp from_unix_floored(value, unit) do
     case DateTime.from_unix(value, unit) do
       {:ok, at} -> {:ok, at}
-      {:error, _out_of_range} -> {:error, :missing_venue_timestamp}
+      {:error, _out_of_range} -> undated()
     end
   end
 
-  defp from_unix_or_undated(_non_positive, _unit), do: {:error, :missing_venue_timestamp}
+  defp undated, do: {:error, :missing_venue_timestamp}
+
+  # 2015-01-01T00:00:00Z. The venue's first trade was later; nothing it sends is earlier.
+  @min_epoch_seconds 1_420_070_400
+  defp epoch_floor(:second), do: @min_epoch_seconds
+  defp epoch_floor(:millisecond), do: @min_epoch_seconds * 1_000
 
   # `nil` stays `nil`. `to_string/1` would make it `""`, which reads as an id a consumer can
   # compare and log while identifying nothing — see `to_trade/2`.
@@ -1364,12 +1381,17 @@ defmodule DpExchange.Gemini.Rest do
 
   # Positive and in range, or `nil`. Zero and negatives are valid Unix times and would date a
   # funding event to 1970 — the same substitution `Private`'s `epoch_ms/1` refuses.
-  defp epoch_ms(value) when is_integer(value) and value > 0 do
+  #
+  # Milliseconds from 2015 on (`epoch_floor/1`): a seconds value in a milliseconds field is
+  # January 1970, a valid `DateTime` in the wrong century, and is refused as another unit.
+  defp epoch_ms(value) when is_integer(value) and value >= @min_epoch_seconds * 1_000 do
     case DateTime.from_unix(value, :millisecond) do
       {:ok, at} -> at
       {:error, _reason} -> nil
     end
   end
+
+  defp epoch_ms(value) when is_integer(value), do: nil
 
   defp epoch_ms(value) when is_binary(value) do
     case Integer.parse(value) do
@@ -2002,7 +2024,10 @@ defmodule DpExchange.Gemini.Rest do
   # A bar at or before the epoch is not a bar this venue traded: zero and negative do not
   # raise, they become 1970 and earlier, which `from_unix_or_undated/2` above already refuses
   # for a print. Candles took them as given. Refused with the value, like any unreadable time.
-  defp from_unix_ms(milliseconds) when milliseconds <= 0,
+  #
+  # And nothing before 2015 (`epoch_floor/1`): a bar timed in seconds, 1.7e9, is 1970 in
+  # milliseconds, and its alignment check passes for the widths whose boundary it happens to hit.
+  defp from_unix_ms(milliseconds) when milliseconds < @min_epoch_seconds * 1_000,
     do: {:error, {:unparseable_venue_timestamp, milliseconds}}
 
   defp from_unix_ms(milliseconds) do

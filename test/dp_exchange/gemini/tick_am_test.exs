@@ -198,8 +198,8 @@ defmodule DpExchange.Gemini.TickAMTest do
     test "naming both spellings of one ask is refused, not guessed at" do
       assert {:error, {:conflicting_options, [:since_nanos, :timestamp]}} =
                Private.list_clearing_trades(@credentials,
-                 since_nanos: 1,
-                 timestamp: 1,
+                 since_nanos: 1_787_936_401_000_000_000,
+                 timestamp: 1_787_936_401_000,
                  plug: exploding(),
                  retry_attempts: 0
                )
@@ -212,7 +212,9 @@ defmodule DpExchange.Gemini.TickAMTest do
                  retry_attempts: 0
                )
 
-      assert Fake.list_clearing_trades(creds(since_nanos: 1, timestamp: 1)) ==
+      assert Fake.list_clearing_trades(
+               creds(since_nanos: 1_787_936_401_000_000_000, timestamp: 1_787_936_401_000)
+             ) ==
                {:error, {:conflicting_options, [:since_nanos, :timestamp]}}
 
       assert Fake.list_clearing_trades(creds(limit: 5, limit_trades: 5)) ==

@@ -1287,19 +1287,35 @@ defmodule DpExchange.Gemini.FakeTest do
       # served here and refused there.
       #
       # `now` is read here and again inside the fake, so a run straddling 00:00 UTC would
-      # compute two different edges. Within ten seconds of midnight, wait it out first.
-      to_midnight = 86_400 - rem(DateTime.to_unix(DateTime.utc_now()), 86_400)
-      if to_midnight <= 10, do: Process.sleep((to_midnight + 1) * 1_000)
+      # compute two different edges. The two answers are taken first, and the run is repeated
+      # if the UTC day changed while they were taken: no sleeping out the last seconds of a
+      # day (that cost up to eleven real seconds), and nothing asserted on a straddled run.
+      {edge, outside, inside_answer, outside_answer} = on_one_utc_day(&window_edge_answers/1)
 
-      now = DateTime.to_unix(DateTime.utc_now())
-      edge = DateTime.from_unix!(div(now, 86_400) * 86_400 - 363 * 86_400)
+      assert {:ok, [_candle]} = inside_answer
+
+      assert {:error, {:range_unavailable, "1d", earliest: ^edge, requested: ^outside}} =
+               outside_answer
+    end
+
+    defp window_edge_answers(day) do
+      edge = DateTime.from_unix!(day * 86_400 - 363 * 86_400)
       inside = DateTime.add(edge, 1, :second)
       outside = DateTime.add(edge, -1, :second)
 
-      assert {:ok, [_candle]} = Fake.get_historical_prices("BTC-USD", "1d", start: inside)
+      {edge, outside, Fake.get_historical_prices("BTC-USD", "1d", start: inside),
+       Fake.get_historical_prices("BTC-USD", "1d", start: outside)}
+    end
 
-      assert {:error, {:range_unavailable, "1d", earliest: ^edge, requested: ^outside}} =
-               Fake.get_historical_prices("BTC-USD", "1d", start: outside)
+    # Runs `answers` for the current UTC day and returns its result, unless the day turned
+    # over while it ran: then again, up to three times, and the last result is returned.
+    defp on_one_utc_day(answers, attempts \\ 3) do
+      day = div(DateTime.to_unix(DateTime.utc_now()), 86_400)
+      result = answers.(day)
+
+      if attempts <= 1 or div(DateTime.to_unix(DateTime.utc_now()), 86_400) == day,
+        do: result,
+        else: on_one_utc_day(answers, attempts - 1)
     end
   end
 

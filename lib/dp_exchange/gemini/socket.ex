@@ -152,15 +152,25 @@ defmodule DpExchange.Gemini.Socket do
   sends, and this socket sends almost nothing once subscribed, so a half-open connection
   stayed "connected", delivering nothing, for as long as the operating system's own
   timeouts allowed. A quiet market cannot be told from that by silence alone, and this
-  venue documents no heartbeat of its own.
+  venue pushes no heartbeat frame and numbers no stream (no `socket_sequence`; the only
+  sequence on the wire is a depth diff's `U`/`u`, below).
+
+  Its AsyncAPI document does list request methods named `ping`, `time` and `conninfo`
+  (`docs/reference/gemini/asyncapi/websocket.yaml`, `PingRequest`), but models the request
+  envelope only: **the reply to `{"method":"ping"}` is not enumerated**, and nothing here has
+  measured one. A liveness check that waited for a reply of unknown shape could neither be
+  written nor tested, so this socket does not send it.
 
   RFC 6455 gives one that needs no venue claim: an endpoint answers a ping with a pong.
   Each connection pings every `@ping_every_ms` (30s), and a frame or a pong counts as being
   heard from. After `@silence_ms` (90s, three pings) with nothing heard, it raises a
-  `:degraded` notice (`details.reason: :silent_connection`) and closes. That takes the
+  `:degraded` notice (`details.reason: :silent_connection`) and closes. **The silence is
+  judged only on a ping tick**, so a connection that fell silent is closed between 90s and
+  just under 120s after it was last heard, not at 90s to the second. That takes the
   ordinary `handle_disconnect/2` path: `:link_down`, reconnect, `:reconnected`, resend. The
   check carries this connection's ref and a stale one is not re-armed, so reconnects
-  cannot stack check chains.
+  cannot stack check chains. Both clocks are `System.monotonic_time/1`, so a wall-clock step
+  neither closes a healthy connection nor keeps a dead one open.
 
   ## A connection that answers pings but not subscribes is not serving
 
