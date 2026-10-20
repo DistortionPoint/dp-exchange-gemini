@@ -18,7 +18,7 @@ defmodule DpExchange.Gemini.TickAoTest do
 
   alias DpExchange.Core.{Config, Notice}
   alias DpExchange.Core.Types.{OrderBook, TopOfBook}
-  alias DpExchange.Gemini.{Credentials, Fake, Feed, OptionKeys, Private, Socket}
+  alias DpExchange.Gemini.{Credentials, Fake, Feed, Ledger, OptionKeys, Private, Socket}
   alias DpExchange.Gemini.Supervisor, as: GeminiSupervisor
   alias DpExchange.Gemini.Vendor.WebSockex, as: VendoredWebSockex
 
@@ -556,6 +556,33 @@ defmodule DpExchange.Gemini.TickAoTest do
       # The same wanted set, and the same subscriber: its delivery arrives on the new feed.
       assert DpExchange.Gemini.wanted(name: name) == ["BTC-USD"]
       assert_receive {:dp_exchange, :gemini, %TopOfBook{symbol: "BTC-USD"}}, 5_000
+    end
+
+    test "a refused change leaves the ledger as it was, and an accepted one is recorded" do
+      # Port 1 on loopback: the dial is refused at once, with no network involved.
+      name = tree_name(:ledger)
+      start_tree(name: name, url: "ws://127.0.0.1:1/")
+      ledger = Module.concat(Module.concat(name, "Feed"), "Ledger")
+
+      # Accepted: a subscriber registered with nothing to dial.
+      assert :ok = DpExchange.Gemini.subscribe([], name: name, to: self())
+      kept = Ledger.fetch(ledger)
+      assert MapSet.member?(kept.subscribers, self())
+      assert MapSet.size(kept.wanted) == 0
+
+      # Refused by the feed: the dial fails, so nothing is registered.
+      assert {:error, _reason} = DpExchange.Gemini.subscribe(["BTC-USD"], name: name, to: self())
+      assert Ledger.fetch(ledger) == kept
+
+      # Refused in the caller, before the feed sees it.
+      assert {:error, {:invalid_symbols, _symbols}} =
+               DpExchange.Gemini.subscribe(["BTC-USD", 5], name: name, to: self())
+
+      assert Ledger.fetch(ledger) == kept
+
+      # Accepted: a notice subscriber is recorded.
+      assert :ok = DpExchange.Gemini.subscribe_notices(name: name, to: self())
+      assert MapSet.member?(Ledger.fetch(ledger).notice_subscribers, self())
     end
 
     test "a feed that was never carrying anything restarts quietly" do

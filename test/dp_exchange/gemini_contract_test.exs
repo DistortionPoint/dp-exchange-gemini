@@ -70,5 +70,8 @@ defmodule DpExchange.GeminiContractTest do
         retry_delay: 1
       )
     end,
-    credentials: %{api_key: "account-test-key", api_secret: "test-secret-not-a-real-key"}
+    credentials: %{api_key: "account-test-key", api_secret: "test-secret-not-a-real-key"},
+    # Group 51: the tree, its ledger, its feed and the socket the feed dials, started against a
+    # local stub with the canary in the credentials and in `:ssl_options`.
+    process_probe: {DpExchange.Gemini.ProcessProbe, :start}
 end
