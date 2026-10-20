@@ -223,7 +223,7 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["limit_trades"] == 500
       assert payload["timestamp"] == "1591084414000"
 
@@ -389,7 +389,7 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, %{"address" => "0xabc", "label" => "desk"}}
+      assert_receive {:payload, %{"address" => "0xabc", "label" => "desk"}}, 5_000
     end
   end
 

@@ -98,7 +98,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload, "/v1/account/create"}
+      assert_receive {:payload, payload, "/v1/account/create"}, 5_000
       assert payload["name"] == "Bot One"
       refute Map.has_key?(payload, "type")
 
@@ -109,7 +109,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload2, _path}
+      assert_receive {:payload, payload2, _path}, 5_000
       assert payload2["type"] == "custody"
     end
   end
@@ -128,7 +128,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload, "/v1/account/rename"}
+      assert_receive {:payload, payload, "/v1/account/rename"}, 5_000
       assert payload["account"] == "bot-one"
       assert payload["newName"] == "Bot One (retired)"
       assert payload["newAccount"] == "bot-one-retired"
@@ -144,7 +144,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload, _path}
+      assert_receive {:payload, payload, _path}, 5_000
       assert payload["newName"] == "Renamed"
       refute Map.has_key?(payload, "newAccount")
     end
@@ -168,7 +168,7 @@ defmodule DpExchange.Gemini.AdminTest do
       assert {:ok, []} =
                Private.list_accounts(@credentials, plug: capturing([], me), retry_attempts: 0)
 
-      assert_receive {:payload, payload, "/v1/account/list"}
+      assert_receive {:payload, payload, "/v1/account/list"}, 5_000
       refute Map.has_key?(payload, "limit_accounts")
 
       assert {:ok, []} =
@@ -179,7 +179,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload2, _path}
+      assert_receive {:payload, payload2, _path}, 5_000
       assert payload2["limit_accounts"] == 500
       assert payload2["timestamp"] == 1_787_936_401_000
     end
@@ -263,7 +263,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:request, host, path, raw}
+      assert_receive {:request, host, path, raw}, 5_000
       assert host == "exchange.gemini.com"
       assert path == "/auth/token"
 
@@ -314,7 +314,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:form, form}
+      assert_receive {:form, form}, 5_000
       assert form["client_secret"] == "s3cret"
     end
 
@@ -345,7 +345,7 @@ defmodule DpExchange.Gemini.AdminTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, _payload, "/v1/oauth/revokeByToken"}
+      assert_receive {:payload, _payload, "/v1/oauth/revokeByToken"}, 5_000
     end
   end
 

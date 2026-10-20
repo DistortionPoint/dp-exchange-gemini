@@ -434,7 +434,7 @@ defmodule DpExchange.GeminiDelegationTest do
 
       assert :ok = Gemini.subscribe(["BTC-USD"], feed: name, to: self())
 
-      assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
+      assert_receive {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}, 5_000
       assert Process.alive?(feed)
     end
 

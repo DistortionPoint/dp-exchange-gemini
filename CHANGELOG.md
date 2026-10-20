@@ -86,6 +86,9 @@ acceptable changelog line.
   real one" read the clock itself and the fake read it again, so it waited up to eleven real
   seconds when started within ten seconds of midnight. It now repeats the two answers if the day
   turned over while they were taken, and sleeps never.
+- **The socket's 90 s silence limit is pinned at its edge.** The liveness tests only tried 0 s and
+  100 s. `socket_test.exs` now checks that 89 s of silence pings and 90 s closes, driven through
+  the state's `last_heard_at`, with no sleeps.
 
 ## [0.2.154] - 2026-10-20
 

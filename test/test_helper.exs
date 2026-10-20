@@ -4,8 +4,9 @@
 # `assert_receive_timeout: 5_000` is the default for every bare `assert_receive` wait on a
 # spawned process or timer in this suite (ExUnit's own is 100 ms, which flakes under the full
 # `--cover` gate). It costs nothing when the message arrives; `refute_receive` keeps its own
-# short window, which never decides a race.
-ExUnit.start(exclude: [:tier2], assert_receive_timeout: 5_000)
+# window, 500 ms by default here (ExUnit's own is 100 ms), long enough that a negative it
+# guards is not decided by scheduling.
+ExUnit.start(exclude: [:tier2], assert_receive_timeout: 5_000, refute_receive_timeout: 500)
 
 # **Tier 1 never reaches a venue, and this makes that a fact rather than a convention.** A
 # request that brings no `:plug` of its own gets this one, which refuses it and names the

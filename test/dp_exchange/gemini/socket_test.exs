@@ -387,6 +387,30 @@ defmodule DpExchange.Gemini.SocketTest do
       refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
     end
 
+    # The limit is `@silence_ms` (90 s). The clock only moves forward between `checked/1`
+    # and the call, so 89 s of silence stays under it and 90 s can only be at or past it.
+    test "89 seconds of silence pings and does not close" do
+      {check, quiet} = checked(89_000)
+
+      assert {:reply, :ping, _state} = Socket.handle_info({:liveness, check}, quiet)
+      refute_received {:dp_exchange, :gemini, %Notice{kind: :degraded}}
+    end
+
+    test "90 seconds of silence closes" do
+      {check, silent} = checked(90_000)
+
+      assert {:close, closed} = Socket.handle_info({:liveness, check}, silent)
+      assert closed.liveness == nil
+
+      assert_received {:dp_exchange, :gemini,
+                       %Notice{
+                         kind: :degraded,
+                         details: %{reason: :silent_connection, silent_for_ms: silent_for}
+                       }}
+
+      assert silent_for >= 90_000
+    end
+
     test "a pong counts as being heard from" do
       {_check, stale} = checked(100_000)
       assert {:ok, heard} = Socket.handle_pong(:pong, stale)

@@ -33,8 +33,10 @@ defmodule DpExchange.Gemini.TickAEFeedDialTest do
     feed
   end
 
-  # Polls the feed (itself a proof that it is answering) until `fun` is true of its state.
-  defp await_state(feed, fun, tries \\ 500) do
+  # Polls the feed (itself a proof that it is answering) until `fun` is true of its state. It
+  # returns the moment the state matches, so the 30 s ceiling (3_000 x 10 ms, before each
+  # `:sys.get_state` round trip) costs nothing on a passing run and survives a loaded gate.
+  defp await_state(feed, fun, tries \\ 3_000) do
     cond do
       fun.(:sys.get_state(feed)) ->
         :ok

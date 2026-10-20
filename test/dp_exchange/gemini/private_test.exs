@@ -115,7 +115,7 @@ defmodule DpExchange.Gemini.PrivateTest do
     test "the payload names the endpoint, which is what binds a signature to a target" do
       Private.get_balances(@credentials, plug: capturing([], self()), retry_attempts: 0)
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["request"] == "/v1/balances"
       assert is_integer(payload["nonce"])
     end
@@ -149,7 +149,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         retry_attempts: 0
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["amount"] == "0.00000001"
       assert payload["price"] == "150"
     end
@@ -160,7 +160,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         retry_attempts: 0
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["type"] == "exchange limit"
       assert payload["options"] == []
       assert payload["symbol"] == "btcusd"
@@ -182,7 +182,7 @@ defmodule DpExchange.Gemini.PrivateTest do
           retry_attempts: 0
         )
 
-        assert_receive {:payload, payload}
+        assert_receive {:payload, payload}, 5_000
         assert payload["type"] == "exchange limit"
         assert payload["options"] == [option]
       end
@@ -195,7 +195,7 @@ defmodule DpExchange.Gemini.PrivateTest do
           retry_attempts: 0
         )
 
-        assert_receive {:payload, payload}
+        assert_receive {:payload, payload}, 5_000
         assert payload["options"] == [option]
       end
     end
@@ -282,7 +282,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         retry_attempts: 0
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["client_order_id"] == "mine-1"
     end
   end
@@ -434,7 +434,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       refute Map.has_key?(payload, "symbol")
     end
 
@@ -731,7 +731,7 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       Private.get_balances(@credentials, environment: :sandbox, plug: plug, retry_attempts: 0)
 
-      assert_receive {:host, "api.sandbox.gemini.com"}
+      assert_receive {:host, "api.sandbox.gemini.com"}, 5_000
     end
   end
 
@@ -866,7 +866,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["limit_transfers"] == 50
     end
 
@@ -896,7 +896,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         retry_attempts: 0
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["stop_price"] == "95"
       assert payload["type"] == "exchange stop limit"
     end
@@ -958,7 +958,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:path, session_path}
+      assert_receive {:path, session_path}, 5_000
       assert session_path == "/v1/order/cancel/session"
 
       assert {:ok, _account} =
@@ -968,7 +968,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:path, account_path}
+      assert_receive {:path, account_path}, 5_000
       assert account_path == "/v1/order/cancel/all"
     end
 
@@ -1024,7 +1024,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       end
 
       assert {:ok, []} = Private.get_orders(@credentials, plug: plug, retry_attempts: 0)
-      assert_receive {:path, "/v1/orders"}
+      assert_receive {:path, "/v1/orders"}, 5_000
     end
 
     test "with history: the closed ones come from /v1/orders/history" do
@@ -1041,7 +1041,7 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert {:ok, []} =
                Private.get_orders(@credentials, history: true, plug: plug, retry_attempts: 0)
 
-      assert_receive {:path, "/v1/orders/history"}
+      assert_receive {:path, "/v1/orders/history"}, 5_000
     end
 
     test "history filters are sent to the venue in the venue's own names" do
@@ -1057,7 +1057,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "btcusd"
       assert payload["limit_orders"] == 100
       # Milliseconds, which is the unit the venue's own examples and responses use.
@@ -1076,7 +1076,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["limit_orders"] == 500
       refute Map.has_key?(payload, "symbol")
       refute Map.has_key?(payload, "timestamp")
@@ -1156,7 +1156,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "dogeusd"
       assert payload["side"] == "buy"
       assert payload["totalSpend"] == "100"
@@ -1174,7 +1174,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "dogeusd"
       assert payload["side"] == "sell"
     end
@@ -1203,7 +1203,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "gusdusd"
       assert payload["side"] == "sell"
     end
@@ -1365,7 +1365,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       # `quoteId` is `type: integer` in the venue's own schema (`rest.yaml:5072`) — sent as
       # a number here, not the string `commit_conversion/2`'s caller received back.
       assert payload["quoteId"] == 20_930
@@ -1419,7 +1419,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:path, "/v1/wrap/gusdusd"}
+      assert_receive {:path, "/v1/wrap/gusdusd"}, 5_000
       assert conversion.status == :settled
 
       # The wrap endpoint names the identifier `orderId`; the quote-and-commit endpoints
@@ -1489,7 +1489,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                )
 
       assert [%{"token" => "USDC"}] = rows
-      assert_receive {:request, "GET", "/v2/network/USDC", ["account-test"]}
+      assert_receive {:request, "GET", "/v2/network/USDC", ["account-test"]}, 5_000
     end
 
     test "the asset direction is refused, not sent bare, with nothing to sign with" do
@@ -1523,7 +1523,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:request, "GET", "/v2/networks/ethereum/assets"}
+      assert_receive {:request, "GET", "/v2/networks/ethereum/assets"}, 5_000
     end
 
     test "neither an asset nor a network is an error" do
@@ -1650,7 +1650,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:fee_payload, payload}
+      assert_receive {:fee_payload, payload}, 5_000
 
       # The canonical pair goes out in the venue's spelling, the same as every other symbol
       # this package sends — the vendor's own example for this parameter is `btcusd`.
@@ -1670,7 +1670,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:fee_payload, payload}
+      assert_receive {:fee_payload, payload}, 5_000
       refute Map.has_key?(payload, "symbol")
     end
 
@@ -1687,7 +1687,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:fee_payload, payload}
+      assert_receive {:fee_payload, payload}, 5_000
       refute Map.has_key?(payload, "symbol")
     end
   end
@@ -1853,7 +1853,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:path, path}
+      assert_receive {:path, path}, 5_000
       # 2020-07-13T15:30:59Z in milliseconds. The venue's doc example uses a different
       # instant; this asserts the conversion, not the example.
       assert path == "/v2/fxrate/AUDUSD/1594654259000"
@@ -1877,7 +1877,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:path, path}
+      assert_receive {:path, path}, 5_000
       assert path =~ "/AUDUSD/"
     end
 
@@ -2020,13 +2020,13 @@ defmodule DpExchange.Gemini.PrivateTest do
 
       for call <- calls do
         call.(plug: capturing([], self()), retry_attempts: 0, account: "primary")
-        assert_receive {:payload, %{"account" => "primary"}}
+        assert_receive {:payload, %{"account" => "primary"}}, 5_000
       end
     end
 
     test "absent option, absent field: an account-scoped key is unaffected" do
       Private.get_balances(@credentials, plug: capturing([], self()), retry_attempts: 0)
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       refute Map.has_key?(payload, "account")
     end
 
@@ -2037,7 +2037,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         account: "primary"
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       refute Map.has_key?(payload, "account")
 
       Private.list_accounts(@credentials,
@@ -2046,7 +2046,7 @@ defmodule DpExchange.Gemini.PrivateTest do
         account: "primary"
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       refute Map.has_key?(payload, "account")
     end
   end

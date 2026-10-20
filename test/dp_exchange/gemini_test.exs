@@ -337,7 +337,7 @@ defmodule DpExchange.GeminiTest do
         end
       end)
 
-      assert_receive :registered
+      assert_receive :registered, 5_000
 
       assert DpExchange.Gemini.subscribe(["BTC-USD"], feed: name) ==
                {:error, {:feed_exited, :boom}}

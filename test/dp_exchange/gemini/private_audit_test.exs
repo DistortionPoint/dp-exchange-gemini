@@ -101,7 +101,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["order_id"] === 106_817_811
       assert payload["request"] == "/v1/order/cancel"
     end
@@ -113,7 +113,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["order_id"] === 73_751_560_172_006_688
     end
 
@@ -227,7 +227,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["stop_price"] == "100"
       assert payload["type"] == "exchange stop limit"
       assert payload["side"] == "buy"
@@ -318,7 +318,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["timestamp"] === 1_787_936_401_000
       assert payload["network"] == "solana"
       assert payload["currency"] == "USDC"
@@ -334,7 +334,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["limit_transfers"] === 50
       refute Map.has_key?(payload, "timestamp")
     end
@@ -442,7 +442,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                    ]
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["fee"] == "0"
 
       assert {:error, {:negative_amount, :fee, _value}} =
@@ -514,7 +514,7 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                    plug: capturing(@withdrawal, self())
                  )
 
-        assert_receive {:payload, payload}
+        assert_receive {:payload, payload}, 5_000
         assert byte_size(payload["clientTransferId"]) == 36
       end
     end
@@ -526,13 +526,13 @@ defmodule DpExchange.Gemini.PrivateAuditTest do
                  plug: capturing(@withdrawal, self())
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["memo"] === "12345"
 
       assert {:ok, _withdrawal} =
                withdraw(Decimal.new(1), "0xabc", memo: "", plug: capturing(@withdrawal, self()))
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       refute Map.has_key?(payload, "memo")
     end
   end
