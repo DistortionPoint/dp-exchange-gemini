@@ -20,6 +20,68 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Feed restart lost every subscription, silently.** The supervisor restarts a crashed feed
+  from its start options, which never hold a consumer's later `subscribe/3`: the wanted symbols,
+  the data subscribers and the notice subscribers were gone, and no consumer was told. The tree
+  is now `:rest_for_one` over a new `DpExchange.Gemini.Ledger` (an `Agent`), the limiter and the
+  feed. The feed records its accepted intent after every change (a refused change leaves it as
+  it was, so nothing is written) and a restarted one restores it in `handle_continue/2`
+  (`init/1` is not held): it re-monitors the subscribers, resubscribes, and, when anything was
+  wanted, sends its notice subscribers a `:coverage_change` notice with
+  `details.reason: :feed_restarted` (data-only subscribers have no notice channel and receive
+  data again). The tree now has three children, and a limiter crash restarts the feed after it
+  (the feed restores from the ledger). The feed holds no credential, so none is kept.
+- **Two trees in one environment needed all three names.** A tree started with a non-default
+  atom `name:` and no `:feed` or `:limiter` now names its processes `Module.concat(name,
+  "Feed")`, `"RateLimiter"` (and the feed's `"Ledger"`), so distinct `name:`s are enough. A
+  facade call carrying the same `name:` addresses that tree's feed and limiter. The default
+  names (no name, `nil`, the default supervisor names, a non-atom name) are unchanged, and an
+  explicit `:feed`/`:limiter` wins. `:name` is now a key every call that addresses a feed or a
+  limiter reads, except `live?/1`, `rename_account/3` (the new name is positional) and
+  `create_account/1` (its `:name` is the subaccount's).
+
+- **A feed that stopped left the socket it dialled connected.** The socket is linked to its
+  `Feed` but does not trap exits (nor does `websockex`), and an exit signal with reason
+  `:normal` is ignored by a process that does not trap, so `GenServer.stop/1` on a feed (reason
+  `:normal`) left its socket connected, reconnecting for good and delivering to a subscriber
+  that no longer existed. `Feed.terminate/2` now ends the socket the feed itself dialled
+  (`:shutdown`); a socket handed in through `:socket` was not dialled there and is left alone.
+- **A caller's `:ssl_options` printed in a supervisor's report.** They travel in the same
+  options list as `:credentials`, so they sat unwrapped in the supervisor's stored
+  `start_link` arguments and in the `Feed` child spec, and any child report and
+  `:sys.get_status/1` of the tree printed a client `:key` or `:password` in them (the `Feed`'s
+  own state was already redacted). `Credentials.wrap_opt/1` now wraps a non-empty list in a
+  struct that does not print; `Feed` and `Socket` read it back (`Credentials.unwrap_ssl/1`),
+  and the list the socket is started with is unchanged.
+- **The vendored socket's telemetry carried the connection's `:ssl_options`.** Every
+  `[:websockex, ...]` event put the whole `WebSockex.Conn` in its metadata, so a telemetry
+  handler that logs metadata wrote out a key or password a caller put in `:ssl_options`. They are
+  `:redacted` in the metadata now; nothing else in an event changes (vendored change 6).
+- **`{:error, {:invalid_options, opts}}` echoed the credentials.** Passing the credentials where
+  the options go (`get_balances(creds, creds)`, or the two arguments swapped) is an ordinary
+  slip, and the whole argument came back in the error tuple, and, from the four reads that raise
+  (`coverage/1`, `coverage_by_kind/1`, `wanted/1`, `live?/1`), in an `ArgumentError` message that
+  callers log. A value under a credential-looking key (`:api_secret`, `:credentials`,
+  `:access_token`, ...) is `:redacted` at any depth; everything else is returned as given.
+  `DpExchange.Gemini.Fake` refuses with the same function.
+
+### Changed
+
+- **A depth frame is checked against the connection's subscriptions by membership.** A frame for
+  a symbol on a `snapshot` connection was matched against `depth_streams` by walking every
+  `{symbol, channel}` in it, so a connection carrying N symbols paid O(N) per frame (about 700
+  tuple comparisons per frame with the whole 346-symbol catalogue on both diff channels, at the
+  rate of the busiest stream). It is two `MapSet.member?/2` calls now (`:depth`, `:depth_fast`:
+  the only keys `subscribe/3` records). The answer is identical.
+
+### Documentation
+
+- `seed_nonce/1` states that the nonce counters are the node's, not one key's (no key material
+  names them), so a seed raises the sequence for every `:incremental` key signed for on the
+  node; seed only when the node signs for the one key the seed is for.
+
 ## [0.2.153] - 2026-10-19
 
 ### Dependencies

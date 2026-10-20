@@ -21,12 +21,12 @@ defmodule DpExchange.Gemini.SupervisorTest do
   end
 
   describe "the tree" do
-    test "starts a limiter and a feed, and nothing else" do
+    test "starts a ledger, a limiter and a feed, and nothing else" do
       {pid, _opts} = start_tree()
 
       children = Elixir.Supervisor.which_children(pid)
 
-      assert length(children) == 2
+      assert length(children) == 3
     end
 
     test "starts NO socket — a consumer that has not subscribed has no connection open" do

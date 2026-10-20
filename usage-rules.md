@@ -135,12 +135,18 @@ package that expected someone else to start one answers
 authenticated calls meter against their own bucket, keyed `:gemini_private`; that name
 appears as `provider` in their telemetry, but their errors are still tagged `:gemini`.
 
-Running two — two credentials, two scopes — needs distinct names:
+Running two — two credentials, two scopes — needs distinct `name:`s, and nothing else:
 
 ```elixir
-[{DpExchange.Gemini, name: :gem_a, feed: :gem_a_feed, limiter: :gem_a_limiter},
- {DpExchange.Gemini, name: :gem_b, feed: :gem_b_feed, limiter: :gem_b_limiter}]
+[{DpExchange.Gemini, name: :gem_a}, {DpExchange.Gemini, name: :gem_b}]
 ```
+
+A tree started with a non-default atom `name:` and no `:feed` or `:limiter` names its feed
+`Module.concat(name, "Feed")` and its limiter `Module.concat(name, "RateLimiter")`, and a facade
+call carrying the same `name:` addresses that tree: `DpExchange.Gemini.subscribe(symbols, name:
+:gem_a)`, `get_balances(creds, name: :gem_a)`. Pass `:feed` and `:limiter` yourself to choose
+other names; an explicit one wins. With no name, a `nil` one or a non-atom one the names are the
+environment defaults, as before.
 
 ## A connect that never finishes ends at a deadline, and a malformed close frame is a reconnect
 
@@ -182,7 +188,11 @@ trust store); only an explicit `verify: :verify_none` turns it off. The option i
 to every socket `Feed` dials (it
 did not before; the option was dropped). `Feed` shows that option as `:redacted` in a crash
 report and in `:sys.get_status/1`, because a `:cacerts` list, a `:key` or a `:password` lives
-there; `:sys.get_state/1` still returns it.
+there; `:sys.get_state/1` still returns it. The option is also wrapped where the tree is
+started, so your supervisor's stored child spec and its child reports print
+`#DpExchange.Gemini.Credentials.SslOptions<...>` and not the list (a non-empty list is
+wrapped by `{DpExchange.Gemini, ...}` and `DpExchange.Gemini.Supervisor.start_link/1`).
+Stopping the feed (`GenServer.stop/1`, a supervisor's shutdown) also ends the socket it dialled.
 
 ## A socket crash costs one reconnect, never your whole subscription
 
@@ -214,15 +224,17 @@ notice per `{kind, reason, symbol}` reaches you at once, repeats within 30 s are
 the next one after the window carries the count in `details.suppressed`. `:link_up`,
 `:link_down` and `:coverage_change` are not throttled.
 
-**What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
-the socket-crash path, or anything that kills the `Feed` pid directly.
-`DpExchange.Gemini.Supervisor` restarts `Feed` under `:one_for_one`, but from the
-*static* `opts` your supervision tree started it with; every `subscribe/3`,
-`update_symbols/2` and `subscribe_notices/1` call you made afterward is gone; `coverage/1`
-reads empty until you call `subscribe/3` again. Nothing inside this package can replay
-those calls — it never held onto the functions or the process that made them. If your
-consumer needs to survive a `Feed` restart unattended, monitor the `Feed` pid (or the
-`DpExchange.Gemini` pid it sits under) yourself and re-issue `subscribe/3` on `:DOWN`.
+**`Feed` itself crashing no longer costs the subscription** — a bug outside the socket-crash
+path, or anything that kills the `Feed` pid directly. `DpExchange.Gemini.Supervisor` is
+`:rest_for_one` over a ledger, the limiter and the feed. The feed records what it was asked to
+carry (wanted symbols, data subscribers, notice subscribers) in the ledger after every accepted
+change, and the restarted feed reads it back: your subscribers are re-monitored, the wanted set
+is resubscribed, and your `subscribe_notices/1` subscribers receive a `:coverage_change` notice
+with `details.reason: :feed_restarted` (only when something was wanted; a data-only subscriber
+has no notice channel and simply receives data again). `coverage/1` reads empty until frames
+arrive again, as after any reconnect. What is not kept: a subscription whose subscriber pid died
+meanwhile, and anything the ledger was not told because the feed died between a change and its
+write (the write is not waited for).
 
 ## `channels: [:quotes, :top_of_book, :trades]` — opt into the trade tape
 
@@ -1242,10 +1254,11 @@ named subaccount could not reach the venue and the token's own account would ans
 | `get_order_book/2` | `:depth`; `:limit` is answered `{:unsupported_option, :limit}` (depth is `:depth`) |
 | `get_trades/2` | `:since`, `:since_tid`, `:limit`, `:include_broken` |
 | `list_instruments/1` | `:symbols` |
-| `subscribe/2` | `:to`, `:feed`, `:channels` (`:channels` is `{:invalid_option, :channels, _}`) |
-| `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `coverage_by_kind/1`, `wanted/1` | `:feed` |
-| `subscribe_notices/1` | `:to`, `:feed` |
+| `subscribe/2` | `:to`, `:feed`, `:name`, `:channels` (`:channels` is `{:invalid_option, :channels, _}`) |
+| `unsubscribe/2`, `update_symbols/2`, `coverage/1`, `coverage_by_kind/1`, `wanted/1` | `:feed`, `:name` |
+| `subscribe_notices/1` | `:to`, `:feed`, `:name` |
 | `live?/1` | none (and only `:credentials` and `:environment` beyond them) |
+| every call that sends a request, except `rename_account/3` and `create_account/1` | also `:name` (the tree whose limiter meters it; see "Running two") |
 | `get_balances/2`, `get_accounts/2`, `place_order/3`, `cancel_order/3`, `get_order/3`, `test_connection/2`, `get_notional_balances/3`, `get_trade_volume/2`, `get_fx_rate/3`, `list_payment_methods/2`, `transfer_internal/4`, `remove_approved_address/3`, `get_staking_balances/1`, `get_positions/1`, `get_margin_rates/1`, `preview_margin_order/2`, `get_clearing_order/2`, `cancel_clearing_order/2`, `confirm_clearing_order/3`, `get_roles/1` | none |
 | `get_fees/2` | `:symbol` |
 | `get_transfers/2` | `:limit_transfers`, `:currency`, `:network`, `:timestamp`, `:show_completed_deposit_advances` (boolean) |

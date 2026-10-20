@@ -48,7 +48,10 @@ defmodule DpExchange.Gemini.OptionKeys do
 
     * `:ok`
     * `{:error, {:unknown_option, key}}` - the first key (in the caller's order) not accepted
-    * `{:error, {:invalid_options, opts}}` - `opts` is not a keyword list
+    * `{:error, {:invalid_options, opts}}` - `opts` is not a keyword list. A value under a
+      credential-looking key (`:api_secret`, `:credentials`, `:access_token`, ...) is shown as
+      `:redacted`, at any depth: the argument that was passed in the options' place is
+      sometimes the credentials themselves.
 
   `check!/2` raises `ArgumentError` for either, for the reads (`coverage/1`,
   `coverage_by_kind/1`, `wanted/1`, `live?/1`) whose result has no room for an error.
@@ -293,10 +296,19 @@ defmodule DpExchange.Gemini.OptionKeys do
 
     cond do
       function in @no_request -> [:credentials | own]
-      function in @feed_addressing -> [:credentials, :environment | own]
-      true -> (Options.transport_options() -- not_read(function)) ++ own
+      function in @feed_addressing -> [:credentials, :environment] ++ tree_name(function) ++ own
+      true -> (Options.transport_options() -- not_read(function)) ++ tree_name(function) ++ own
     end
   end
+
+  # `:name` is the tree's own name (`DpExchange.Gemini.Supervisor`): a call carrying it
+  # addresses that tree's feed and limiter, which are named after it unless given explicitly.
+  # Every call that addresses either lists it. Not `live?/1`, which addresses neither, and not
+  # the two calls whose `:name` is something else: `rename_account/3` takes the new name
+  # positionally, and `create_account/1`'s `:name` is the subaccount's (a string, which never
+  # names a tree; its own table entry already reads it).
+  defp tree_name(function) when function in [:live?, :rename_account, :create_account], do: []
+  defp tree_name(_function), do: [:name]
 
   @doc """
   The shared transport keys `function` sends a request and still does not read, each with
@@ -320,7 +332,7 @@ defmodule DpExchange.Gemini.OptionKeys do
   `nil` counts), or `{:error, {:invalid_options, opts}}` for anything but a keyword list.
   """
   @spec check(atom(), term()) :: :ok | refusal()
-  def check(function, opts), do: Options.check(opts, allowed(function))
+  def check(function, opts), do: opts |> Options.check(allowed(function)) |> scrubbed()
 
   @doc """
   `check/2` for a read whose result has no room for an error: raises `ArgumentError` for an
@@ -345,5 +357,35 @@ defmodule DpExchange.Gemini.OptionKeys do
   `:from`, `:to` and `:client_transfer_id`) against those keys alone.
   """
   @spec check_terms(atom(), term()) :: :ok | refusal()
-  def check_terms(function, terms), do: Options.check(terms, Map.fetch!(@terms, function))
+  def check_terms(function, terms) do
+    terms |> Options.check(Map.fetch!(@terms, function)) |> scrubbed()
+  end
+
+  # **`{:invalid_options, opts}` carries the caller's argument back, and the argument can be a
+  # credential.** Passing the credentials where the options go (`get_balances(creds, creds)`,
+  # or the two swapped) is an ordinary slip, and `opts` then came back whole in the error tuple
+  # (and, from `check!/2`, in an `ArgumentError` message), which callers log. The shape of what
+  # was passed stays, and every value under a credential-looking key is `:redacted`, at any
+  # depth. Anything else is returned as it was given.
+  @secret_names ~w(api_key api_secret access_token refresh_token client_secret credentials
+                   password secret token key passphrase private_key signature)
+
+  defp scrubbed({:error, {:invalid_options, bad}}), do: {:error, {:invalid_options, scrub(bad)}}
+  defp scrubbed(other), do: other
+
+  defp scrub(map) when is_map(map) and not is_struct(map), do: Map.new(map, &scrub_entry/1)
+  defp scrub(list) when is_list(list), do: scrub_list(list)
+  defp scrub({_key, _value} = entry), do: scrub_entry(entry)
+  defp scrub(other), do: other
+
+  defp scrub_list([]), do: []
+  defp scrub_list([head | tail]), do: [scrub(head) | scrub_list(tail)]
+  defp scrub_list(improper_tail), do: scrub(improper_tail)
+
+  defp scrub_entry({key, value}) do
+    if secret_name?(key), do: {key, :redacted}, else: {key, scrub(value)}
+  end
+
+  defp secret_name?(key) when is_atom(key) or is_binary(key), do: to_string(key) in @secret_names
+  defp secret_name?(_other), do: false
 end

@@ -55,7 +55,18 @@ defmodule DpExchange.Gemini.Supervisor do
       with nothing pointing at the demo traffic that caused it.
 
   Explicit names still win everywhere, for a consumer running two of the *same*
-  environment — two credentials, two scopes.
+  environment — two credentials, two scopes. A tree started with a non-default atom `:name`
+  and no `:feed` or `:limiter` names its processes after itself (`Module.concat(name, "Feed")`,
+  `"RateLimiter"`, and the feed's `"Ledger"`), so two accounts need only distinct `name:`s, and
+  a facade call carrying the same `name:` addresses that tree's feed and limiter.
+
+  ## A feed restart keeps what the feed was asked to carry
+
+  The tree is `:rest_for_one` over `Ledger`, the limiter and the `Feed`. The feed tells the
+  ledger its accepted intent (wanted symbols, data and notice subscribers) after every change;
+  a restarted feed reads it back in `handle_continue/2`, re-monitors the subscribers,
+  resubscribes, and sends each notice subscriber a `:coverage_change` notice
+  (`details.reason: :feed_restarted`). See `DpExchange.Gemini.Ledger`.
 
   ## What is deliberately not here
 
@@ -67,7 +78,7 @@ defmodule DpExchange.Gemini.Supervisor do
   use Supervisor
 
   alias DpExchange.Core.DefaultRateLimiter
-  alias DpExchange.Gemini.{Auth, Environment, Feed}
+  alias DpExchange.Gemini.{Auth, Environment, Feed, Ledger}
 
   @doc """
   Starts this venue's tree: the rate limiter, then the feed.
@@ -115,16 +126,54 @@ defmodule DpExchange.Gemini.Supervisor do
     # nonce.
     Auth.ensure_counter()
 
+    ledger = ledger_name(opts)
+
     # Both children take their names from `opts`, so a consumer running two of this venue
     # — two credentials, two scopes — keeps them apart.
-    children = [
-      {DefaultRateLimiter, name: limiter_name(opts), limits: limits()},
-      {Feed, Keyword.put(opts, :name, feed_name(opts))}
-    ]
+    feed_opts = opts |> Keyword.put(:name, feed_name(opts)) |> Keyword.put(:ledger, ledger)
 
-    # `:one_for_one` — the feed losing its socket is not a reason to reset the rate
-    # limiter, and resetting it would hand back budget the venue has already been spent.
-    Supervisor.init(children, strategy: :one_for_one)
+    children =
+      [
+        ledger && {Ledger, name: ledger},
+        {DefaultRateLimiter, name: limiter_name(opts), limits: limits()},
+        {Feed, feed_opts}
+      ]
+      |> Enum.filter(& &1)
+
+    # `:rest_for_one`, in the order ledger, limiter, feed. A feed that crashes restarts alone,
+    # and finds its subscribers and wanted symbols in the ledger (`DpExchange.Gemini.Ledger`);
+    # the limiter is not reset by it, so budget the venue has already been spent is not handed
+    # back. A limiter crash restarts the feed after it (which restores from the ledger), and
+    # a ledger crash restarts both, because the feed would otherwise write to nothing.
+    Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  @doc """
+  The name of this tree's ledger (`DpExchange.Gemini.Ledger`), derived from its feed's name,
+  or `nil` when the feed is addressed by a name that is not an atom.
+  """
+  @spec ledger_name(keyword()) :: atom() | nil
+  def ledger_name(opts) do
+    case feed_name(opts) do
+      name when is_atom(name) -> Module.concat(name, "Ledger")
+      _not_an_atom -> nil
+    end
+  end
+
+  # A tree started with a non-default atom `:name` and no explicit `:feed` or `:limiter` names
+  # its processes after itself, so two accounts in one environment need only distinct names.
+  # The default names (no name, `nil`, the default supervisor names, anything that is not an
+  # atom) are exactly what they always were, and an explicit option wins over this.
+  defp derived_name(opts, suffix) do
+    case Keyword.get(opts, :name) do
+      name when is_atom(name) and name not in [nil, true, false] ->
+        if name in [__MODULE__, DpExchange.Gemini.SandboxSupervisor],
+          do: nil,
+          else: Module.concat(name, suffix)
+
+      _default_or_not_an_atom ->
+        nil
+    end
   end
 
   @doc """
@@ -139,10 +188,7 @@ defmodule DpExchange.Gemini.Supervisor do
   @spec limiter_name(keyword()) :: atom()
   def limiter_name(opts) do
     Keyword.get_lazy(opts, :limiter, fn ->
-      case Environment.resolve(opts) do
-        :production -> DpExchange.Gemini.RateLimiter
-        :sandbox -> DpExchange.Gemini.SandboxRateLimiter
-      end
+      derived_name(opts, "RateLimiter") || environment_limiter(opts)
     end)
   end
 
@@ -154,14 +200,25 @@ defmodule DpExchange.Gemini.Supervisor do
   name collision. Deriving them means the common case — live trading in one tree,
   strategy testing against demo in another — works without naming anything.
   """
-  @spec feed_name(keyword()) :: atom()
+  @spec feed_name(keyword()) :: GenServer.server()
   def feed_name(opts) do
     Keyword.get_lazy(opts, :feed, fn ->
-      case Environment.resolve(opts) do
-        :production -> Feed
-        :sandbox -> DpExchange.Gemini.SandboxFeed
-      end
+      derived_name(opts, "Feed") || environment_feed(opts)
     end)
+  end
+
+  defp environment_feed(opts) do
+    case Environment.resolve(opts) do
+      :production -> Feed
+      :sandbox -> DpExchange.Gemini.SandboxFeed
+    end
+  end
+
+  defp environment_limiter(opts) do
+    case Environment.resolve(opts) do
+      :production -> DpExchange.Gemini.RateLimiter
+      :sandbox -> DpExchange.Gemini.SandboxRateLimiter
+    end
   end
 
   # Straight from the declaration. If a ceiling changes, it changes in one place.

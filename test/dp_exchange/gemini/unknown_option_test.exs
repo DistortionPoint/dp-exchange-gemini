@@ -428,8 +428,9 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
       assert Fake.revoke_access_token(opts) == expected
       transport = DpExchange.Core.Options.transport_options()
 
+      # Its own table entry is empty. `:name` is the tree's (it picks the limiter), not its own.
       assert OptionKeys.allowed(:revoke_access_token) ==
-               transport -- [:retry_attempts, :retry_delay]
+               (transport -- [:retry_attempts, :retry_delay]) ++ [:name]
     end
   end
 

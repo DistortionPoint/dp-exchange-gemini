@@ -282,13 +282,31 @@ defmodule DpExchange.Gemini.Feed do
   it. `:link_up`, `:link_down` and `:coverage_change` are bounded by reconnect backoff and
   the resubscribe latch, and pass untouched. The data-path `:degraded` notice for a stalled
   subscriber is sent from `deliver/2`, not here, and already latches.
+
+  ## Stopping the feed stops its socket
+
+  The socket this feed dialled is linked to it and does not trap exits, so a `:normal` stop
+  (`GenServer.stop/1`) sent it a signal it ignores, and it stayed connected, reconnecting and
+  delivering to nobody. `terminate/2` ends it (`:shutdown`). A socket handed in with `:socket`
+  was not dialled here and is left alone.
+
+  ## A restarted feed keeps what it was carrying
+
+  The supervisor restarts a crashed feed from its start options, which never held a consumer's
+  later `subscribe/3`, so the wanted symbols and every subscriber were lost without a word.
+  When the tree supplies a `:ledger` (`DpExchange.Gemini.Ledger`), the feed records its accepted
+  intent after every change (a refused change leaves it as it was, so writes nothing) and a
+  restarted one restores it in `handle_continue/2`: it re-monitors the subscribers, resubscribes,
+  and, when anything was wanted, sends its notice subscribers `:coverage_change` with
+  `details.reason: :feed_restarted`. Data-only subscribers have no notice channel and simply
+  receive data again. The feed holds no credential, so there is none to keep.
   """
 
   use GenServer
 
   alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
-  alias DpExchange.Gemini.{Socket, SymbolFormat}
+  alias DpExchange.Gemini.{Credentials, Ledger, Socket, SymbolFormat}
 
   require Logger
 
@@ -344,7 +362,7 @@ defmodule DpExchange.Gemini.Feed do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     # Idempotent: credentials, if any were passed, never reach the init argument raw.
-    opts = DpExchange.Gemini.Credentials.wrap_opt(opts)
+    opts = Credentials.wrap_opt(opts)
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
@@ -539,6 +557,18 @@ defmodule DpExchange.Gemini.Feed do
 
   @impl true
   def init(opts) do
+    {:ok, state} = init_state(opts)
+
+    case state.ledger do
+      nil -> {:ok, state}
+      _ledger -> {:ok, state, {:continue, :restore_intent}}
+    end
+  end
+
+  @impl true
+  def handle_continue(:restore_intent, state), do: {:noreply, restore_intent(state)}
+
+  defp init_state(opts) do
     # `start_dial/1` calls `Socket.start_link/1` from inside a `Feed` callback, which
     # links the socket to `Feed` — see the moduledoc's "A crashed socket is Feed's crash
     # too" section. Without this flag an abnormal socket exit crashes `Feed` itself,
@@ -551,13 +581,15 @@ defmodule DpExchange.Gemini.Feed do
     {:ok,
      %{
        socket_opts:
-         Keyword.take(opts, [
+         opts
+         |> Keyword.take([
            :url,
            :environment,
            :socket_connect_timeout,
            :socket_recv_timeout,
            :ssl_options
-         ]),
+         ])
+         |> unwrap_ssl_option(),
        # See the moduledoc's "`channels:`" section. Read once, here, already validated —
        # every place that decides which `Socket` channels to carry (`active_channels/1`)
        # reads this rather than a module attribute, so a feed always acts on what its own
@@ -610,8 +642,82 @@ defmodule DpExchange.Gemini.Feed do
        # when delivery to it stops and one when it resumes — never one per dropped message,
        # which would arrive at the rate of the stream it already cannot keep up with.
        dropping: MapSet.new(),
-       max_queue_len: Fanout.max_queue_len!(opts, :gemini)
+       max_queue_len: Fanout.max_queue_len!(opts, :gemini),
+       # The per-tree `DpExchange.Gemini.Ledger` holding what a restart must not lose, or nil
+       # (a feed started on its own). `ledger_snapshot` is what it was last told.
+       ledger: Keyword.get(opts, :ledger),
+       ledger_snapshot: nil
      }}
+  end
+
+  # **What the feed was asked to carry survives the feed.** The supervisor restarts a crashed
+  # feed from the options it was started with, which never hold a consumer's later
+  # `subscribe/3`: every subscriber, the whole `wanted` set and the notice subscribers were
+  # gone, and no consumer was told. `DpExchange.Gemini.Ledger` (started before this process,
+  # under `:rest_for_one`) is told the accepted intent after every change; a restarted feed
+  # reads it here, in `handle_continue/2`, and not in `init/1`, so the supervisor is not held.
+  defp restore_intent(state) do
+    case Ledger.fetch(state.ledger) do
+      %{wanted: wanted, subscribers: subscribers, notice_subscribers: notice_subscribers} = kept
+      when is_struct(wanted, MapSet) and is_struct(subscribers, MapSet) ->
+        watched = MapSet.union(subscribers, notice_subscribers)
+
+        restored = %{
+          state
+          | wanted: wanted,
+            subscribers: subscribers,
+            notice_subscribers: notice_subscribers,
+            monitors: Enum.reduce(watched, state.monitors, &Fanout.watch/2),
+            ledger_snapshot: kept
+        }
+
+        restored |> announce_restart() |> resubscribe()
+
+      _nothing_kept ->
+        state
+    end
+  end
+
+  # The notice channel is `subscribe_notices/2`'s; a data-only subscriber has none, and gets its
+  # data again when the venue resumes. `:coverage_change` is the kind `Core.Notice` defines for
+  # "subscribed intent that is not (yet) delivery", so it is sent when something was wanted: a
+  # feed that carried nothing lost no coverage and says nothing.
+  defp announce_restart(%{wanted: wanted, notice_subscribers: notice_subscribers} = state) do
+    if MapSet.size(wanted) > 0 do
+      notice =
+        Notice.new(:coverage_change, :gemini,
+          severity: :warning,
+          message: "feed restarted: subscriptions are being re-established",
+          details: %{reason: :feed_restarted, delivering: false}
+        )
+
+      fan_out(notice_subscribers, {:dp_exchange, :gemini, notice})
+    end
+
+    state
+  end
+
+  # Tells the ledger the intent when it changed, never when it did not: a refused change leaves
+  # `wanted` and the subscribers as they were, so it writes nothing.
+  defp sync_ledger(state) do
+    case Map.get(state, :ledger) do
+      nil ->
+        state
+
+      ledger ->
+        snapshot = %{
+          wanted: state.wanted,
+          subscribers: state.subscribers,
+          notice_subscribers: state.notice_subscribers
+        }
+
+        if snapshot == Map.get(state, :ledger_snapshot) do
+          state
+        else
+          Ledger.put(ledger, snapshot)
+          Map.put(state, :ledger_snapshot, snapshot)
+        end
+    end
   end
 
   # **A crash report and `:sys.get_status/1` print this process's state, and the state holds
@@ -660,12 +766,13 @@ defmodule DpExchange.Gemini.Feed do
   # for no symbol, and a consumer that has asked for nothing must not find a socket open.
   # The subscriber still receives whatever a later subscribe delivers.
   def handle_call({:subscribe, [], subscriber}, _from, state) do
-    {:reply, :ok,
-     %{
-       state
-       | subscribers: MapSet.put(state.subscribers, subscriber),
-         monitors: Fanout.watch(subscriber, state.monitors)
-     }}
+    registered = %{
+      state
+      | subscribers: MapSet.put(state.subscribers, subscriber),
+        monitors: Fanout.watch(subscriber, state.monitors)
+    }
+
+    {:reply, :ok, sync_ledger(registered)}
   end
 
   # No socket: dial one, and hold this call until it is connected. NOTHING is registered yet,
@@ -688,16 +795,18 @@ defmodule DpExchange.Gemini.Feed do
     }
 
     sent = when_linked(registered, &subscribe_channels(&1, symbols, registered))
-    {:reply, sent, settle_subscribe(sent, registered, state, subscriber, symbols)}
+    settled = settle_subscribe(sent, registered, state, subscriber, symbols)
+    {:reply, sent, sync_ledger(settled)}
   end
 
   def handle_call({:unsubscribe, symbols}, _from, %{socket: nil} = state) do
-    {:reply, :ok, drop(state, symbols)}
+    {:reply, :ok, state |> drop(symbols) |> sync_ledger()}
   end
 
   def handle_call({:unsubscribe, symbols}, _from, state) do
     result = when_linked(state, &unsubscribe_channels(&1, symbols, state))
-    {:reply, result, state |> drop(symbols) |> unsubscribe_later(result, symbols)}
+    dropped = state |> drop(symbols) |> unsubscribe_later(result, symbols)
+    {:reply, result, sync_ledger(dropped)}
   end
 
   # `{:error, _}` leaves the wanted set as it was — see `update_symbols/2`. The delivery
@@ -713,16 +822,18 @@ defmodule DpExchange.Gemini.Feed do
 
     case apply_delta(updated, added, removed) do
       :ok ->
-        {:reply, :ok, updated}
+        {:reply, :ok, sync_ledger(updated)}
 
       # The unsubscribe half went out, so the removed symbols are no longer on the wire: they
       # are not wanted, and a tick must not resend them. Only the subscribe half failed.
       {:error, reason, :subscribe} ->
         kept = MapSet.difference(state.wanted, MapSet.new(removed))
-        {:reply, {:error, reason}, queue_unsubscribe(%{updated | wanted: kept}, added)}
+        queued = queue_unsubscribe(%{updated | wanted: kept}, added)
+        {:reply, {:error, reason}, sync_ledger(queued)}
 
       {:error, reason, :unsubscribe} ->
-        {:reply, {:error, reason}, queue_unsubscribe(%{updated | wanted: state.wanted}, added)}
+        queued = queue_unsubscribe(%{updated | wanted: state.wanted}, added)
+        {:reply, {:error, reason}, sync_ledger(queued)}
     end
   end
 
@@ -752,7 +863,7 @@ defmodule DpExchange.Gemini.Feed do
         monitors: Fanout.watch(subscriber, state.monitors)
     }
 
-    {:reply, :ok, state}
+    {:reply, :ok, sync_ledger(state)}
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
@@ -809,8 +920,8 @@ defmodule DpExchange.Gemini.Feed do
     }
 
     if was_subscriber? and MapSet.size(state.subscribers) == 0,
-      do: {:noreply, release_wanted(state)},
-      else: {:noreply, state}
+      do: {:noreply, state |> release_wanted() |> sync_ledger()},
+      else: {:noreply, sync_ledger(state)}
   end
 
   @impl true
@@ -941,6 +1052,26 @@ defmodule DpExchange.Gemini.Feed do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # **A feed that stops takes the socket it dialled with it.** The socket is linked to this
+  # process, but it does not trap exits (neither does `websockex`), and an exit signal with
+  # reason `:normal` is ignored by a process that does not trap: `GenServer.stop/1` on this feed
+  # (reason `:normal`) left its socket connected and reconnecting for good, delivering to a
+  # subscriber that no longer existed, with nothing left to stop it. Only `:shutdown` and
+  # crashes reached it through the link. This process traps exits, so this runs for
+  # `GenServer.stop/1`, for a supervisor's shutdown and for a callback that raises.
+  #
+  # Only the socket THIS process started (`start_dial/1` records it as `:dialled_socket`): a
+  # `:socket` handed in through the options is the caller's, and may be the caller itself.
+  @impl true
+  def terminate(_reason, state) do
+    case Map.get(state, :dialled_socket) do
+      socket when is_pid(socket) -> Process.exit(socket, :shutdown)
+      _none -> true
+    end
+
+    :ok
+  end
 
   # Unconditional: sent whether or not a reconnect actually happened, because a socket
   # this process never saw go down reads identically to a healthy connection from here.
@@ -1124,6 +1255,16 @@ defmodule DpExchange.Gemini.Feed do
   # whole into every notice subscriber and every log line.
   defp reason_text(reason), do: inspect(reason, limit: 50, printable_limit: 1_024)
 
+  # `start_link/1` wrapped a caller's `:ssl_options` so the supervisor's child spec cannot print
+  # a key or password in it (`DpExchange.Gemini.Credentials`). The state keeps it as given: it
+  # is what `Socket` is started with, and `format_status/1` already redacts it for a report.
+  defp unwrap_ssl_option(socket_opts) do
+    case Keyword.fetch(socket_opts, :ssl_options) do
+      {:ok, wrapped} -> Keyword.put(socket_opts, :ssl_options, Credentials.unwrap_ssl(wrapped))
+      :error -> socket_opts
+    end
+  end
+
   # Starts a socket that dials INSIDE ITS OWN PROCESS (`Socket.start_link/1`'s `:async`) and
   # returns at once, so nothing here waits out a connect. `Feed` is the starter, so the link
   # and the socket's `parent` are `Feed`, exactly as when the dial was synchronous: stopping
@@ -1149,8 +1290,10 @@ defmodule DpExchange.Gemini.Feed do
           resubscribe?: false
         }
 
-        # A redial still pending is moot: a socket is being dialled now.
-        {:ok, cancel_redial(%{state | socket: socket, dial: dial})}
+        # A redial still pending is moot: a socket is being dialled now. `:dialled_socket` is
+        # what `terminate/2` stops: the socket this process started, never an injected one.
+        started = Map.put(state, :dialled_socket, socket)
+        {:ok, cancel_redial(%{started | socket: socket, dial: dial})}
 
       {:error, reason} ->
         {:error, reason}
@@ -1193,7 +1336,7 @@ defmodule DpExchange.Gemini.Feed do
   # failed periodic reconnect it would have been when the dial was synchronous.
   defp dial_failed(%{dial: dial} = state, reason) do
     Process.cancel_timer(dial.timer)
-    state = %{state | socket: nil, dial: nil}
+    state = %{state | socket: nil, dial: nil} |> Map.delete(:dialled_socket)
 
     state =
       if dial.resubscribe? do
@@ -1238,6 +1381,10 @@ defmodule DpExchange.Gemini.Feed do
         link_down?: false,
         unsubscribe_pending: MapSet.new()
     }
+
+    # The crashed socket is gone: nothing left for `terminate/2` to stop, and its pid must not
+    # be signalled later, when it could name an unrelated process.
+    state = Map.delete(state, :dialled_socket)
 
     # A crashed socket's mailbox died with it: no stale frame can land on its replacement.
     state = Map.put(state, :late_subscribes, MapSet.new())

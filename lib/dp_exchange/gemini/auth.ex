@@ -671,6 +671,15 @@ defmodule DpExchange.Gemini.Auth do
   **It refuses to lower the counter**, so a seed cannot hand two callers the same nonce by
   rewinding under them, and a racing second seed cannot undo the first.
 
+  **The counter is the node's, not one key's.** Every API key signed for on this node under
+  `:incremental` draws from this one cell (and likewise `_us` and `_ns`), which is what keeps
+  every key's own nonces strictly increasing without this module ever holding a key; no key
+  material is used to name it. It also means a seed raises the sequence for every
+  `:incremental` key on the node, and the first nonce a different key's venue accepts becomes
+  that key's mark at the seed's magnitude (the one-way door above). Seed only when the node
+  signs for the one key the seed is for, or when every other `:incremental` key on it is
+  held by this package alone.
+
   Requested with this shape on dp-exchange-gemini issue #2 by the consumer who hit it.
   """
   @spec seed_nonce(pos_integer()) ::

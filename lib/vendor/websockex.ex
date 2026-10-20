@@ -136,6 +136,11 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
      16 MiB bound of item 4 (now counted over buffer plus pending) and every callback are
      unchanged.
 
+  6. (Added after the five above, marked `## VENDORED CHANGE (6)`.) `execute_telemetry/3`
+     replaces the connection's `:ssl_options` with `:redacted` in the metadata of every
+     `[:websockex, ...]` event, so a telemetry handler that logs its metadata cannot write out
+     a client key or password a caller put there. Nothing else in an event changes.
+
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
   true size: two clauses, the `spawn_process/5`/`do_spawn/2` glue, and the handshake
@@ -1615,9 +1620,28 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
   if WebSockex.Utils.otp_release() >= 21 do
     defp execute_telemetry(event, state, extra_metadata \\ %{}) do
-      metadata = Map.merge(%{conn: state.conn, module: state.module}, extra_metadata)
+      metadata =
+        %{conn: state.conn, module: state.module}
+        |> Map.merge(extra_metadata)
+        |> redact_conn_metadata()
+
       :telemetry.execute(event, %{time: System.system_time()}, metadata)
     end
+
+    # ## VENDORED CHANGE (6) — a `[:websockex, ...]` event carries the whole connection, and
+    # the connection carries the caller's `:ssl_options` (the trust store, and for a private CA
+    # or a client certificate a `:key` or a `:password`). Any telemetry handler that logs its
+    # metadata, which is what a generic one does, wrote them out. Upstream passes the struct as
+    # it is; here the options are replaced by `:redacted`, and everything else is unchanged.
+    # (A `:disconnected` event merges its status map, whose `conn` is the same struct, over
+    # the first, so redacting after the merge covers it.)
+    defp redact_conn_metadata(%{conn: %WebSockex.Conn{} = conn} = metadata),
+      do: %{metadata | conn: redact_ssl_options(conn)}
+
+    defp redact_conn_metadata(metadata), do: metadata
+
+    defp redact_ssl_options(%WebSockex.Conn{ssl_options: nil} = conn), do: conn
+    defp redact_ssl_options(%WebSockex.Conn{} = conn), do: %{conn | ssl_options: :redacted}
   else
     defp execute_telemetry(_, _, _ \\ %{}), do: :ok
   end

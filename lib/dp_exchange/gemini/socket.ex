@@ -201,7 +201,7 @@ defmodule DpExchange.Gemini.Socket do
 
   alias DpExchange.Core.{Config, Notice, Telemetry}
   alias DpExchange.Core.Types.Quote
-  alias DpExchange.Gemini.{Environment, SymbolFormat, WsChannels, WsDecode}
+  alias DpExchange.Gemini.{Credentials, Environment, SymbolFormat, WsChannels, WsDecode}
 
   # `use`, `start_link/4` and `send_frame/2` go to this package's vendored fork, never the
   # real `WebSockex`, whose `open_loop/3` has no handshake deadline and whose
@@ -327,7 +327,10 @@ defmodule DpExchange.Gemini.Socket do
   """
   @spec connect_opts(keyword()) :: keyword()
   def connect_opts(opts) do
-    timeout_opts(opts) ++ [ssl_options: ssl_options(Config.opt(opts, :ssl_options, nil))]
+    # `Credentials.unwrap_ssl/1`: the tree wraps a caller's `:ssl_options` so a supervisor
+    # report cannot print a key or password in it (see that module). Here it is used.
+    custom = opts |> Config.opt(:ssl_options, nil) |> Credentials.unwrap_ssl()
+    timeout_opts(opts) ++ [ssl_options: ssl_options(custom)]
   end
 
   defp timeout_opts(opts) do
@@ -2007,8 +2010,19 @@ defmodule DpExchange.Gemini.Socket do
   # Decided from `depth_streams`, which `subscribe/3` records and every connect resets, so it
   # applies only to a state that has one; a state fed a frame without ever recording a
   # subscription (a bare one a test built) is delivered, as before.
-  defp unsubscribed_depth?(%{depth_snapshot?: true, depth_streams: streams}, symbol),
-    do: not Enum.any?(streams, fn {streamed, _channel} -> streamed == symbol end)
+  #
+  # **Two membership tests, not a scan.** This ran on every depth frame and walked every
+  # `{symbol, channel}` in `depth_streams` looking for the symbol, so a connection carrying
+  # N symbols paid O(N) per frame (with 346 symbols on both diff channels, about 700 tuple
+  # comparisons per frame, at the rate of the busiest stream). `subscribe/3` records only
+  # `:depth` and `:depth_fast` keys (`claim_depth_channel/3`), so those are the two keys
+  # a streamed symbol can have.
+  defp unsubscribed_depth?(%{depth_snapshot?: true, depth_streams: streams}, symbol) do
+    on_depth = MapSet.member?(streams, {symbol, :depth})
+    on_depth_fast = MapSet.member?(streams, {symbol, :depth_fast})
+
+    not (on_depth or on_depth_fast)
+  end
 
   defp unsubscribed_depth?(_state, _symbol), do: false
 

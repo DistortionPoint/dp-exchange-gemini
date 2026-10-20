@@ -61,7 +61,34 @@ defmodule DpExchange.Gemini.Credentials do
   The same applies to a host that *reshapes* a credential before handing it over — mapping
   its own key names into this venue's and returning a bare map re-introduces the leak
   downstream of anything this package can reach.
+
+  ## `:ssl_options` is wrapped the same way
+
+  A caller's `:ssl_options` replace the verified-TLS defaults, and what a consumer puts in them
+  for its own trust can be a client `:key` or a `:password`. It travelled in the same options
+  list as `:credentials`, so it sat in the supervisor's stored `start_link` MFA and in the
+  `Feed` child spec, and was printed by any child report and by `:sys.get_status/1` of the
+  tree, exactly as a raw credential was. `wrap_opt/1` therefore wraps a non-empty list in
+  `SslOptions`, which prints as `#DpExchange.Gemini.Credentials.SslOptions<...>`, and the two
+  places that use the list (`DpExchange.Gemini.Feed.init/1`, which keeps it in the state it
+  already redacts, and `DpExchange.Gemini.Socket.connect_opts/1`) call `unwrap_ssl/1`. A raw
+  list passes through `unwrap_ssl/1` unchanged, so a caller that never went through the tree
+  is unaffected.
   """
+
+  defmodule SslOptions do
+    @moduledoc """
+    A caller's `:ssl_options`, held so that it does not print — internal. See
+    `DpExchange.Gemini.Credentials`.
+    """
+
+    # `only: []`: no field is ever shown, and a field added later does not start to be.
+    @derive {Inspect, only: []}
+    defstruct [:options]
+
+    @typedoc "The wrapped list."
+    @type t :: %__MODULE__{options: keyword()}
+  end
 
   # `except:`, never `only:`. `only:` would print any field added later by default, which is
   # the wrong direction for a struct whose entire purpose is not printing things: a new
@@ -88,7 +115,8 @@ defmodule DpExchange.Gemini.Credentials do
 
   @doc """
   Wraps the `:credentials` entry of an options keyword list, IN PLACE and only when that
-  key is actually present.
+  key is actually present, and a non-empty `:ssl_options` list the same way (see the
+  moduledoc's "`:ssl_options` is wrapped the same way").
 
   Applied in `child_spec/1`, which is the only place early enough: wrapping inside
   `start_link/1` or `init/1` does nothing for the supervisor's report, because by then the
@@ -96,6 +124,10 @@ defmodule DpExchange.Gemini.Credentials do
   """
   @spec wrap_opt(keyword()) :: keyword()
   def wrap_opt(opts) do
+    opts |> wrap_credentials_opt() |> wrap_ssl_opt()
+  end
+
+  defp wrap_credentials_opt(opts) do
     case Keyword.fetch(opts, :credentials) do
       {:ok, credentials} when is_map(credentials) ->
         Keyword.put(opts, :credentials, wrap(credentials))
@@ -104,4 +136,24 @@ defmodule DpExchange.Gemini.Credentials do
         opts
     end
   end
+
+  # Only a non-empty list: `nil` and `[]` are absence (`Socket.connect_opts/1`), and an
+  # already-wrapped value is left as it is, so this is idempotent like the credentials wrap.
+  defp wrap_ssl_opt(opts) do
+    case Keyword.fetch(opts, :ssl_options) do
+      {:ok, ssl} when is_list(ssl) and ssl != [] ->
+        Keyword.put(opts, :ssl_options, %SslOptions{options: ssl})
+
+      _absent_empty_or_wrapped ->
+        opts
+    end
+  end
+
+  @doc """
+  The list inside a wrapped `:ssl_options` value, or the value itself when it was never
+  wrapped (a raw list, `nil`, anything a caller passed straight to `Socket`).
+  """
+  @spec unwrap_ssl(term()) :: term()
+  def unwrap_ssl(%SslOptions{options: options}), do: options
+  def unwrap_ssl(other), do: other
 end
