@@ -76,7 +76,7 @@ defmodule DpExchangeGemini.MixProject do
       # contract test opts into group 41 (`unlisted_symbol:`, `padded_credentials:`, Core 0.3.94),
       # which an older Core ignores - a silent pass; and 0.3.95 makes groups 7, 37 and 39 fail
       # instead of passing having examined nothing. Resolved and compiled against in this change.
-      {:dp_exchange_core, "~> 0.3.114"},
+      {:dp_exchange_core, "~> 0.3.116"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
