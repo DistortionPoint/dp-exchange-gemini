@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.157] - 2026-10-21
+
 ### Fixed (tick AR)
 
 - **`Fake`'s candle bar no longer ages out of the venue's window.** It was pinned to 2026-08-28,
