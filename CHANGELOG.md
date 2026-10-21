@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.156] - 2026-10-21
+
 ### Fixed
 
 - **A WebSocket frame's JSON numbers lost digits.** `Socket` decoded frames with `Jason.decode/1`, so
