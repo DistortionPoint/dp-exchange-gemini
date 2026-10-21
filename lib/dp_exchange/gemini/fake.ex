@@ -17,7 +17,10 @@ defmodule DpExchange.Gemini.Fake do
 
   **It never rewrites a value the caller supplied**, and it never stamps the current
   clock. `@at` below is fixed, because a fake that stamps `utc_now/0` cannot be used to
-  test anything about freshness and is itself the substitution this family refuses.
+  test anything about freshness and is itself the substitution this family refuses. The one
+  exception is the candle bar's open time (`bar_open/1`): the venue's fixed window moves with
+  the clock, so a bar pinned to a date would be refused `:range_unavailable` once it aged out.
+  It opens two widths before now; its prices and volume are fixed.
 
   ## It models Gemini's refusals, and its two shapes of refusal differ
 
@@ -40,9 +43,12 @@ defmodule DpExchange.Gemini.Fake do
 
   ## Failure injection and anonymous mode
 
-  Every function below that has a real success path (not an unconditional
-  `Venue.not_supported()`) checks `DpExchange.Core.FakeInjection.next_outcome/1` or `/2`
-  first — a queued or always-set outcome from `FakeInjection.queue_failures/2,3` or
+  Every function below that answers from the fake's own data over REST (not an unconditional
+  `Venue.not_supported()`, and not one of the local ones: `start_link/1`, `child_spec/1`,
+  `live?/1`, `seed_nonce/1`, `coverage/1`, `coverage_by_kind/1`, `wanted/1`,
+  `subscribe_notices/1`, and the three streaming calls named below) checks
+  `DpExchange.Core.FakeInjection.next_outcome/1` or `/2`
+  after the option-key check (and, for the market reads, the symbol's shape) — a queued or always-set outcome from `FakeInjection.queue_failures/2,3` or
   `fail_always/2,3` short-circuits the fake's normal logic and is returned as-is.
   `authenticated/2` also checks `FakeInjection.credentials_bypassed?/1` before running the
   same scheme-resolution `Private`'s `Auth.headers/5` runs — see that function's own
@@ -105,11 +111,36 @@ defmodule DpExchange.Gemini.Fake do
   a key it does not read, or a timeout, environment or URL it cannot use, is `{:error, reason}`
   here too, so a consumer's test cannot start the fake with an option the real tree rejects.
 
+  The two the real feed judges only in its `init/1` (where a bad one raises `ArgumentError`)
+  are refused here as `{:error, {:invalid_option, key, value}}`: `:channels` that is not a
+  non-empty list of `[:quotes, :top_of_book, :trades]`, and `:max_queue_len` that is not a
+  positive integer. The real tree reports them as a failed child start; a start that answered
+  `:ignore` for them would pass a test the real tree fails.
+
   See `c:DpExchange.Core.Venue.start_link/1`.
   """
   @impl true
   def start_link(opts) do
-    with :ok <- Feed.check_start_options(opts), do: :ignore
+    with :ok <- Feed.check_start_options(opts),
+         :ok <- check_fake_channels(opts),
+         :ok <- check_fake_queue_bound(opts),
+         do: :ignore
+  end
+
+  # `Feed.init/1`'s own reading of `:channels` (absent, `nil` or `false` is the default).
+  defp check_fake_channels(opts) do
+    _kinds = Feed.validate_channels!(Keyword.get(opts, :channels) || @default_channels)
+    :ok
+  rescue
+    ArgumentError -> {:error, {:invalid_option, :channels, Keyword.get(opts, :channels)}}
+  end
+
+  defp check_fake_queue_bound(opts) do
+    _bound = Fanout.max_queue_len!(opts, :gemini)
+    :ok
+  rescue
+    ArgumentError ->
+      {:error, {:invalid_option, :max_queue_len, Keyword.get(opts, :max_queue_len)}}
   end
 
   @doc "The real adapter's `DpExchange.Gemini.provider_name/0`, unchanged."
@@ -985,7 +1016,10 @@ defmodule DpExchange.Gemini.Fake do
 
   @doc """
   Open orders, or history with `history: true`, as two separate reads like the venue's two
-  endpoints. The history read filters by `:symbol`, `:since` and `:limit`.
+  endpoints. The history read filters by `:symbol`, `:since` and `:limit`, and with no
+  `:limit` a read that fills the 500-row page is `{:error, :history_truncated}`, as the real
+  call refuses it, rather than a list that reads as the whole history. Orders are stated as
+  the real read states them: `updated_at` is `nil` (the venue gives one time, the placement).
 
   See `DpExchange.Gemini.get_orders/2` and `c:DpExchange.Core.Venue.get_orders/2`.
   """
@@ -1009,7 +1043,7 @@ defmodule DpExchange.Gemini.Fake do
       with :ok <- Private.validate_history_opts(:orders, opts),
            :ok <- authenticated(credentials, opts) do
         if Keyword.get(opts, :history, false),
-          do: {:ok, closed_orders(opts)},
+          do: closed_orders(opts),
           else: {:ok, open_orders()}
       end
     end)
@@ -1036,21 +1070,34 @@ defmodule DpExchange.Gemini.Fake do
       status: :filled,
       filled_quantity: Decimal.new("1"),
       created_at: @at,
-      updated_at: @at,
+      # `nil`, as `Private.to_order/1`: the order body carries one time, its placement, and a
+      # fake stating an update time would be more capable than the read it stands in for.
+      updated_at: nil,
       provider: :gemini
     }
   end
 
+  # The venue's documented page maximum for the history read, which `Private.get_orders/2` asks
+  # for when no `:limit` is given.
+  @history_page_max 500
+
+  # As `Private.get_orders/2`: a history read with no `:limit` that fills the page is refused
+  # as possibly truncated, not returned as though it were the whole history.
   defp closed_orders(opts) do
     symbol = Keyword.get(opts, :symbol)
     since = Keyword.get(opts, :since)
+    limit = Keyword.get(opts, :limit)
 
     cancelled = placed_orders() |> Map.values() |> Enum.reject(&(&1.status == :open))
 
-    [closed_order() | cancelled]
-    |> Enum.filter(&(is_nil(symbol) or &1.symbol == canonical(symbol)))
-    |> Enum.filter(&(is_nil(since) or on_or_after?(&1.created_at, since)))
-    |> Enum.take(Keyword.get(opts, :limit) || 500)
+    matching =
+      [closed_order() | cancelled]
+      |> Enum.filter(&(is_nil(symbol) or &1.symbol == canonical(symbol)))
+      |> Enum.filter(&(is_nil(since) or on_or_after?(&1.created_at, since)))
+
+    if is_nil(limit) and length(matching) >= @history_page_max,
+      do: {:error, :history_truncated},
+      else: {:ok, Enum.take(matching, limit || @history_page_max)}
   end
 
   # Whether `at` is on or after a window bound given as the options accept it: a `DateTime`,
@@ -1318,7 +1365,8 @@ defmodule DpExchange.Gemini.Fake do
       status: :open,
       filled_quantity: Decimal.new(0),
       created_at: @at,
-      updated_at: @at,
+      # `nil`, as `Private.to_order/1` and `lenient_order/1` leave it.
+      updated_at: nil,
       provider: :gemini
     }
   end
@@ -1680,14 +1728,35 @@ defmodule DpExchange.Gemini.Fake do
     }
   end
 
+  # **The one candle bar is the last CLOSED one, so it is always inside the venue's fixed
+  # window.** A bar pinned to a calendar date ages out of `Rest`'s window check (1h reaches back
+  # about 61 days), so a ranged ask that starts at it would be refused `:range_unavailable` one
+  # day and answered the next. It opens two widths before the clock, on a width boundary as the
+  # real call requires of every bar (`:unaligned_candle`). This is the one place the Fake reads
+  # the clock, and only so that its bar stays within the window; every figure in it is fixed.
+  # `1w` and `1M` have no fixed width in Core and are not alignment-checked. They open 62 days
+  # back: `Timeframe.boundary/2` takes a `1M` bar to its month's start, so two weeks back was
+  # this month's bar, still forming and withheld as partial for half of every month.
+  defp bar_open(timeframe) do
+    back =
+      case Timeframe.seconds(timeframe) do
+        {:ok, width} -> 2 * width
+        :error -> 62 * 86_400
+      end
+
+    DateTime.utc_now()
+    |> DateTime.add(-back, :second)
+    |> DateTime.truncate(:second)
+    |> Timeframe.boundary(timeframe)
+  end
+
   defp candle(symbol, timeframe) do
     price = Decimal.new(@price[symbol])
 
     %Types.Candle{
       symbol: symbol,
       timeframe: timeframe,
-      # On a width boundary, as the real call requires of every bar (`:unaligned_candle`).
-      opened_at: Timeframe.boundary(@at, timeframe),
+      opened_at: bar_open(timeframe),
       open: price,
       high: price,
       low: price,

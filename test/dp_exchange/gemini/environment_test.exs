@@ -135,7 +135,7 @@ defmodule DpExchange.Gemini.EnvironmentTest do
 
     test "every known environment answers" do
       for environment <- Environment.known() do
-        assert is_boolean(Environment.live?(environment))
+        assert Environment.live?(environment) == (environment == :production)
       end
     end
   end

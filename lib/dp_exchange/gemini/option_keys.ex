@@ -34,11 +34,17 @@ defmodule DpExchange.Gemini.OptionKeys do
       `coverage_by_kind/1`, `wanted/1` and `live?/1`. A `:timeout` or `:weight` there is
       refused, since nothing would read it.
 
+  Every call that sends a request or addresses a feed also accepts `:name`, the tree
+  (`DpExchange.Gemini.Supervisor`) whose feed and limiter it addresses; `allowed/1` adds it.
+  Four do not: `market_status/1` and `live?/1` address neither, and `rename_account/3` and
+  `create_account/1` take a subaccount's name (`create_account/1` reads `:name` as that name,
+  not as a tree's).
+
   A function the venue does not serve
   (`DpExchange.Core.Venue.not_supported/0`) is not in the table: it answers `:not_supported`
   whatever the options.
 
-  Signed calls (`@signed`) also read `:nonce_mode`, `:auth_scheme` and `:account`. The three
+  Signed calls (`@signed`) also read `:nonce_mode`, `:auth_scheme` and `:account`. The four
   group-level calls (`create_account/1`, `rename_account/3`, `list_accounts/1`, `get_roles/1`)
   never send `:account`, so a stray one is refused there rather than dropped
   (`@group_signed`). A funding payment report takes no symbol, so a `:symbol` there is refused

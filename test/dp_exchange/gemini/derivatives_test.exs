@@ -391,7 +391,9 @@ defmodule DpExchange.Gemini.DerivativesTest do
 
       assert {:ok, _margin} =
                Private.get_account_margin(@credentials,
-                 symbol: "BTC-GUSD-PERP",
+                 # A perpetual's canonical form is unsplit (SymbolFormat's moduledoc): it is
+                 # not a BASE-QUOTE pair, so a dashed name would not be its symbol.
+                 symbol: "BTCGUSDPERP",
                  plug: capturing(%{}, me),
                  retry_attempts: 0
                )
@@ -399,7 +401,12 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert_receive {:request, _path, _query, payload}
 
       assert payload["symbol"] ==
-               DpExchange.Gemini.SymbolFormat.to_exchange_symbol("BTC-GUSD-PERP")
+               DpExchange.Gemini.SymbolFormat.to_exchange_symbol("BTCGUSDPERP")
+
+      # Comparing with the function under test alone would pass for a symbol sent as given;
+      # the venue's form is lower case with no separators.
+      refute payload["symbol"] =~ "-"
+      assert payload["symbol"] == String.downcase(payload["symbol"])
     end
 
     test "funding payments keep the venue's Credit/Debit rather than a sign" do

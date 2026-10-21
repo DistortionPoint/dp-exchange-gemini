@@ -65,6 +65,11 @@ defmodule DpExchange.Gemini.FakeParityTest do
 
       assert Auth.headers(:oauth, "/v1/balances", %{}, credentials) ==
                {:error, {:missing_credentials, :gemini}}
+
+      assert Fake.get_balances(credentials, auth_scheme: :oauth) ==
+               {:error, {:missing_credentials, :gemini}}
+
+      assert Fake.get_balances(credentials, []) == {:error, {:missing_credentials, :gemini}}
     end
 
     test "both header families at once: :ambiguous, refused before either is sent" do
@@ -88,13 +93,13 @@ defmodule DpExchange.Gemini.FakeParityTest do
       credentials = %{api_key: "k", api_secret: "s"}
 
       # `credentials` as a direct argument:
-      assert {:ok, _balances} = Fake.get_balances(credentials, [])
+      assert {:ok, [_balance | _rest]} = Fake.get_balances(credentials, [])
       # `credentials` folded into `opts[:credentials]`:
-      assert {:ok, _address} =
+      assert {:ok, %{network: "bitcoin"}} =
                Fake.get_deposit_address("BTC", "bitcoin", credentials: credentials)
 
       # `credentials` found via `fake_credentials/1` alongside other named options:
-      assert {:ok, _staking_balances} = Fake.get_staking_balances(credentials: credentials)
+      assert {:ok, [_staked | _others]} = Fake.get_staking_balances(credentials: credentials)
     end
   end
 

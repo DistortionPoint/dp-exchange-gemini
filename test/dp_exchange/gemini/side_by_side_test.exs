@@ -78,7 +78,10 @@ defmodule DpExchange.Gemini.SideBySideTest do
     test "each environment's limiter is running and admits a request" do
       {_production, _sandbox} = start_both()
 
-      for environment <- Environment.known() do
+      known = Environment.known()
+      assert length(known) >= 2
+
+      for environment <- known do
         limiter = Supervisor.limiter_name(environment: environment)
 
         assert DpExchange.Core.DefaultRateLimiter.check(:gemini, 1, limiter: limiter) == :ok

@@ -201,7 +201,8 @@ defmodule DpExchange.Gemini.TickAAPrivateATest do
         |> Map.put("executed_amount", "1")
         |> Map.put("is_live", false)
 
-      assert {:ok, %Order{status: :partially_filled, quantity: nil} = order} =
+      # Not live and not provably complete: no status is stated (tick AR), never :filled.
+      assert {:ok, %Order{status: nil, quantity: nil} = order} =
                place(@request, responding(body))
 
       assert Decimal.equal?(order.filled_quantity, Decimal.new("1"))

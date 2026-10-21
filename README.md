@@ -25,7 +25,7 @@ Placing an order: `place_order(credentials, %{symbol: "BTC-USD", side: :buy, ord
 
 Asset classes: **crypto**. Streamed kinds: **quotes, top of book, trades** (`:trades` is opt-in via `Feed`'s `channels:`) — everything else pulls only.
 
-Of the 24 unsupported endpoints, **22 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/gemini/negative-claims.md`, which records the source and date behind every one.
+Of the 24 unsupported endpoints, **23 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/gemini/negative-claims.md`, which records the source and date behind every one.
 
 ## Installation
 

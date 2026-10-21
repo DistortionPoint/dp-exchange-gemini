@@ -134,8 +134,12 @@ defmodule DpExchange.Gemini.FakeFidelityTest do
 
   describe "perpetuals" do
     test "funding and risk statistics are for a perpetual, not a spot symbol" do
-      assert {:ok, _funding} = Fake.get_funding("BTCGUSDPERP")
-      assert {:ok, _stats} = Fake.get_contract_stats("BTCGUSDPERP")
+      assert {:ok, %DpExchange.Core.Types.Funding{symbol: "BTCGUSDPERP"}} =
+               Fake.get_funding("BTCGUSDPERP")
+
+      assert {:ok, %DpExchange.Core.Types.ContractStats{symbol: "BTCGUSDPERP"}} =
+               Fake.get_contract_stats("BTCGUSDPERP")
+
       assert {:refused, :not_listed} = Fake.get_funding("BTC-USD")
       assert {:refused, :not_listed} = Fake.get_contract_stats("BTC-USD")
     end

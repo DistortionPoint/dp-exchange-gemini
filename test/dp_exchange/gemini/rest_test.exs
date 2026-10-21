@@ -241,7 +241,7 @@ defmodule DpExchange.Gemini.RestTest do
     end
 
     test "a 500 stays an error" do
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :gemini, "Server error (500)" <> _body}} =
                Rest.get_price("BTC-USD", plug: responding(%{}, status: 500), retry_attempts: 0)
     end
 
@@ -344,7 +344,7 @@ defmodule DpExchange.Gemini.RestTest do
           Req.Test.json(conn, [[1_787_270_400_000, 1.5, 2.5, 1.0, 2.0, 3.0]])
         end
 
-        assert {:ok, _candles} =
+        assert {:ok, [_one_bar]} =
                  Rest.get_historical_prices("BTC-USD", canonical, [],
                    plug: plug,
                    retry_attempts: 0
@@ -771,7 +771,7 @@ defmodule DpExchange.Gemini.RestTest do
     end
 
     test "a symbol whose details cannot be read fails the whole call — no silent hole" do
-      assert {:error, {:instrument_detail_failed, "NOPE-USD", _reason}} =
+      assert {:error, {:instrument_detail_failed, "NOPE-USD", {:refused, :not_listed}}} =
                Rest.list_instruments(
                  symbols: ["BTC-USD", "NOPE-USD"],
                  plug: catalogue(self()),
@@ -865,12 +865,12 @@ defmodule DpExchange.Gemini.RestTest do
     test "get_symbols surfaces a venue error rather than an empty catalogue" do
       # An empty list would read as "this venue lists nothing", which is a very different
       # claim from "the request failed".
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :gemini, "Server error (503)" <> _body}} =
                Rest.get_symbols(plug: responding(%{}, status: 503), retry_attempts: 0)
     end
 
     test "get_market_overview surfaces a venue error the same way" do
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :gemini, "Server error (503)" <> _body}} =
                Rest.get_market_overview(plug: responding(%{}, status: 503), retry_attempts: 0)
     end
 

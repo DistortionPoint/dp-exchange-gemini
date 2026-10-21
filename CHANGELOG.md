@@ -20,6 +20,89 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (tick AR)
+
+- **`Fake`'s candle bar no longer ages out of the venue's window.** It was pinned to 2026-08-28,
+  so a ranged ask that started at it was refused `{:range_unavailable, ...}` once the fixed window
+  (1h reaches back about 61 days) moved past that date. The bar opens two widths before the clock
+  on a width boundary (`bar_open/1`, the Fake's one clock read; its prices stay fixed). Tests that
+  pinned the date derive the bar instead (`fake_test.exs`); a new test asks for the bar's own
+  range at every served width. No other fixed Fake date meets a window or age check.
+
+- **An order whose flags or amounts contradict each other has `status: nil`, not a guess.**
+  `Private.status_of/1` mapped `is_live` + `is_cancelled` both true to `:cancelled`/`:filled`, a
+  "live" order with its whole amount executed to `:partially_filled`, a not-live, not-cancelled
+  order with part executed to `:partially_filled` (a claim that it is still working), and a fully
+  executed one with `remaining_amount` above zero to `:filled`. Each is `nil` now (the contract's
+  "the venue did not say"). Cancelled-with-a-fill stays `:cancelled` with `filled_quantity` and
+  `average_price` kept; neither-flag-and-unfilled is never `:filled`. Proof:
+  `test/dp_exchange/gemini/tick_ar_status_test.exs`.
+- **An order never carries a status its amounts contradict (Core `Order.new` refuses them).**
+  `status_of/1` states no status (`nil`) when `executed_amount` is above `original_amount` or
+  below zero, or `original_amount` is not above zero (so never `:filled`/`:partially_filled` with
+  nothing filled, or a working status with the whole quantity filled). `get_order/3` and
+  `get_orders/2` refuse a negative quantity or filled quantity with
+  `{:error, :unexpected_response_shape}`; a placement reply reads it as `nil`. The Fake's placed,
+  cancelled and history orders were checked and are self-consistent. Proof:
+  `tick_ar_status_test.exs`.
+- **`list_approved_addresses/2` read any status but `active` and `rejected` as `:pending`.** It
+  now reads the documented `pending-time` and `pending-mua` as `:pending`, an absent status stays
+  `:pending`, and a stated status it has no word for refuses the page with
+  `{:error, :unexpected_response_shape}`. Proof: `tick_ar_private_docs_test.exs`.
+- **`Private` docs name the refusals the code returns** (`{:missing_option, :network}`,
+  `{:missing_option, :address}`, `{:unsupported_scope, s}`, `:from_and_to_together`,
+  `{:invalid_side, s}`, `:missing_clearing_terms`, the margin-preview errors), say zero-quantity
+  positions are dropped, list the full staking `transactionType` mapping, and cite current
+  `rest.yaml` lines.
+- **`Socket.subscribe/3` and `unsubscribe/3` refuse what they used to ignore.** An unknown channel
+  is `{:error, {:unknown_channel, channel}}` and a blank or non-text symbol
+  `{:error, {:invalid_symbol, symbol}}`; both used to send nothing and answer `:ok`, and a batch
+  holding a bad symbol subscribed the rest. Proof: `tick_ar_socket_docs_test.exs`.
+- **Docs (socket/auth/decoder).** `Socket` states a `Quote` is sent only when `c` is new or
+  changed; `subscribe/3` and `start_link/1` document `:unknown_channel`, `:invalid_symbol`,
+  `:partial_depth_symbol_conflict` and `:tls_trust_store_unavailable`; `WsDecode.to_trade/2`
+  documents `side` and its full error set; `Auth.headers/5` documents its missing-credentials
+  answer; `Auth.seed_nonce/1`'s `@spec` is `term()`.
+- **`Fake` order reads state `updated_at: nil`**, as the real decoder does (they claimed the fixed
+  clock). **`Fake.get_orders(history: true)`** with no `:limit` that fills the 500-row page is
+  `{:error, :history_truncated}`, as the real call. **`Fake.start_link/1`** refuses a bad
+  `:channels` or `:max_queue_len` as `{:error, {:invalid_option, key, value}}` instead of `:ignore`
+  (the real feed raises from `init/1`). Proof: `tick_ar_fake_docs_test.exs`.
+- **Docs (feed/fake).** `Feed.update_symbols/3` and the feed moduledoc say a failed update leaves
+  the removed symbols removed when only the subscribe half failed; `check_start_options/1` says
+  `environment: nil` is refused; the `Fake` moduledoc lists the functions not wired to failure
+  injection.
+- **`child_spec/1` raised `ArgumentError` for an unknown `:environment`** inside the consumer's
+  supervisor, before `start_link/1` could refuse it as `{:error, {:invalid_option, :environment,
+  value}}`. It returns a spec (default id `DpExchange.Gemini`) and `start_link/1` refuses.
+- **`get_conversion/2` is listed in `venue_does_not_serve/0`**, not "not ported": the vendor
+  specifications publish no quote-status endpoint (negative-claims row added). Already declared
+  `:unsupported`, so no behaviour change; README counts 23 of 24 unsupported as the venue's own.
+- **`capabilities/0` `measured_against`** now says `max_leverage`, `supported_order_types` and
+  `supported_time_in_force` are read from documentation and not probed.
+- **Docs (facade/rest).** Candle moduledoc ("a `:start` before the window is refused"; perpetuals
+  serve `1m` only), `get_historical_prices/4`'s full refusal list, `wanted/1`, the
+  `get_symbols/1` and `get_market_overview/1` specs (`{:refused, _}`), `OptionKeys`, vendored
+  websockex change numbering (six changes), `usage-rules.md` "Two exceptions". Proof:
+  `tick_ar_rest_docs_test.exs`.
+- **Docs.** `usage-rules.md` gains the order status table, says `cancel_order/3`'s `{:ok, order}`
+  is the order as the venue now describes it (a late cancel is `:filled`), that no private order
+  events WebSocket is served, and quotes the `dp_exchange_core` floor `~> 0.3.119`.
+  `cancel_order/3`'s `@doc` says the same.
+
+### Tests (tick AR, lens W)
+
+- Strengthened weak or unguarded assertions (always-truthy `assert`, `{:ok, _}` where the value
+  is the point, 100 ms receive/refute windows, `refute_received` on messages meant to arrive
+  seconds later) across the suite; no test was removed.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.120` (tick AR: conformance group 54 rebuilds
+  every Order and Fill the Fake answers through `new/1`, and `Order.new/1` refuses a status
+  that contradicts its filled quantity; groups 33, 35 and 37 no longer pass having examined
+  nothing).
+
 ## [0.2.156] - 2026-10-21
 
 ### Fixed

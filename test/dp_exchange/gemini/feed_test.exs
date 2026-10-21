@@ -873,8 +873,11 @@ defmodule DpExchange.Gemini.FeedTest do
 
       send(feed, :resubscribe)
 
+      FeedSync.await_resubscribe(feed)
       _settled = Feed.coverage(feed)
       refute_received {:dp_exchange, :gemini, %Notice{kind: :coverage_change}}
+      refute_received {:frame_sent, _frame}
+      assert :sys.get_state(feed).resubscribe_notice_state == :ok
     end
   end
 

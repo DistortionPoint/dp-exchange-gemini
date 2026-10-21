@@ -387,7 +387,8 @@ defmodule DpExchange.Gemini.WsChannelsTest do
 
       assert Decimal.equal?(top.bid, Decimal.new("3610.00"))
       assert Decimal.equal?(top.bid_size, Decimal.new("1.5"))
-      assert top.venue_time
+      expected_time = DateTime.from_unix!(1_787_936_147_000_000_000, :nanosecond)
+      assert DateTime.compare(top.venue_time, expected_time) == :eq
       assert DateTime.compare(top.observed_at, observed) == :eq
       refute DateTime.compare(top.venue_time, top.observed_at) == :eq
     end

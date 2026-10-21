@@ -93,7 +93,9 @@ defmodule DpExchange.Gemini.NonceReorderTest do
     refusal = %{"result" => "error", "reason" => "InsufficientFunds", "message" => "no"}
     plug = scripted(self(), [{400, @reordered}, {400, refusal}])
 
-    assert {:refused, reason} =
+    # The venue's own verdict reaches the caller: the second answer, not the first (a
+    # `:invalid_nonce`), and not a retried-write wrapper.
+    assert {:refused, {:unknown_reason, "InsufficientFunds"} = reason} =
              Private.withdraw("ETH", "ethereum", Decimal.new("1"), "0xabc", @credentials,
                client_transfer_id: "sent-id",
                nonce_mode: :incremental,
@@ -102,7 +104,10 @@ defmodule DpExchange.Gemini.NonceReorderTest do
              )
 
     refute inspect(reason) =~ "refused_after_retry"
-    assert_received {:request, 2, _nonce}
+    assert_received {:request, 1, first}
+    assert_received {:request, 2, second}
+    assert first != second
+    refute_received {:request, 3, _nonce}
   end
 
   test "under the default :time_based mode an InvalidNonce is clock skew, sent once" do

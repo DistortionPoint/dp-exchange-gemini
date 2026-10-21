@@ -13,8 +13,8 @@ defmodule DpExchange.Gemini.WsDecode do
       WS    @trade       `m`    = whether the BUYER was the MAKER.
 
   So `m: true` means the buyer was resting and the **seller** was the aggressor —
-  `aggressor: :sell`. Carrying `m` straight through as a buy would invert every trade on the
-  socket while agreeing with the REST field name, which is exactly how such a bug survives
+  `side: :sell` (`Core.Types.Trade.side` is the taker's side). Carrying `m` straight through
+  as a buy would invert every trade on the socket while agreeing with the REST field name, which is exactly how such a bug survives
   review.
 
   ## 2. Timestamps are **nanoseconds**, not milliseconds
@@ -41,8 +41,15 @@ defmodule DpExchange.Gemini.WsDecode do
   @doc """
   A `Trade` from a `{symbol}@trade` frame.
 
-  `aggressor` is **inverted from `m`**: see the moduledoc. `m: true` (buyer is maker) means
-  the seller lifted, so the aggressor is `:sell`.
+  `side` is **inverted from `m`**: see the moduledoc. `m: true` (buyer is maker) means
+  the seller lifted, so `side` is `:sell`; `m: false` is `:buy`, and an absent or non-boolean
+  `m` is `nil`, never a guess.
+
+  Errors: `{:error, :unexpected_frame_shape}` without `p` and `q`; the unreadable `E`
+  (`nanosecond_time`, outside 10^17..5*10^18 ns) is `{:error, :missing_venue_timestamp}`; a
+  `p`/`q` that is absent is `{:error, {:missing_required_field, field}}`, unreadable is
+  `{:error, {:invalid_decimal, field, value}}`, and zero or less is
+  `{:error, {:non_positive_price | :non_positive_quantity, field, value}}`.
 
   ## `price` and `quantity` are guarded, and were not
 

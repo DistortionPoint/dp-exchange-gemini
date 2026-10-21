@@ -178,6 +178,9 @@ defmodule DpExchange.Gemini.FamilyConventionsTest do
 
       status = sup |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
 
+      # A status that printed nothing of the tree would pass the refutation below for the wrong
+      # reason, so the dump is first shown to be the supervisor's own.
+      assert status =~ "Gemini"
       refute status =~ canary
     end
   end

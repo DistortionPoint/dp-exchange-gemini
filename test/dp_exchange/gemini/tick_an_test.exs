@@ -341,14 +341,14 @@ defmodule DpExchange.Gemini.TickAnTest do
             {:incremental_ns, scale: 12}
           ] do
         assert Auth.check_nonce_mode(mode) == :ok
-        assert {:ok, _balances} = Fake.get_balances(@credentials, nonce_mode: mode)
+        assert {:ok, [_balance | _rest]} = Fake.get_balances(@credentials, nonce_mode: mode)
       end
     end
 
     test "OAuth carries no nonce, so the mode is not judged there" do
       oauth = %{access_token: "token"}
 
-      assert {:ok, _balances} = Fake.get_balances(oauth, nonce_mode: :bogus)
+      assert {:ok, [_balance | _rest]} = Fake.get_balances(oauth, nonce_mode: :bogus)
       assert {:ok, []} = Private.get_balances(oauth, opts(json([]), nonce_mode: :bogus))
     end
   end

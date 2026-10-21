@@ -279,18 +279,18 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
       assert Types.ApprovedAddress.usable?(pending, DateTime.utc_now()) == nil
     end
 
-    test "a status the venue invents later is PENDING, not active" do
-      # Treating an unknown status as usable is the direction that loses money.
+    test "a status the venue invents later is refused, never read as active or pending" do
+      # Treating an unknown status as usable is the direction that loses money, and reading
+      # it as `:pending` was a guess too: Core's ApprovedAddress leaves a word it has no
+      # mapping for to the venue package to refuse (tick AR).
       body = %{"approvedAddresses" => [%{"address" => "0x3", "status" => "somethingNew"}]}
 
-      assert {:ok, [address]} =
+      assert {:error, :unexpected_response_shape} =
                Private.list_approved_addresses(@credentials,
                  network: "ethereum",
                  plug: responding(body),
                  retry_attempts: 0
                )
-
-      assert address.status == :pending
     end
 
     test "the network is required — the venue keeps one list per network" do
@@ -845,19 +845,22 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
         |> Plug.Conn.resp(503, ~s({"result":"error","reason":"ServiceUnavailable"}))
       end
 
-      Private.place_order(
-        @credentials,
-        %{
-          symbol: "BTC-USD",
-          side: :buy,
-          order_type: :limit,
-          time_in_force: :gtc,
-          quantity: Decimal.new("1"),
-          price: Decimal.new("100")
-        },
-        plug: plug,
-        retry_delay: 1
-      )
+      # The answer is the other half of "sent once": a send that may have been acted on is
+      # reported as unconfirmed, never as a plain failure the caller would retry.
+      assert {:error, {:order_unconfirmed, _client_order_id, _reason}} =
+               Private.place_order(
+                 @credentials,
+                 %{
+                   symbol: "BTC-USD",
+                   side: :buy,
+                   order_type: :limit,
+                   time_in_force: :gtc,
+                   quantity: Decimal.new("1"),
+                   price: Decimal.new("100")
+                 },
+                 plug: plug,
+                 retry_delay: 1
+               )
 
       assert_receive :attempt, 5_000
       refute_receive :attempt, 500
@@ -874,11 +877,12 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
         |> Plug.Conn.resp(503, ~s({"result":"error"}))
       end
 
-      Private.stake("ETH", Decimal.new("1"), @credentials,
-        provider_id: "p-1",
-        plug: plug,
-        retry_delay: 1
-      )
+      assert {:error, {:write_unconfirmed, _id, _reason}} =
+               Private.stake("ETH", Decimal.new("1"), @credentials,
+                 provider_id: "p-1",
+                 plug: plug,
+                 retry_delay: 1
+               )
 
       assert_receive :attempt, 5_000
       refute_receive :attempt, 500
@@ -895,7 +899,8 @@ defmodule DpExchange.Gemini.MoneyMovementTest do
         |> Plug.Conn.resp(503, ~s({"result":"error"}))
       end
 
-      Private.get_balances(@credentials, plug: plug, retry_attempts: 2, retry_delay: 1)
+      assert {:error, _reason} =
+               Private.get_balances(@credentials, plug: plug, retry_attempts: 2, retry_delay: 1)
 
       assert_receive :attempt, 5_000
       assert_receive :attempt, 5_000

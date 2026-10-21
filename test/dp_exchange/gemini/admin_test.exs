@@ -373,16 +373,25 @@ defmodule DpExchange.Gemini.AdminTest do
 
       assert {:error, :name_required} = DpExchange.Gemini.create_account(refusing)
 
-      assert {:ok, _account} =
+      assert {:ok, %{"account" => "bot"}} =
                DpExchange.Gemini.create_account(
                  base ++ [name: "Bot", plug: responding(%{"account" => "bot"})]
                )
 
-      assert {:ok, _renamed} =
-               DpExchange.Gemini.rename_account("bot", "Bot Two", base ++ [plug: responding(%{})])
+      assert {:ok, %{"name" => "Bot Two"}} =
+               DpExchange.Gemini.rename_account(
+                 "bot",
+                 "Bot Two",
+                 base ++ [plug: responding(%{"name" => "Bot Two"})]
+               )
 
-      assert {:ok, []} = DpExchange.Gemini.list_accounts(base ++ [plug: responding([])])
-      assert {:ok, _roles} = DpExchange.Gemini.get_roles(base ++ [plug: responding(%{})])
+      accounts = [%{"account" => "bot", "name" => "Bot", "type" => "exchange"}]
+
+      assert {:ok, ^accounts} =
+               DpExchange.Gemini.list_accounts(base ++ [plug: responding(accounts)])
+
+      assert {:ok, %{"isTrader" => true}} =
+               DpExchange.Gemini.get_roles(base ++ [plug: responding(%{"isTrader" => true})])
 
       assert {:error, :oauth_token_required} = DpExchange.Gemini.revoke_access_token(refusing)
     end

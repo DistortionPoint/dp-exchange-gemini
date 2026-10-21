@@ -136,7 +136,13 @@ defmodule DpExchange.Gemini.AuthTest do
     test "incremental is milliseconds, which a time-based key would reject" do
       # A millisecond value is ~1000x a seconds timestamp, so it lands far outside the
       # ±30 second window a time-based key validates against.
-      assert Auth.nonce(:incremental) > System.system_time(:second) * 100
+      #
+      # Pinned to the millisecond unit itself, not just "bigger than seconds": a microsecond
+      # or nanosecond value is also ~1000x past a seconds timestamp.
+      nonce = Auth.nonce(:incremental)
+
+      assert nonce > System.system_time(:second) * 100
+      assert abs(nonce - System.system_time(:millisecond)) < 60_000
     end
 
     test "incremental never repeats, even called in a tight loop" do
@@ -180,6 +186,9 @@ defmodule DpExchange.Gemini.AuthTest do
                Auth.headers(:api_key, "/v1/balances", %{}, @api_key, nonce_mode: :incremental)
 
       assert nonce_from(timed) < nonce_from(incremental) / 100
+      # Each lands in its own mode's unit, so a swapped or ignored mode cannot pass.
+      assert abs(nonce_from(timed) - System.system_time(:second)) <= 5
+      assert abs(nonce_from(incremental) - System.system_time(:millisecond)) < 60_000
     end
   end
 

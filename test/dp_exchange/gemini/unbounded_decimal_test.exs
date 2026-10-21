@@ -95,8 +95,12 @@ defmodule DpExchange.Gemini.UnboundedDecimalTest do
       }
 
       assert {:ok, book} = Rest.get_order_book("BTC-USD", plug: json(body), retry_attempts: 0)
-      assert [{bid, _qty}] = book.bids
+      assert [{bid, bid_qty}] = book.bids
       assert Decimal.equal?(bid, Decimal.new("0.00000001"))
+      assert Decimal.equal?(bid_qty, Decimal.new("1E-8"))
+      assert [{ask, ask_qty}] = book.asks
+      assert Decimal.equal?(ask, Decimal.new("1.7E12"))
+      assert Decimal.equal?(ask_qty, Decimal.new("1"))
     end
 
     test "socket decoder: a bookTicker bid with that exponent is refused" do

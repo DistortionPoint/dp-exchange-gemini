@@ -93,7 +93,7 @@ before a request is made.
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and
 **`:observed_at`** (when this package read it, always present) — the shape
 `Core.Types.TopOfBook` has always had. `dp_exchange_core 0.2.1` introduced the fields; this
-package requires `~> 0.3.114` (its floor is in `mix.exs`; `0.3.95` is where this change landed).
+package requires `~> 0.3.120` (its floor is in `mix.exs`; `0.3.95` is where this change landed).
 
 ```elixir
 # before
@@ -869,7 +869,8 @@ this package credentials and — where `auth_scheme:` is needed to say it — th
 it does not **authenticate**. What genuinely returns `{:error, :not_supported}` is the
 venue's own absence (options, watchlists, financials — see `venue_does_not_serve/0`) and
 the small remainder of this package's own backlog (
-`list_portfolios/1`, `get_conversion/2`), not the authenticated surface as a whole. The
+`list_portfolios/1`; `get_conversion/2` is the venue's own absence, it publishes no
+quote-status endpoint), not the authenticated surface as a whole. The
 demo environment is what makes exercising any of this safely, before you point it at a
 real account.
 
@@ -1266,7 +1267,7 @@ first. `transfer_internal/4` checks its `[from:, to:, client_transfer_id:]` term
 :retry_attempts :retry_delay :max_retry_after_s :max_body_bytes :log_requests`, and every one
 of them is forwarded to `Core.HttpClient` (a `weight: 7` is what the limiter is asked for; a
 `max_body_bytes:` smaller than the reply is `{:exchange_error, :gemini,
-{:response_too_large, limit}}`). Three exceptions, each refused as `{:unknown_option, key}`
+{:response_too_large, limit}}`). Two exceptions, each refused as `{:unknown_option, key}`
 because the call can never honour it: the writes that are **sent exactly once** (`place_order`,
 `cancel_order`, `cancel_all_orders`, `commit_conversion`, `convert`, `get_deposit_address`,
 `add_payment_method`, `transfer_internal`, `request_approved_address`,
@@ -1722,6 +1723,44 @@ an id it did not issue in the calling process is `{:refused, :not_found}`, and t
 the side as `:buy` / `:sell` whatever case you passed. `Fake.cancel_all_orders/2` (either scope)
 cancels the orders that process placed and answers their ids in `cancelled`; with none open both
 lists are empty.
+
+## An order's `status` is derived from flags and amounts, and a contradiction is `nil`
+
+Gemini sends no status string. `status` is read from `is_live`, `is_cancelled`,
+`executed_amount`, `original_amount` and `remaining_amount` (tick AR):
+
+| Venue says | `status` |
+|---|---|
+| `is_cancelled` and the whole amount executed | `:filled` (a cancel that arrived after the last fill) |
+| `is_cancelled`, anything less executed | `:cancelled`, with the fill kept in `filled_quantity` and `average_price` (a cancel after 3.76 of 5 is `:cancelled`, never `:filled` and never `:partially_filled`) |
+| `is_live`, nothing executed | `:open` |
+| `is_live`, part executed | `:partially_filled` (still working) |
+| neither flag, whole amount executed (and `remaining_amount` absent or zero) | `:filled` |
+| neither flag, nothing executed | `:pending` |
+| `is_live` and `is_cancelled` both true; `is_live` with the whole amount executed; neither flag with part executed; a fully executed order whose `remaining_amount` is above zero | `nil`: the venue's own definitions rule it out, so none is stated |
+
+A flag that is not a JSON boolean refuses the read (`{:error, :unexpected_response_shape}`).
+Match `nil` as "unknown, ask again", never as open. `{:ok, order}` from `cancel_order/3` is the
+order as the venue now describes it: a cancel that came too late returns `status: :filled`.
+`order_type` comes from `type` and `options`: `exchange limit`/`limit` is `:limit`, or
+`:post_only`, `:ioc` or `:fok` by the one option (`maker-or-cancel`, `immediate-or-cancel`,
+`fill-or-kill`); `exchange stop limit` and `stop-limit` are `:stop_limit`; `market buy`,
+`market sell` and `exchange market` are `:market`; any other `type` is `nil`. This package
+serves no private WebSocket (the order-events stream), so there is no pushed order update to
+arrive out of order: poll `get_order/3`. `get_orders/2` and `get_trade_history/2` ask for 500 rows
+and refuse a full page as `{:error, :history_truncated}` instead of dropping the rest; a trade
+the venue marks `break: "full"` is left out and an unknown `break` is
+`{:error, {:unknown_break_type, value}}`. A `Fill`'s `fee` is the venue's `fee_amount` as sent
+(sign kept; `nil` when absent) in `fee_currency`.
+
+`list_approved_addresses/2` `status` is `:active`, `:pending` (`pending-time`, `pending-mua`, or
+unstated) or `:rejected`; a status the venue states that is none of these refuses the page
+(`{:error, :unexpected_response_shape}`). `get_positions/1` drops zero-quantity rows and
+`instrument_type` is `:perp`, `:spot` or `nil`. `get_staking_history/1`'s `type` is `:stake`,
+`:unstake`, `:reward` or `:other`, with `venue_type` always the venue's own word.
+`DpExchange.Gemini.Fake` mirrors the `:history_truncated` refusal for a full 500-row history page
+with no `:limit`, leaves `updated_at` `nil` as the real decoder does, and `Fake.start_link/1`
+refuses a bad `:channels` or `:max_queue_len` as `{:error, {:invalid_option, key, value}}`.
 
 ## Error shapes that mean "do not act on this answer"
 

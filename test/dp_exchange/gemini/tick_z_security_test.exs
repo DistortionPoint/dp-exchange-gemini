@@ -106,16 +106,16 @@ defmodule DpExchange.Gemini.TickZSecurityTest do
     end
 
     test "a loopback http:// stub stays usable" do
-      plug = fn conn -> Req.Test.json(conn, []) end
+      plug = fn conn -> Req.Test.json(conn, %{"isAuditor" => false}) end
 
-      refute match?(
-               {:error, {:insecure_url, _}},
+      # The positive answer, not merely "not the cleartext refusal": the stub was reached and
+      # its body decoded.
+      assert {:ok, %{"isAuditor" => false}} =
                Private.get_roles(@credentials,
                  base_url: "http://localhost:4000",
                  plug: plug,
                  retry_attempts: 0
                )
-             )
     end
   end
 

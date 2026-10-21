@@ -19,6 +19,7 @@ defmodule DpExchange.Gemini.TickAAFacadeTest do
 
   alias DpExchange.Core.Config
   alias DpExchange.Gemini
+  alias DpExchange.Gemini.Auth
 
   @moduletag :capture_log
 
@@ -98,8 +99,15 @@ defmodule DpExchange.Gemini.TickAAFacadeTest do
 
     test "seed_nonce/1 refuses a seed it cannot hold, without moving the counter" do
       # Neither value is applied, so the process-wide nonce counter is left as it was.
+      # Read the cell itself: the comment above is the claim, so it is the thing measured.
+      Auth.ensure_counter()
+      counter = :persistent_term.get({Auth, :nonce_counter})
+      before = :atomics.get(counter, 1)
+
       assert {:error, :invalid_seed} = Gemini.seed_nonce(0)
       assert {:error, :above_counter_range} = Gemini.seed_nonce(0xFFFF_FFFF_FFFF_FFFF)
+
+      assert :atomics.get(counter, 1) == before
     end
   end
 

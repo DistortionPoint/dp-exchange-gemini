@@ -22,11 +22,22 @@ defmodule DpExchange.Gemini.SupervisorTest do
 
   describe "the tree" do
     test "starts a ledger, a limiter and a feed, and nothing else" do
-      {pid, _opts} = start_tree()
+      {pid, opts} = start_tree()
 
       children = Elixir.Supervisor.which_children(pid)
+      pids = for {_id, child, _type, _modules} <- children, do: child
 
       assert length(children) == 3
+      assert Enum.all?(pids, &is_pid/1)
+
+      # The three are the ones named from opts: a count alone would pass for any three.
+      ledger = DpExchange.Gemini.Supervisor.ledger_name(opts)
+
+      assert Enum.sort([
+               Process.whereis(ledger),
+               Process.whereis(opts[:limiter]),
+               Process.whereis(opts[:feed])
+             ]) == Enum.sort(pids)
     end
 
     test "starts NO socket — a consumer that has not subscribed has no connection open" do
@@ -38,6 +49,12 @@ defmodule DpExchange.Gemini.SupervisorTest do
 
       assert is_pid(feed)
       assert DpExchange.Gemini.Feed.coverage(feed) == %{}
+
+      # The empty coverage map would be the same with a socket open and silent, so the
+      # fact itself is read: the feed holds no socket and has no dial in flight.
+      state = :sys.get_state(feed)
+      assert state.socket == nil
+      assert state.dial == nil
     end
 
     test "names both children from opts, so two instances can coexist" do
@@ -134,7 +151,12 @@ defmodule DpExchange.Gemini.SupervisorTest do
                )
 
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
-      assert is_pid(pid)
+
+      # A pid is what `{:ok, pid}` already says; the tree being up is the claim.
+      assert Process.whereis(:"facade_sup_#{unique}") == pid
+      assert is_pid(Process.whereis(:"facade_feed_#{unique}"))
+      assert is_pid(Process.whereis(:"facade_limiter_#{unique}"))
+      assert length(Elixir.Supervisor.which_children(pid)) == 3
     end
   end
 end

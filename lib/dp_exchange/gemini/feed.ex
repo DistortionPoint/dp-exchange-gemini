@@ -256,7 +256,11 @@ defmodule DpExchange.Gemini.Feed do
   for a wire unsubscribe on the next tick, which skips any symbol wanted again by then. A
   failed `update_symbols/2` restores the previous wanted set and its delivery records stay
   narrowed to the requested one, so coverage under-reports for a moment rather than claiming
-  delivery nobody saw. A caller that wants the symbols retries.
+  delivery nobody saw. A caller that wants the symbols retries. One half of that is not a
+  restore: `update_symbols/2` sends the unsubscribe for what it removes BEFORE the subscribe for
+  what it adds, so when only the subscribe half fails the removals have already gone out and
+  stay removed (the wanted set is the previous one minus the removed symbols, never a set the
+  wire still carries); when the unsubscribe half fails nothing is changed.
 
   `unsubscribe/2` is deliberately the other way: it narrows `wanted` even when the wire send
   fails, because "stop delivering these" is safe to apply at once, and the unsubscribe is
@@ -423,8 +427,10 @@ defmodule DpExchange.Gemini.Feed do
   (the dial budget adds them, so a string raised `ArithmeticError` inside this shared process),
   `:environment` one of `DpExchange.Gemini.Environment.known/0`, and `:url` a WebSocket URL
   (`{:error, {:invalid_option, :url, :redacted}}`: a URL may carry a token, so it is not
-  echoed). `nil` is absent for the three. `:channels` and `:max_queue_len` keep raising
-  `ArgumentError` from `init/1`, as documented.
+  echoed). `nil` is absent for the two timeouts and `:url`; `environment: nil` is refused, as
+  `Environment.resolve/1` raises on it. `:channels` and `:max_queue_len` keep raising
+  `ArgumentError` from `init/1`, as documented (`DpExchange.Gemini.Fake.start_link/1` refuses
+  them as `{:error, {:invalid_option, key, value}}`).
 
   Exposed so `DpExchange.Gemini.Supervisor.start_link/1` and `DpExchange.Gemini.Fake` refuse
   exactly as the feed does.
@@ -537,8 +543,11 @@ defmodule DpExchange.Gemini.Feed do
   @doc """
   Makes `symbols` the whole wanted set.
 
-  Like `subscribe/3`, `{:error, _}` means the wanted set is unchanged. Symbols that were to
-  be added are queued for a wire unsubscribe in case their frame landed.
+  Like `subscribe/3`, `{:error, _}` records none of the symbols it was to add, and those are
+  queued for a wire unsubscribe in case their frame landed. The wanted set is unchanged when the
+  failure was in the unsubscribe half; when the unsubscribe half went out and the subscribe
+  half failed, the removed symbols stay removed (they are off the wire, so a tick must not
+  resend them). The delivery records stay narrowed to the requested set either way.
   """
   @spec update_symbols(GenServer.server(), [String.t()]) :: :ok | {:error, term()}
   def update_symbols(feed, symbols) do

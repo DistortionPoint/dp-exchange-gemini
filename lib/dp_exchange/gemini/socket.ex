@@ -22,8 +22,10 @@ defmodule DpExchange.Gemini.Socket do
   This socket always carries **`@bookTicker`**. That single stream carries best bid, best
   ask and — where the book has traded — the last trade price, in one message per change.
   It delivers `Core.Types.TopOfBook` on every frame that parses, and a separate
-  `Core.Types.Quote` only on the frames that also carry that last trade: the two are
-  independent facts and a bid is never dressed up as a price. See `handle_message/2` for
+  `Core.Types.Quote` only when a frame carries a last trade price this connection has not
+  yet reported for that symbol (the venue repeats the same `c` on every quote change until
+  the next trade, so an unchanged one is not a new execution): the two are independent
+  facts and a bid is never dressed up as a price. See `handle_message/2` for
   the substitution that rule exists to stop.
 
   It also carries **`@trade`** — every executed print, as `Core.Types.Trade` — whenever
@@ -81,7 +83,10 @@ defmodule DpExchange.Gemini.Socket do
   `@depth5`/`@depth10`/`@depth20` (and their `…@100ms` siblings) answer with
   `OrderBookSnapshot` (websocket.yaml:1217-1233): `required: [lastUpdateId, bids, asks]`,
   no `s`, and no combined-stream wrapper names one either — read the whole document and
-  nothing attributes one of these frames to a stream. The only attribution this socket can
+  nothing attributes one of these frames to a stream. (A live frame was measured on
+  2026-08-28 to carry an extra `symbol` — `docs/reference/gemini/websocket-api-replacement.md`
+  — but the document does not promise it, and a decoder reads the document's fields only, so
+  it is not relied on.) The only attribution this socket can
   make without guessing is "this connection carries exactly one such channel, for exactly one
   symbol", so `subscribe/3` refuses a second, distinct symbol against any of
   `WsChannels.partial_depth/0` on the same connection with `{:error,
@@ -186,8 +191,8 @@ defmodule DpExchange.Gemini.Socket do
   (`GenericSuccessResponse` in `docs/reference/gemini/asyncapi/websocket.yaml`). Measured
   2026-10-02, with every request then sent as `id: 1`, against both `ws.gemini.com` and
   `ws.sandbox.gemini.com`: a first subscribe, the same streams again, and a mix of
-  subscribed and new streams were each answered within about 550ms. A repeat is answered too, which matters because `Feed` resubscribes every 60s to
-  streams already subscribed. So `subscribe/3` tells this process a request is out, and if
+  subscribed and new streams were each answered within about 550ms. A repeat is answered
+  too, which matters because `Feed` resubscribes every 60s to streams already subscribed. So `subscribe/3` tells this process a request is out, and if
   `@ack_timeout_ms` passes with that request still unanswered, it raises a `:degraded` notice
   (`details.reason: :subscribe_unanswered`) and closes, taking the same reconnect path as a
   silent connection. Silence in the market data alone is never the trigger, because a feed
@@ -444,6 +449,10 @@ defmodule DpExchange.Gemini.Socket do
   (a re-connect is `:reconnected`, as ever), and a first connect that fails ends the process
   with exit reason `{:error, reason}`, which the linked starter sees as an `EXIT`. Without it
   `start_link/1` blocks until connected and answers `{:error, reason}` itself.
+
+  **No trust store is an error, not an unverified connection**: a `wss` URL on a host whose
+  operating system has no CA list answers `{:error, {:tls_trust_store_unavailable, text}}`
+  before dialling. A plain `ws://` URL needs none and is not refused for lacking one.
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
@@ -562,13 +571,19 @@ defmodule DpExchange.Gemini.Socket do
   shape of that failure. **A channel `WsChannels.requires_credential?/1` marks private is
   refused too**, with `{:error, {:credential_required, channel}}`: this socket never
   authenticates its connection, so a private channel can only ever fail at the venue, and
-  telling a caller before the round trip is the whole reason that function exists.
+  telling a caller before the round trip is the whole reason that function exists. **A
+  channel `WsChannels` does not know is refused** with `{:error, {:unknown_channel,
+  channel}}`, and a blank or non-text symbol with `{:error, {:invalid_symbol, symbol}}`:
+  both used to build no address, send nothing and answer `:ok`.
 
   **A symbol is on one diff channel at a time**: `:depth` for a symbol that is on
   `:depth_fast` (or the reverse) is refused with `{:error, {:conflicting_depth_channel,
   symbol}}`, because their frames cannot be told apart. A second distinct symbol on a
-  partial-depth channel is refused with `{:error, {:partial_depth_symbol_conflict, symbol}}`
-  (see the moduledoc's "A partial-depth snapshot cannot name its own symbol").
+  partial-depth channel is refused with `{:error, {:partial_depth_symbol_conflict,
+  existing_symbol}}`, naming the symbol that holds the claim; one call naming several
+  distinct symbols on a partial-depth channel is refused with the same tag carrying the
+  list it was given (see the moduledoc's "A partial-depth snapshot cannot name its own
+  symbol").
 
   Returns an error rather than exiting when the socket will not accept the frame — a caller
   can retry a batch, but it cannot recover from a linked exit it did not expect. **Which
@@ -793,11 +808,12 @@ defmodule DpExchange.Gemini.Socket do
       false ->
         validate_symbol_shape(symbols, channel)
 
-      # Unknown channel: `streams/2` already answers this with an empty list rather than a
-      # guessed address — see its own "an unknown channel yields no address" test. Refusing
-      # it twice over, in two different shapes, would be redundant rather than safer.
-      {:error, _reason} ->
-        :ok
+      # Unknown channel: `streams/2` answers it with an empty list, and `send_rpc/4` sends
+      # nothing for an empty list and answers `:ok`, so left here this was a subscription for
+      # nothing reported as success (and `Feed` records the symbols as subscribed on `:ok`).
+      # Refused with the reason `WsChannels` already names.
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -805,9 +821,23 @@ defmodule DpExchange.Gemini.Socket do
     if symbols != [] and channel not in WsChannels.per_symbol() do
       {:error, {:channel_takes_no_symbol, channel}}
     else
-      :ok
+      # A blank or non-text symbol builds no address: `streams/2` dropped it, so a batch
+      # holding one subscribed the rest and answered `:ok`, and a lone one answered `:ok` for
+      # nothing. Refused instead, naming the symbol.
+      invalid_symbol(symbols)
     end
   end
+
+  defp invalid_symbol(symbols) when is_list(symbols) do
+    # Not `Enum.find/2`: a `nil` symbol IS the bad value, and `find` answers `nil` for "none
+    # found" too, so a nil symbol passed and raised in `SymbolFormat.to_exchange_symbol/1`.
+    case Enum.drop_while(symbols, &(is_binary(&1) and String.trim(&1) != "")) do
+      [] -> :ok
+      [bad | _rest] -> {:error, {:invalid_symbol, bad}}
+    end
+  end
+
+  defp invalid_symbol(other), do: {:error, {:invalid_symbol, other}}
 
   # See the moduledoc's "A partial-depth snapshot cannot name its own symbol". A channel
   # outside `WsChannels.partial_depth/0`, or an empty symbol list, needs no claim.

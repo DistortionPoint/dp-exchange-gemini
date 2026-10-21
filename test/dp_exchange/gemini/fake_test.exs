@@ -80,25 +80,52 @@ defmodule DpExchange.Gemini.FakeTest do
       # `include_partial: true`.
       recent = DateTime.add(DateTime.utc_now(), -12 * 3_600, :second)
 
-      assert {:ok, [_candle]} =
+      assert {:ok, [%Types.Candle{timeframe: "1d", provider: :gemini}]} =
                Fake.get_historical_prices("BTC-USD", "1d", [start: recent], include_partial: true)
     end
 
+    test "the bar is inside the venue's window for every width, so a ranged ask for it is served" do
+      # The bar opens relative to the clock; a bar pinned to a date would be refused
+      # `:range_unavailable` once it aged out of the window (1h reaches back about 61 days).
+      for width <- ~w(1m 5m 15m 30m 1h 6h 1d) do
+        assert {:ok, [bar]} = Fake.get_historical_prices("BTC-USD", width)
+        # No `:end`: a bar boundary crossed between the two calls only moves the bar later.
+        assert {:ok, [ranged]} =
+                 Fake.get_historical_prices("BTC-USD", width, start: bar.opened_at)
+
+        assert DateTime.compare(ranged.opened_at, bar.opened_at) in [:eq, :gt]
+        assert DateTime.compare(bar.opened_at, DateTime.utc_now()) == :lt
+      end
+    end
+
     test "a range the bar falls outside of is an empty list, as Rest's own filter would give" do
-      # The fake's daily bar opens at 2026-08-28 00:00:00Z, on its width boundary. `:end` is
-      # exclusive: a range ending AT the bar's open keeps nothing, one second later keeps it.
-      assert {:ok, []} =
-               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 00:00:00Z])
+      # The fake's daily bar is the last closed one, opened on its width boundary two days
+      # before the clock (never a fixed date, which would age out of the venue's window). `:end`
+      # is exclusive: a range ending AT the bar's open keeps nothing, one second later keeps
+      # it. The bar is read first and the two ranges are asked of the same UTC day.
+      {bar, at_open, just_after} =
+        on_one_utc_day(fn _day ->
+          {:ok, [bar]} = Fake.get_historical_prices("BTC-USD", "1d")
 
-      assert {:ok, [bar]} =
-               Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 00:00:01Z])
+          {bar, Fake.get_historical_prices("BTC-USD", "1d", end: bar.opened_at),
+           Fake.get_historical_prices("BTC-USD", "1d",
+             end: DateTime.add(bar.opened_at, 1, :second)
+           )}
+        end)
 
-      assert DateTime.compare(bar.opened_at, ~U[2026-08-28 00:00:00Z]) == :eq
+      assert at_open == {:ok, []}
+      assert {:ok, [^bar]} = just_after
+      assert rem(DateTime.to_unix(bar.opened_at), 86_400) == 0
+      assert DateTime.diff(DateTime.utc_now(), bar.opened_at) in 86_400..(3 * 86_400)
 
       # A `start` after the bar moves it to the first boundary at or after `start`, and a range
-      # that ends before that boundary keeps nothing, exactly as `Rest.within?/2` decides.
-      start = DateTime.utc_now() |> DateTime.add(-3_600, :second) |> DateTime.truncate(:second)
-      assert {:ok, [moved]} = Fake.get_historical_prices("BTC-USD", "1m", start: start)
+      # that ends before that boundary keeps nothing, exactly as `Rest.within?/2` decides. The
+      # start is later than the bar (two minutes back) and the moved bar may still be forming.
+      start = DateTime.utc_now() |> DateTime.add(-90, :second) |> DateTime.truncate(:second)
+
+      assert {:ok, [moved]} =
+               Fake.get_historical_prices("BTC-USD", "1m", [start: start], include_partial: true)
+
       assert DateTime.compare(moved.opened_at, start) != :lt
       assert rem(DateTime.to_unix(moved.opened_at), 60) == 0
       assert DateTime.diff(moved.opened_at, start) <= 60
@@ -128,7 +155,7 @@ defmodule DpExchange.Gemini.FakeTest do
       long_ago = ~U[2000-01-01 00:00:00Z]
 
       for canonical <- ~w(1w 1M) do
-        assert {:ok, [_candle]} =
+        assert {:ok, [%Types.Candle{timeframe: ^canonical}]} =
                  Fake.get_historical_prices("BTC-USD", canonical, start: long_ago)
       end
     end
@@ -738,7 +765,8 @@ defmodule DpExchange.Gemini.FakeTest do
         assert {:error, {:invalid_amount, ^zero}} = write.("ETH", zero, opts)
 
         assert {:error, {:invalid_asset, nil}} = write.(nil, Decimal.new(1), opts)
-        assert {:ok, _transaction} = write.("eth", Decimal.new(1), opts)
+        assert {:ok, %{asset: "ETH", amount: amount}} = write.("eth", Decimal.new(1), opts)
+        assert Decimal.equal?(amount, Decimal.new(1))
       end
     end
 
@@ -1343,7 +1371,7 @@ defmodule DpExchange.Gemini.FakeTest do
     # answer, or a consumer's tier-1 tests certify silence where the venue delivers.
     test "is delivered under the canonical symbol, as the real package does" do
       assert :ok = DpExchange.Gemini.Fake.subscribe(["btc-usd"], to: self())
-      assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 5_000
+      assert_receive {:dp_exchange, :gemini, %{symbol: "BTC-USD"}}, 5_000
       assert Map.has_key?(DpExchange.Gemini.Fake.coverage(), "BTC-USD")
     end
   end
@@ -1353,7 +1381,7 @@ defmodule DpExchange.Gemini.FakeTest do
 
     test "an account-level call without :account is refused as the venue refuses it" do
       assert {:refused, {:unknown_reason, "MissingAccounts"}} = Fake.get_balances(@master)
-      assert {:ok, _balances} = Fake.get_balances(@master, account: "primary")
+      assert {:ok, [_balance | _rest]} = Fake.get_balances(@master, account: "primary")
     end
 
     test "group-level calls need no account" do
@@ -1361,7 +1389,7 @@ defmodule DpExchange.Gemini.FakeTest do
     end
 
     test "an account-scoped key is unaffected" do
-      assert {:ok, _balances} = Fake.get_balances(@credentials)
+      assert {:ok, [_balance | _rest]} = Fake.get_balances(@credentials)
     end
   end
 

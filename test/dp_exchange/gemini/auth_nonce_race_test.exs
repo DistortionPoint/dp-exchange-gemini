@@ -77,14 +77,21 @@ defmodule DpExchange.Gemini.AuthNonceRaceTest do
       for key <- [{Auth, :nonce_counter_us}, {Auth, :nonce_counter_ns}] do
         :persistent_term.erase(key)
 
+        # `ensure_counter/0` returns the millisecond counter's ref whichever key was erased, so
+        # its return value says nothing about this key: each caller reads the key it erased.
         refs =
           1..40
-          |> Enum.map(fn _caller -> Task.async(&Auth.ensure_counter/0) end)
+          |> Enum.map(fn _caller ->
+            Task.async(fn ->
+              Auth.ensure_counter()
+              :persistent_term.get(key)
+            end)
+          end)
           |> Task.await_many(10_000)
           |> Enum.uniq()
 
         assert length(refs) == 1
-        assert :persistent_term.get(key)
+        assert :atomics.info(:persistent_term.get(key)).size == 1
       end
 
       for mode <- [:incremental_us, :incremental_ns] do

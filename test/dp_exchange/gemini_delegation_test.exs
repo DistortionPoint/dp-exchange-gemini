@@ -47,12 +47,14 @@ defmodule DpExchange.GeminiDelegationTest do
 
   describe "market data reaches the venue through the facade" do
     test "get_price/2", %{opts: opts} do
-      assert {:ok, %Quote{symbol: "BTC-USD"}} =
+      assert {:ok, %Quote{symbol: "BTC-USD", price: price}} =
                Gemini.get_price("BTC-USD",
                  plug: responding(@ticker),
                  limiter: opts[:limiter],
                  retry_attempts: 0
                )
+
+      assert Decimal.equal?(price, Decimal.new("77829.80"))
     end
 
     test "get_symbols/1", %{opts: opts} do
@@ -70,7 +72,7 @@ defmodule DpExchange.GeminiDelegationTest do
         "asks" => []
       }
 
-      assert {:ok, %OrderBook{symbol: "BTC-USD"}} =
+      assert {:ok, %OrderBook{symbol: "BTC-USD", bids: [_bid], asks: []}} =
                Gemini.get_order_book("BTC-USD",
                  plug: responding(body),
                  limiter: opts[:limiter],
@@ -92,12 +94,19 @@ defmodule DpExchange.GeminiDelegationTest do
     test "get_historical_prices/4", %{opts: opts} do
       body = [[1_787_935_740_000, 1.0, 2.0, 0.5, 1.5, 3.0]]
 
-      assert {:ok, [_candle]} =
+      assert {:ok, [candle]} =
                Gemini.get_historical_prices("BTC-USD", "1m", [],
                  plug: responding(body),
                  limiter: opts[:limiter],
                  retry_attempts: 0
                )
+
+      # The row's own numbers, in Gemini's column order (time, open, high, low, close, volume).
+      assert candle.symbol == "BTC-USD"
+      assert Decimal.equal?(candle.open, Decimal.new("1"))
+      assert Decimal.equal?(candle.high, Decimal.new("2"))
+      assert Decimal.equal?(candle.low, Decimal.new("0.5"))
+      assert Decimal.equal?(candle.close, Decimal.new("1.5"))
     end
 
     test "an unsupported timeframe is refused at the facade, without a request" do
@@ -270,12 +279,15 @@ defmodule DpExchange.GeminiDelegationTest do
     test "get_balances/2", %{opts: opts} do
       body = [%{"currency" => "USD", "amount" => "100.00", "available" => "90.00"}]
 
-      assert {:ok, [%DpExchange.Core.Types.Balance{currency: "USD"}]} =
+      assert {:ok, [%DpExchange.Core.Types.Balance{currency: "USD"} = balance]} =
                Gemini.get_balances(@credentials,
                  plug: responding(body),
                  limiter: opts[:limiter],
                  retry_attempts: 0
                )
+
+      assert Decimal.equal?(balance.balance, Decimal.new("100.00"))
+      assert Decimal.equal?(balance.available_balance, Decimal.new("90.00"))
     end
 
     test "get_accounts/2", %{opts: opts} do
@@ -300,9 +312,12 @@ defmodule DpExchange.GeminiDelegationTest do
     end
 
     test "get_transfers/2", %{opts: opts} do
-      assert {:ok, []} =
+      # A row, not `[]`: an empty list is what a constant answer would also return.
+      row = %{"eid" => 320_013_281, "type" => "Deposit", "currency" => "BTC"}
+
+      assert {:ok, [^row]} =
                Gemini.get_transfers(@credentials,
-                 plug: responding([]),
+                 plug: responding([row]),
                  limiter: opts[:limiter],
                  retry_attempts: 0
                )
@@ -384,7 +399,7 @@ defmodule DpExchange.GeminiDelegationTest do
         }
       ]
 
-      assert {:ok, [%DpExchange.Core.Types.Fill{liquidity: :maker}]} =
+      assert {:ok, [%DpExchange.Core.Types.Fill{liquidity: :maker, order_id: "1"}]} =
                Gemini.get_trade_history(@credentials,
                  symbol: "BTC-USD",
                  plug: responding(body),

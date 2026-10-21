@@ -290,7 +290,9 @@ defmodule DpExchange.Gemini.Auth do
   this module does not implement — a caller-supplied `:auth_scheme` this venue has no
   handler for, which never happens by inference; and `{:error, {:missing_credentials,
   :gemini}}` when a scheme WAS named or inferred but the credentials do not carry what it
-  needs (a blank field, a missing field) and when `scheme` is `nil` — nothing
+  needs (a blank field, a missing field, a key or secret that is not text; the same tag is
+  also what a `path` that is not text or `params` that is not a map answers, since no clause
+  signs them) and when `scheme` is `nil` — nothing
   credential-shaped was supplied and no `:auth_scheme` was named, so there is no scheme to
   be unsupported, only a credential that never arrived. The tag is the venue atom, as in
   every other venue of the family; it used to be the scheme (`:api_key`, `:oauth`), which
@@ -682,7 +684,7 @@ defmodule DpExchange.Gemini.Auth do
 
   Requested with this shape on dp-exchange-gemini issue #2 by the consumer who hit it.
   """
-  @spec seed_nonce(pos_integer()) ::
+  @spec seed_nonce(term()) ::
           :ok | {:error, :below_current | :above_counter_range | :invalid_seed}
   def seed_nonce(value) when is_integer(value) and value > 0 do
     # `>=`, not `>`: a counter AT the cell's maximum has no next value, and

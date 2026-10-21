@@ -130,7 +130,12 @@ defmodule DpExchange.GeminiTest do
     end
 
     test "the declaration survives Capabilities' own validation" do
-      assert %Capabilities{} = Gemini.capabilities()
+      # Matching the struct proves nothing (the function returns one whatever it holds), so
+      # the declaration is fed back through `Capabilities.new/1`, which raises on a bad one.
+      caps = Gemini.capabilities()
+
+      assert %Capabilities{endpoints: endpoints} = Capabilities.new(Map.from_struct(caps))
+      assert endpoints == caps.endpoints
     end
   end
 

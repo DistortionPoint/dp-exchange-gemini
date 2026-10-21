@@ -171,7 +171,7 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
     end
 
     test "a 5xx is an error the caller may retry" do
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :gemini, "Server error (500)" <> _body}} =
                Rest.get_symbols(plug: responding(%{}, status: 500), retry_attempts: 0)
     end
   end
@@ -327,9 +327,15 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
     test "account and trading answer, because credentials are an argument" do
       credentials = %{api_key: "k", api_secret: "s"}
 
-      assert {:ok, [_first | _rest]} = Fake.get_balances(credentials, [])
-      assert {:ok, [_account]} = Fake.get_accounts(credentials, [])
-      assert {:ok, %{}} = Fake.get_fees(credentials, [])
+      assert {:ok, [%DpExchange.Core.Types.Balance{provider: :gemini} | _rest]} =
+               Fake.get_balances(credentials, [])
+
+      assert {:ok, [%{"account" => %{"shortName" => "primary"}}]} =
+               Fake.get_accounts(credentials, [])
+
+      assert {:ok, %{"api_maker_fee_bps" => 10, "api_taker_fee_bps" => 35}} =
+               Fake.get_fees(credentials, [])
+
       assert {:ok, []} = Fake.get_transfers(credentials, [])
       assert {:ok, []} = Fake.get_orders(credentials, [])
       assert {:ok, %{reachable: true}} = Fake.test_connection(credentials, [])
@@ -577,7 +583,8 @@ defmodule DpExchange.Gemini.EdgeCasesTest do
     test "it accepts an OAuth token as readily as a key pair" do
       # The fake must not be pickier about authentication than the real adapter, or a
       # consumer's OAuth path passes here and fails there.
-      assert {:ok, _balances} = Fake.get_balances(%{access_token: "tok"}, [])
+      assert {:ok, [%DpExchange.Core.Types.Balance{provider: :gemini} | _rest]} =
+               Fake.get_balances(%{access_token: "tok"}, [])
     end
 
     test "post_only is accepted and maker_or_cancel, no Core order type, is refused" do

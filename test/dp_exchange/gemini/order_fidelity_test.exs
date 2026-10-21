@@ -69,7 +69,8 @@ defmodule DpExchange.Gemini.OrderFidelityTest do
     }
 
     assert {:ok, order} = read(body)
-    assert order.status == :partially_filled
+    # The venue defines no state for this (tick AR): none is stated, and never `:filled`.
+    assert order.status == nil
     assert Decimal.equal?(order.average_price, Decimal.new("99"))
   end
 

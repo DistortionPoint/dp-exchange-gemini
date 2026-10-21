@@ -193,7 +193,7 @@ defmodule DpExchange.Gemini.TickAaSocketTest do
                        %Notice{kind: :coverage_change, details: %{delivering: false}}}
 
       # Two failures earn a 10s backoff, so the restart is not immediate.
-      refute_received {:resync_depth, @key, ^new_ref}
+      refute_receive {:resync_depth, @key, ^new_ref}
     end
 
     test "a refused resubscribe adds to the failures and keeps another key's retry" do

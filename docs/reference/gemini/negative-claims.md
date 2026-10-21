@@ -28,6 +28,7 @@ must never be substituted for a missing one; this is the same rule pointed at do
 | No rate-limit headers at all | **measured 2026-08-28** | **holds.** The venue publishes none. Returning a constant that never moves as budget is spent would be worse than refusing |
 | No bulk instrument detail | inventory | **holds.** 346 symbols and no bulk detail endpoint — one request per symbol is not a listing, it is a rate-limit incident |
 | No per-method payment read | pages, 2026-09-01 | **holds.** `/v1/payments/methods` returns the whole set and there is no path taking a method identifier. Filtering the listing here would answer with a snapshot while looking like a read |
+| No `get_conversion/2` (quote status) | `operations-from-specs.txt`, 2026-10-21 | **holds.** The specifications publish `POST /v1/instant/quote` and `POST /v1/instant/execute` and nothing that reads a quote back by id. It was listed as "the venue serves it, the package has not ported it", which the function's own comment contradicted. A caller that lost a quote re-quotes |
 | No batch order placement | inventory, 2026-09-01 | **holds.** The multi-order surface is the cancel family, which destroys rather than creates |
 | No options | inventory | **holds.** Gemini lists none |
 | **A documented WebSocket endpoint that had vanished** | **measured** | **the inverse case, and worth keeping.** This package once pointed at a socket URL the documentation still named and the venue no longer served. A *positive* claim can go stale exactly as a negative can, and only a live check tells you |

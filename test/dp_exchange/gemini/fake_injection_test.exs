@@ -68,7 +68,8 @@ defmodule DpExchange.Gemini.FakeInjectionTest do
     end
 
     test "with nothing queued, normal Fake behaviour is unaffected" do
-      assert {:ok, _symbols} = Fake.get_symbols([])
+      assert {:ok, symbols} = Fake.get_symbols([])
+      assert "BTC-USD" in symbols
     end
   end
 
@@ -110,7 +111,8 @@ defmodule DpExchange.Gemini.FakeInjectionTest do
 
       assert Fake.get_symbols([]) == {:error, :first}
       assert Fake.get_symbols([]) == {:error, :second}
-      assert {:ok, _symbols} = Fake.get_symbols([])
+      assert {:ok, symbols} = Fake.get_symbols([])
+      assert "BTC-USD" in symbols
     end
   end
 
@@ -120,7 +122,7 @@ defmodule DpExchange.Gemini.FakeInjectionTest do
 
       FakeInjection.bypass_credentials(:gemini)
 
-      assert {:ok, _balances} = Fake.get_balances(%{}, [])
+      assert {:ok, [_balance | _rest]} = Fake.get_balances(%{}, [])
     end
 
     test "the default, without calling bypass_credentials/1, is still venue-faithful" do

@@ -127,6 +127,8 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
                Private.get_balances(@credentials, plug: raw(body), retry_attempts: 0)
 
       assert balance.currency == "USD"
+      assert Decimal.equal?(balance.balance, Decimal.new("10.00"))
+      assert Decimal.equal?(balance.available_balance, Decimal.new("10.00"))
     end
   end
 
@@ -236,12 +238,16 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
     # A consumer writing tier-1 tests calls these without options. They are part of the
     # fake's surface, so they are exercised rather than left to a consumer to discover.
     test "account calls work with credentials alone" do
-      assert {:ok, _balances} = Fake.get_balances(@credentials)
-      assert {:ok, _accounts} = Fake.get_accounts(@credentials)
-      assert {:ok, _fees} = Fake.get_fees(@credentials)
-      assert {:ok, _transfers} = Fake.get_transfers(@credentials)
-      assert {:ok, _orders} = Fake.get_orders(@credentials)
-      assert {:ok, _connection} = Fake.test_connection(@credentials)
+      assert {:ok, [%DpExchange.Core.Types.Balance{provider: :gemini} | _rest]} =
+               Fake.get_balances(@credentials)
+
+      assert {:ok, [%{"account" => %{"shortName" => "primary"}}]} =
+               Fake.get_accounts(@credentials)
+
+      assert {:ok, %{"api_maker_fee_bps" => 10}} = Fake.get_fees(@credentials)
+      assert {:ok, []} = Fake.get_transfers(@credentials)
+      assert {:ok, []} = Fake.get_orders(@credentials)
+      assert {:ok, %{reachable: true}} = Fake.test_connection(@credentials)
     end
 
     test "order calls work with credentials alone" do

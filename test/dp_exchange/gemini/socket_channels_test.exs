@@ -79,8 +79,12 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert Socket.subscribe(:no_such_socket, [], :book_ticker) == :ok
     end
 
-    test "an unknown channel is not double-refused here — streams/2 already answers it" do
-      assert Socket.subscribe(:no_such_socket, ["BTC-USD"], :candles) == :ok
+    test "an unknown channel is refused, not reported as a subscription for nothing" do
+      assert Socket.subscribe(:no_such_socket, ["BTC-USD"], :candles) ==
+               {:error, {:unknown_channel, :candles}}
+
+      assert Socket.unsubscribe(:no_such_socket, ["BTC-USD"], :candles) ==
+               {:error, {:unknown_channel, :candles}}
     end
   end
 
@@ -390,7 +394,8 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
                        }}
 
       # The retry is a delayed message (backoff), not an immediate one.
-      refute_received {:retry_depth, _key, _ref}
+      # The first failure's backoff is the 5s minimum gap, so a 500ms window is a real guard.
+      refute_receive {:retry_depth, _key, _ref}
 
       assert {:reply, {:text, subscribe}, retrying} =
                Socket.handle_info({:retry_depth, @key, retry_ref}, refused)
@@ -429,7 +434,7 @@ defmodule DpExchange.Gemini.SocketChannelsTest do
       assert %{@key => {:pending, ref}} = waiting.depth_resync
 
       # Not immediate: the message is due after the rest of the 5s window.
-      refute_received {:resync_depth, @key, ^ref}
+      refute_receive {:resync_depth, @key, ^ref}
       assert_received {:dp_exchange, :gemini, %Notice{details: %{reason: :sequence_gap}}}
 
       # Meanwhile the symbol is not delivering and says nothing more.

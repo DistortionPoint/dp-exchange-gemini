@@ -46,6 +46,9 @@ defmodule DpExchange.GeminiLiveTest do
 
   describe "the candle timeframe enum" do
     test "the venue accepts every width this package declares" do
+      # A sweep over an empty list passes whatever the venue does.
+      assert Rest.timeframes() != []
+
       for timeframe <- Rest.timeframes() do
         assert {:ok, [_first | _rest]} = Rest.get_historical_prices("BTC-USD", timeframe, [], []),
                "the venue rejected #{timeframe}, which capabilities/0 declares"
@@ -66,7 +69,11 @@ defmodule DpExchange.GeminiLiveTest do
     test "the venue names its own accepted set in the error body" do
       # A machine-readable capability declaration, free to obtain and more current than
       # the documentation.
-      assert {:refused, _reason} = raw_candles("THREE_HOUR")
+      assert {:refused, body} = raw_candles("THREE_HOUR")
+
+      # The test is named for the body, so the body is what is read: it carries the venue's own
+      # spelling of the accepted widths (docs/reference/gemini/candles.md).
+      assert inspect(body) =~ "1hr", "the 400 body no longer names the accepted set"
     end
   end
 
@@ -201,8 +208,8 @@ defmodule DpExchange.GeminiLiveTest do
       # against ask 64886.32.
       assert {:ok, book} = Gemini.get_order_book("BTC-USD", environment: :sandbox, limiter: nil)
 
-      assert is_list(book.bids)
-      assert is_list(book.asks)
+      assert [_bid | _bids] = book.bids
+      assert [_ask | _asks] = book.asks
     end
 
     test "candles work, so a consumer can backfill against demo before production" do

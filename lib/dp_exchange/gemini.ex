@@ -20,12 +20,16 @@ defmodule DpExchange.Gemini do
   API rejects; this package sends what the venue accepts, measured. Asking for a width
   Gemini does not serve — `2h`, `4h`, `12h` — is an **error**, never the nearest one.
 
-  **The candle window is fixed and unbounded requests are refused, for seven of the nine
-  widths.** Gemini ignores `start`, `end` and `limit` entirely and returns a fixed window
+  **The candle window is fixed, and a range reaching before it is refused, for seven of the
+  nine widths.** Gemini ignores `start`, `end` and `limit` entirely and returns a fixed window
   per width, from 1 day of one-minute bars to a year of daily ones (about 4.6 years of
   weekly, about 9.6 years of monthly). This package filters to your range, and refuses
-  with `{:error, {:range_unavailable, …}}` when your range starts before the window can
-  reach — rather than handing back a shorter period that reads as a complete answer. `1w`
+  with `{:error, {:range_unavailable, …}}` when your `:start` is before the window can
+  reach — rather than handing back a shorter period that reads as a complete answer. A call
+  with no `:start` is not refused: it gets the whole window. A perpetual symbol is served by
+  the venue's derivatives candles, which have `1m` only, so any other width for one is
+  `{:error, {:unsupported_timeframe, width}}` (`historical_timeframes` in `capabilities/0`
+  names the spot widths). `1w`
   and `1M` are the two exceptions: neither has a fixed-seconds width the shared
   `DpExchange.Core.Timeframe` vocabulary will compute one for, so the pre-flight refusal
   does not fire for them — the real rows the venue returns are still filtered against your
@@ -201,14 +205,22 @@ defmodule DpExchange.Gemini do
     # identifier. Filtering the listing here would answer with a snapshot while looking
     # like a read, which is the distinction `get_payment_method/3` exists to draw.
     {:get_payment_method, 3},
+    # **No quote-status endpoint.** The vendor's specifications publish `POST
+    # /v1/instant/quote` and `POST /v1/instant/execute` and nothing that answers "what became
+    # of quote N" (`docs/reference/gemini/operations-from-specs.txt`). This list said the
+    # venue serves it and only the package lagged, which the function's own comment
+    # contradicted; the specification agrees with the comment.
+    {:get_conversion, 2},
     # The venue publishes no rate-limit headers at all — measured, not assumed. Returning
     # a constant that never moves as budget is spent is worse than refusing.
     {:get_rate_limit_status, 2}
   ]
 
-  # Not ported yet. **The venue serves these**; this package does not implement them.
+  # Not ported yet. **The venue may serve this**; this package does not implement it. The
+  # specifications publish no portfolio endpoint by that name (subaccounts are
+  # `list_accounts/1`, venue-specific), so whether it is the venue's absence or ours is not
+  # established, and it stays here rather than being claimed either way.
   @not_ported [
-    {:get_conversion, 2},
     {:list_portfolios, 1}
     # `list_instruments/1` left this list on 2026-10-08 (issue #4). `/v1/symbols` keeps
     # closed symbols and only per-symbol details carry the status, so without it a consumer
@@ -228,8 +240,12 @@ defmodule DpExchange.Gemini do
   supervisor's crash report. Recognised options (13, judged at start): `:name`, `:feed`,
   `:limiter`, `:environment`, `:channels`, `:max_queue_len`, `:url`, `:socket_connect_timeout`,
   `:socket_recv_timeout`, `:ssl_options`, `:credentials`, `:socket`, `:ledger`; an unknown key
-  is `{:error, {:unknown_option, key}}` from `start_link/1` and a bad timeout, environment or
-  URL `{:error, {:invalid_option, key, value}}` (`:redacted` for the URL). The child id is
+  is `{:error, {:unknown_option, key}}` from `start_link/1`, options that are not a keyword
+  list `{:error, {:invalid_options, opts}}`, and a bad timeout, environment or URL
+  `{:error, {:invalid_option, key, value}}` (`:redacted` for the URL); `child_spec/1` itself
+  never raises on a bad `:environment` (the child id is then `DpExchange.Gemini`, and
+  `start_link/1` refuses it). A bad `:channels` or `:max_queue_len` is not judged up front: it
+  raises `ArgumentError` from the feed's `init/1`. The child id is
   `:name` when given, else `DpExchange.Gemini` (production) or `DpExchange.Gemini.Sandbox`
   (sandbox), so both environments can sit in one tree unnamed. The child is
   declared `type: :supervisor`. See `c:DpExchange.Core.Venue.child_spec/1` for the contract.
@@ -264,15 +280,21 @@ defmodule DpExchange.Gemini do
     }
   end
 
+  # An environment `Environment.resolve/1` refuses (`environment: :sandox`) must not raise here:
+  # `start_link/1` answers it `{:error, {:invalid_option, :environment, value}}`, and a raise in
+  # `child_spec/1` fired first, in the consumer's supervisor, with a different shape. The id
+  # falls back to the production default; the tree then refuses to start, so nothing runs.
   defp default_child_id(opts) do
     case Environment.resolve(opts) do
       :production -> __MODULE__
       :sandbox -> DpExchange.Gemini.Sandbox
     end
+  rescue
+    ArgumentError -> __MODULE__
   end
 
   @doc """
-  Starts this venue's supervision tree (rate limiter and feed) by delegating to
+  Starts this venue's supervision tree (ledger, rate limiter and feed) by delegating to
   `DpExchange.Gemini.Supervisor.start_link/1`.
 
   Prefer supervising `{DpExchange.Gemini, opts}`. See `c:DpExchange.Core.Venue.start_link/1`
@@ -324,7 +346,7 @@ defmodule DpExchange.Gemini do
   What this venue can do and how well that is known, per endpoint.
 
   Every implemented endpoint is declared `:experimental`; those in `venue_does_not_serve/0`
-  (and the two not yet ported) are `:unsupported`. Ceilings, timeframes and the
+  (and `list_portfolios/1`, not yet ported) are `:unsupported`. Ceilings, timeframes and the
   `measured_at` / `measured_against` provenance are carried in the result. See
   `c:DpExchange.Core.Venue.capabilities/0`.
   """
@@ -451,7 +473,12 @@ defmodule DpExchange.Gemini do
           "probed live, and said so rather than implied otherwise. The socket matches each " <>
           "subscribe/unsubscribe answer to its request by a client-chosen id, which the " <>
           "AsyncAPI document says the venue echoes; an integer id other than 1 and 2 was " <>
-          "NOT probed live."
+          "NOT probed live. max_leverage 5 is the venue's marketing line \"Trade Crypto " <>
+          "with Up to 5x Leverage\", NOT in the committed OpenAPI or docs/reference/ and " <>
+          "NOT probed; supported_order_types and supported_time_in_force are read from " <>
+          "the vendor's OpenAPI order-placement text (docs/reference/gemini/openapi/" <>
+          "rest.yaml, execution options maker-or-cancel, immediate-or-cancel, " <>
+          "fill-or-kill), read from documentation, not probed live."
     )
   end
 
@@ -917,8 +944,10 @@ defmodule DpExchange.Gemini do
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
   @doc """
-  Cancels one order by id. The id is a string of digits; an unknown order is
-  `{:refused, :not_found}`. Sent once, never retried.
+  Cancels one order by id. The id is a string of digits (anything else is
+  `{:error, {:invalid_order_id, id}}`, before anything is sent); an unknown order is
+  `{:refused, :not_found}`, which an order already filled may also answer. Sent once, never
+  retried.
   """
   @impl true
   def cancel_order(credentials, order_id, opts \\ []),
@@ -940,8 +969,8 @@ defmodule DpExchange.Gemini do
       end)
 
   @doc """
-  One order's current state. The id is a string of digits; an unknown order is
-  `{:refused, :not_found}`.
+  One order's current state. The id is a string of digits (anything else is
+  `{:error, {:invalid_order_id, id}}`); an unknown order is `{:refused, :not_found}`.
   """
   @impl true
   def get_order(credentials, order_id, opts \\ []),
@@ -985,8 +1014,10 @@ defmodule DpExchange.Gemini do
   the one for `opts[:environment]`). Which kinds are delivered is set when the feed starts
   (its `:channels` option, e.g. `[:quotes, :top_of_book, :trades]`), not per call: a
   `:channels` option here is refused, `{:error, {:invalid_option, :channels, value}}`.
-  With no feed running it answers `{:error, :feed_not_started}`. See
-  `c:DpExchange.Core.Venue.subscribe/2`.
+  With no feed running it answers `{:error, :feed_not_started}`. `symbols` that are not a list
+  of non-blank strings are `{:error, {:invalid_symbols, symbols}}` and a `:to` that is neither a
+  pid nor a registered name `{:error, {:invalid_subscriber, value}}`; an `{:error, _}` means
+  nothing was recorded. See `c:DpExchange.Core.Venue.subscribe/2`.
   """
   @impl true
   def subscribe(symbols, opts \\ []) do
@@ -1120,8 +1151,8 @@ defmodule DpExchange.Gemini do
   opposed to `coverage/1`, which is what is observed delivering.
 
   Answers `[]` when no feed is running or the feed cannot be reached. A symbol in this list
-  that is absent from `coverage/1` is one the venue has not (yet) delivered for. Not part of
-  Core's `Venue` behaviour at the pinned Core version, so it carries no `@impl`.
+  that is absent from `coverage/1` is one the venue has not (yet) delivered for. Declared by
+  `c:DpExchange.Core.Venue.wanted/1`.
   """
   @spec wanted(keyword()) :: [String.t()]
   @impl true
@@ -1727,8 +1758,8 @@ defmodule DpExchange.Gemini do
   # **No quote-status endpoint.** The venue quotes and executes; it does not answer "what
   # became of quote N". A caller that lost a quote re-quotes.
   @doc """
-  Not served by this package: answers `{:error, :not_supported}`. The venue has no
-  quote-status endpoint.
+  Not served by this venue: answers `{:error, :not_supported}`. The venue has no
+  quote-status endpoint (only a quote and an execute).
 
   See `c:DpExchange.Core.Venue.get_conversion/2`.
   """
@@ -1929,7 +1960,8 @@ defmodule DpExchange.Gemini do
 
   Returns `{:error, :below_current}` rather than lowering the counter, and
   `{:error, :above_counter_range}` for a mark beyond `2^64 - 1` — that key must be rotated,
-  and no option here changes it.
+  and no option here changes it. A value that is not a positive integer is
+  `{:error, :invalid_seed}`.
   """
   @spec seed_nonce(pos_integer()) ::
           :ok | {:error, :below_current | :above_counter_range | :invalid_seed}

@@ -114,7 +114,7 @@ defmodule DpExchange.Gemini.SocketTest do
 
       assert_receive {:dp_exchange, :gemini, %TopOfBook{bid: bid, ask: ask}}
       assert Decimal.equal?(bid, Decimal.new("77845.79000"))
-      assert ask
+      assert Decimal.equal?(ask, Decimal.new("77846.48000"))
 
       refute_received {:dp_exchange, :gemini, %Quote{}}
     end
@@ -151,7 +151,9 @@ defmodule DpExchange.Gemini.SocketTest do
       assert_receive {:dp_exchange, :gemini, %TopOfBook{} = top}
       assert Decimal.equal?(top.bid, Decimal.new("77845.79000"))
       assert top.venue_time == nil, "the venue stated no time, and nil says exactly that"
-      assert top.observed_at, "freshness is still stated, by the field that says what it is"
+
+      assert %DateTime{} = top.observed_at,
+             "freshness is still stated, by the field that says what it is"
 
       assert_receive {:dp_exchange, :gemini, %Quote{} = quoted}
       assert Decimal.equal?(quoted.price, Decimal.new("77834.11000"))

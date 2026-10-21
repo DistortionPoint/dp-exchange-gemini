@@ -164,6 +164,29 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
     end
   end
 
+  # `OptionKeys.allowed/1` raises `KeyError` for a function with no row, which is how a row is
+  # told from its absence.
+  defp tabled?(function) do
+    is_list(OptionKeys.allowed(function))
+  rescue
+    KeyError -> false
+  end
+
+  test "every facade function with a row in OptionKeys has a row in this file's table" do
+    # The moduledoc promises that a function added later without a row here fails a test. The
+    # test above only goes one way (this table into OptionKeys), so a new facade function with
+    # a table row and no entry in `@positional` was never refused-key checked at all.
+    covered = Map.keys(@positional) ++ @raising
+
+    tabled =
+      for {function, _arity} <- Gemini.__info__(:functions), tabled?(function), uniq: true do
+        function
+      end
+
+    assert tabled != [], "no facade function is in the table: the sweep is empty"
+    assert tabled -- covered == []
+  end
+
   test "get_order_book answers {:unsupported_option, :limit}, never unknown_option" do
     expected = {:error, {:unsupported_option, :limit}}
 
@@ -410,12 +433,13 @@ defmodule DpExchange.Gemini.UnknownOptionTest do
     test "the Fake refuses it the same way, and answers without :account" do
       assert Fake.get_balances(@oauth, account: "sub") == @unsupported
       assert Fake.list_networks("BTC", credentials: @oauth, account: "sub") == @unsupported
-      refute match?({:error, {:unsupported_option, _}}, Fake.get_balances(@oauth, []))
+      # Answers, rather than merely not being this one refusal: any other error would pass a
+      # bare `refute match?`.
+      assert {:ok, [_balance | _rest]} = Fake.get_balances(@oauth, [])
     end
 
     test "an API key still carries :account" do
-      result = Fake.get_balances(@credentials, account: "sub")
-      refute match?({:error, {:unsupported_option, _}}, result)
+      assert {:ok, [_balance | _rest]} = Fake.get_balances(@credentials, account: "sub")
     end
   end
 

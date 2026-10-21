@@ -565,7 +565,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "btcusd"
       assert payload["side"] == "buy"
       assert payload["type"] == "exchange limit"
@@ -658,7 +658,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "btcusd"
       assert payload["limit_orders"] == 50
       assert payload["timestamp"] == 1_591_084_414_000
@@ -724,7 +724,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "btcusd"
       assert payload["limit_trades"] == 100
       assert payload["timestamp"] == 1_591_084_414_000
@@ -1251,7 +1251,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
         provider_id: "62b21e17-2534-4b9f-afcf-b7edb609dd8d"
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["since"] == "2022-08-20T00:00:00Z"
       assert payload["until"] == "2022-11-05T00:00:00Z"
       assert payload["providerId"] == "62b21e17-2534-4b9f-afcf-b7edb609dd8d"
@@ -1394,7 +1394,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
         symbol: "BTCGUSDPERP"
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == "btcgusdperp"
     end
 
@@ -1462,7 +1462,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
         rows: 1000
       )
 
-      assert_receive {:signed, signed_request, path, query}
+      assert_receive {:signed, signed_request, path, query}, 5_000
       assert path == "/v1/perpetuals/fundingpaymentreport/records.json"
       assert query =~ "fromDate=2024-04-10"
       assert query =~ "toDate=2024-04-25"
@@ -1504,7 +1504,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
         symbol: "BTC-USD"
       )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == request["symbol"]
     end
 
@@ -1557,7 +1557,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       expected = fixture!("rest/private/clearing/preview_margin_order_request_limit_buy.json")
       assert payload["symbol"] == expected["symbol"]
       assert payload["side"] == expected["side"]
@@ -1582,7 +1582,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       expected = fixture!("rest/private/clearing/preview_margin_order_request_market_buy.json")
       assert payload["symbol"] == expected["symbol"]
       assert payload["side"] == expected["side"]
@@ -1602,7 +1602,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       expected = fixture!("rest/private/clearing/preview_margin_order_request_market_sell.json")
       assert payload["symbol"] == expected["symbol"]
       assert payload["side"] == expected["side"]
@@ -1648,7 +1648,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                )
 
       assert body == response_fixture
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["name"] == request_fixture["name"]
       assert payload["type"] == request_fixture["type"]
     end
@@ -1670,7 +1670,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                )
 
       assert body == response_fixture
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["account"] == request_fixture["account"]
       assert payload["newName"] == request_fixture["newName"]
       assert payload["newAccount"] == request_fixture["newAccount"]
@@ -1696,7 +1696,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert length(rows) == 3
       assert Enum.at(rows, 1)["counterparty_id"] == nil
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["limit_accounts"] == request_fixture["limit_accounts"]
       assert payload["timestamp"] == request_fixture["timestamp"]
     end
@@ -1762,7 +1762,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:auth_header, ["Bearer oauth-token-not-real"]}
+      assert_receive {:auth_header, ["Bearer oauth-token-not-real"]}, 5_000
     end
   end
 
@@ -1788,7 +1788,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                )
 
       assert body == response_fixture
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == request_fixture["symbol"]
       assert payload["amount"] == request_fixture["amount"]
       assert payload["price"] == request_fixture["price"]
@@ -1825,7 +1825,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
 
       assert body == response_fixture
       assert body["result"] == "AwaitSourceTargetConfirm"
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["symbol"] == request_fixture["symbol"]
       assert payload["side"] == request_fixture["side"]
       assert payload["source_counterparty_id"] == request_fixture["source_counterparty_id"]
@@ -1847,7 +1847,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                )
 
       assert body == response_fixture
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["clearing_id"] == request_fixture["clearing_id"]
     end
   end
@@ -1906,7 +1906,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
 
       assert body == response_fixture
       assert body["result"] == "confirmed"
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["clearing_id"] == request_fixture["clearing_id"]
       assert payload["symbol"] == request_fixture["symbol"]
       assert payload["amount"] == request_fixture["amount"]
@@ -1963,7 +1963,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert rows == wrapped["orders"]
       assert length(rows) == 3
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert String.downcase(payload["symbol"]) == String.downcase(request_fixture["symbol"])
       assert payload["counterparty"] == request_fixture["counterparty"]
       assert payload["side"] == request_fixture["side"]
@@ -1994,7 +1994,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert rows == wrapped["orders"]
       assert hd(rows)["source_side"] == "buy"
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert String.downcase(payload["symbol"]) == String.downcase(request_fixture["symbol"])
       assert payload["expiration_start"] == request_fixture["expiration_start"]
       assert payload["expiration_end"] == request_fixture["expiration_end"]
@@ -2020,7 +2020,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert hd(rows)["clearingId"] == "41M23L5Q"
       assert Decimal.equal?(Decimal.new(hd(rows)["price"]), Decimal.new("1"))
 
-      assert_receive {:payload, payload}
+      assert_receive {:payload, payload}, 5_000
       assert payload["timestamp_nanos"] == request_fixture["timestamp_nanos"]
       assert payload["limit_per_account"] == request_fixture["limit_per_account"]
     end

@@ -124,7 +124,7 @@ defmodule DpExchange.Gemini.TickAqTest do
 
       assert map_size(twice.last_trade_price) == 1
       assert_receive {:dp_exchange, :gemini, %Quote{symbol: "BTC-USD"}}, 5_000
-      refute_receive {:dp_exchange, :gemini, %Quote{}}
+      refute_receive {:dp_exchange, :gemini, %Quote{}}, 500
     end
   end
 
@@ -283,13 +283,17 @@ defmodule DpExchange.Gemini.TickAqTest do
     end
 
     test "one stated increment is enough, and the other stays nil" do
-      for {key, value} <- [{"tick_size", 1.0e-8}, {"quote_increment", 0.01}] do
+      # `tick_size` is the base-asset (quantity) increment, `quote_increment` the price one.
+      for {key, value, stated, absent} <- [
+            {"tick_size", 1.0e-8, :quantity_increment, :price_increment},
+            {"quote_increment", 0.01, :price_increment, :quantity_increment}
+          ] do
         opts = [plug: responding(%{key => value}), retry_attempts: 0]
 
         assert {:ok, quantization} = Rest.quantization("BTC-USD", opts)
 
-        increments = [quantization.price_increment, quantization.quantity_increment]
-        assert Enum.count(increments, &is_nil/1) == 1
+        assert %Decimal{} = Map.fetch!(quantization, stated)
+        assert Map.fetch!(quantization, absent) == nil
       end
     end
   end

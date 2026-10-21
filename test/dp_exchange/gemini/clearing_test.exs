@@ -468,13 +468,13 @@ defmodule DpExchange.Gemini.ClearingTest do
       # here answers 200, so a read has nothing to retry.
       creds = [credentials: @credentials]
 
-      assert {:ok, _order} =
+      assert {:ok, %{"clearing_id" => "c-1"}} =
                DpExchange.Gemini.create_clearing_order(
                  @terms,
                  creds ++ [plug: responding(%{"clearing_id" => "c-1"})]
                )
 
-      assert {:ok, _order} =
+      assert {:ok, %{"clearing_id" => "c-1"}} =
                DpExchange.Gemini.create_broker_clearing_order(
                  @terms,
                  creds ++
@@ -486,16 +486,19 @@ defmodule DpExchange.Gemini.ClearingTest do
                    ]
                )
 
-      assert {:ok, _order} =
-               DpExchange.Gemini.get_clearing_order("c-1", creds ++ [plug: responding(%{})])
+      assert {:ok, %{"is_confirmed" => true}} =
+               DpExchange.Gemini.get_clearing_order(
+                 "c-1",
+                 creds ++ [plug: responding(%{"is_confirmed" => true})]
+               )
 
-      assert {:ok, _result} =
+      assert {:ok, %{"result" => "ok"}} =
                DpExchange.Gemini.cancel_clearing_order(
                  "c-1",
                  creds ++ [plug: responding(%{"result" => "ok"})]
                )
 
-      assert {:ok, _result} =
+      assert {:ok, %{"result" => "confirmed"}} =
                DpExchange.Gemini.confirm_clearing_order(
                  "c-1",
                  @terms,

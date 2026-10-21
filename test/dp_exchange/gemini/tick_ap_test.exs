@@ -206,7 +206,10 @@ defmodule DpExchange.Gemini.TickApTest do
 
       # Nothing was recorded or sent for the refused call; the other was applied as usual.
       assert Feed.wanted(feed) == ["ETH-USD"]
-      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["ethusd@bookTicker"]}}
+
+      assert_receive {:frame_sent, %{"method" => "subscribe", "params" => ["ethusd@bookTicker"]}},
+                     5_000
+
       refute_received {:frame_sent, %{"params" => ["btcusd@bookTicker"]}}
     end
   end

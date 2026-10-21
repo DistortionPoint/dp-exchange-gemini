@@ -148,6 +148,11 @@ defmodule DpExchange.Gemini.TickABInterleavingsTest do
       end)
 
       send(feed, {:dp_exchange, :gemini, :reconnected, socket})
+
+      # Wait for the resubscribe worker: it forwards its frames before it answers, so a frame
+      # that was going to be sent is already in this mailbox once it has finished. Without this
+      # the refusal below could pass before the frame it guards against had been written.
+      FeedSync.await_resubscribe(feed)
       state = :sys.get_state(feed)
 
       refute_received {:frame_sent, _frame}

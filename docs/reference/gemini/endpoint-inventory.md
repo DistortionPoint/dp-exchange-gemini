@@ -15,7 +15,11 @@ recorded through `capabilities/0` rather than re-derived here from a page count.
 **Current, from `capabilities/0`, checked 2026-09-06**: 63 of 88 contract callbacks
 `:experimental`, 25 `:unsupported`, of which 22 are the venue's own absence — see
 `negative-claims.md` — and 3 remain not yet ported (`get_conversion/2`,
-`list_portfolios/1`, `list_instruments/1`).
+`list_portfolios/1`, `list_instruments/1`). **Superseded 2026-10-21:** `list_instruments/1`
+shipped 2026-10-08 (issue #4), and `get_conversion/2` moved from "not ported" to the venue's own
+absence (the specifications publish a conversion quote and an execute and no quote-status
+read), so 23 are the venue's absence and one, `list_portfolios/1`, is not yet ported. The
+callback total has grown since 2026-09-06; read the counts from `capabilities/0`.
 
 | group | endpoints (vendor) | in this package |
 |---|---|---|

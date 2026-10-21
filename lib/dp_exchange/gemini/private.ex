@@ -425,11 +425,11 @@ defmodule DpExchange.Gemini.Private do
       symbol: lenient_symbol(body["symbol"]),
       side: side(body["side"]),
       order_type: order_type_of(body),
-      quantity: decimal(body["original_amount"]),
+      quantity: non_negative_or_nil(decimal(body["original_amount"])),
       price: decimal(body["price"]),
       stop_price: decimal(body["stop_price"]),
       status: status_of(body),
-      filled_quantity: decimal(executed),
+      filled_quantity: non_negative_or_nil(decimal(executed)),
       average_price: if(positive?(executed), do: decimal(body["avg_execution_price"])),
       created_at: epoch_ms(body["timestampms"]),
       updated_at: nil,
@@ -730,6 +730,11 @@ defmodule DpExchange.Gemini.Private do
   venue's schema names. One that is not a string of digits in that range (an integer, `nil`,
   a blank string) is `{:error, {:invalid_order_id, id}}`, before anything is signed. An
   order the venue does not know is `{:refused, :not_found}`. Sent once, never retried.
+
+  **`{:ok, order}` is the order as the venue now describes it, not a promise that it was
+  cancelled.** A cancel of an order that already executed in full is answered with that order
+  (`status: :filled`); one that landed after a partial fill is `status: :cancelled` with the
+  fill kept in `filled_quantity`. Read `order.status`.
   """
   @spec cancel_order(map(), String.t(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
@@ -1114,7 +1119,8 @@ defmodule DpExchange.Gemini.Private do
   The endpoint a `cancel_all_orders/2` scope names, or the refusal for one it does not.
 
   Checked before anything is signed, so a call with no scope is `{:error, :scope_required}`
-  whether or not it carries credentials. Exposed so `DpExchange.Gemini.Fake` refuses with
+  and a scope that is neither `:session` nor `:account` is
+  `{:error, {:unsupported_scope, scope}}`, whether or not it carries credentials. Exposed so `DpExchange.Gemini.Fake` refuses with
   this function in the same order.
   """
   @spec cancel_scope(term()) :: {:ok, String.t()} | {:error, term()}
@@ -1751,6 +1757,7 @@ defmodule DpExchange.Gemini.Private do
          {:ok, price} <- order_decimal(body, "price"),
          {:ok, stop_price} <- order_decimal(body, "stop_price"),
          {:ok, filled} <- order_decimal(body, "executed_amount"),
+         :ok <- non_negative_amounts(quantity, filled),
          {:ok, average} <- order_average(body),
          {:ok, created_at} <- order_time(body),
          :ok <- order_flags(body) do
@@ -1776,6 +1783,20 @@ defmodule DpExchange.Gemini.Private do
   end
 
   defp to_order(_body), do: {:error, :unexpected_response_shape}
+
+  # `Core.Types.Order` refuses a quantity or filled quantity below zero, so a venue row stating
+  # one is a malformed reply, not an order.
+  defp non_negative_amounts(quantity, filled) do
+    if negative?(quantity) or negative?(filled),
+      do: {:error, :unexpected_response_shape},
+      else: :ok
+  end
+
+  defp negative?(nil), do: false
+  defp negative?(%Decimal{} = amount), do: Decimal.negative?(amount)
+
+  defp non_negative_or_nil(nil), do: nil
+  defp non_negative_or_nil(amount), do: if(negative?(amount), do: nil, else: amount)
 
   # **`is_live` and `is_cancelled` are JSON booleans, or absent.** `status_of/1` matches only a
   # literal `true`, so `"is_live": "true"` (or `1`) fell through to `:pending` or `:filled` and
@@ -1910,14 +1931,53 @@ defmodule DpExchange.Gemini.Private do
   # reading it would wait for more fills on an order the venue has already closed. The order
   # is finished; how much of it filled is `filled_quantity`, which carries it exactly.
   # `:filled` is kept for a cancel that arrived after the whole amount executed.
-  defp status_of(%{"is_cancelled" => true} = body) do
+  #
+  # **Flags that contradict each other, or the amounts, are `nil`, never a guess (tick AR).**
+  # `is_live` and `is_cancelled` both `true`, a "live" order whose whole amount executed
+  # (`is_live` is "has remaining quantity and has not been canceled", rest.yaml `Order`), and
+  # an order neither live nor cancelled that is not fully executed (the venue states no status
+  # for it; `:partially_filled` would claim it is still working) each say something the venue's
+  # own definitions rule out, so no status is stated.
+  #
+  # **Amounts that cannot describe an order are `nil` too (tick AR, Core `Order.new`).** An
+  # executed amount below zero or above the original, or an original that is not above zero,
+  # cannot sit beside any status: `Order.new` raises on `:filled` or `:partially_filled` with
+  # nothing filled, on a working status with the whole quantity filled, and on `:filled` with
+  # only part filled.
+  defp status_of(body) do
+    if amounts_consistent?(body["executed_amount"], body["original_amount"]),
+      do: flag_status(body),
+      else: nil
+  end
+
+  defp amounts_consistent?(executed_amount, original_amount) do
+    case {decimal(executed_amount), decimal(original_amount)} do
+      {nil, nil} -> true
+      {executed, nil} -> not Decimal.negative?(executed)
+      {nil, original} -> Decimal.positive?(original)
+      {executed, original} -> consistent_pair?(executed, original)
+    end
+  end
+
+  defp consistent_pair?(executed, original) do
+    not Decimal.negative?(executed) and Decimal.positive?(original) and
+      Decimal.compare(executed, original) != :gt
+  end
+
+  defp flag_status(%{"is_cancelled" => true, "is_live" => true}), do: nil
+
+  defp flag_status(%{"is_cancelled" => true} = body) do
     if fully_filled?(body["executed_amount"], body["original_amount"]),
       do: :filled,
       else: :cancelled
   end
 
-  defp status_of(%{"is_live" => true} = body) do
-    if positive?(body["executed_amount"]), do: :partially_filled, else: :open
+  defp flag_status(%{"is_live" => true} = body) do
+    cond do
+      fully_filled?(body["executed_amount"], body["original_amount"]) -> nil
+      positive?(body["executed_amount"]) -> :partially_filled
+      true -> :open
+    end
   end
 
   # Neither live nor cancelled. With a fill it is `:filled`; with none, `:pending`, accepted
@@ -1927,13 +1987,17 @@ defmodule DpExchange.Gemini.Private do
   #
   # `:filled` only when the whole amount executed, the check the cancelled clause already
   # makes. Any fill made it `:filled`, so `:filled` did not mean `filled_quantity == quantity`.
-  defp status_of(body) do
+  defp flag_status(body) do
     cond do
-      fully_filled?(body["executed_amount"], body["original_amount"]) -> :filled
-      positive?(body["executed_amount"]) -> :partially_filled
+      fully_filled?(body["executed_amount"], body["original_amount"]) -> filled_or_unknown(body)
+      positive?(body["executed_amount"]) -> nil
       true -> :pending
     end
   end
+
+  # A stated `remaining_amount` above zero beside a fully executed order is a contradiction.
+  defp filled_or_unknown(body),
+    do: if(positive?(body["remaining_amount"]), do: nil, else: :filled)
 
   defp positive?(nil), do: false
 
@@ -2340,8 +2404,9 @@ defmodule DpExchange.Gemini.Private do
 
   The five terms the quote was made at (`:symbol`, `:side`, `:amount`, `:price`, `:fee`) first,
   as `{:error, {:missing_option, missing}}`, then the quote id, as
-  `{:error, {:invalid_quote_id, id}}`, then the numbers (`{:error, {:invalid_amount, v}}` for a
-  float). Exposed so `DpExchange.Gemini.Fake` refuses with this exact function, in the same
+  `{:error, {:invalid_quote_id, id}}`, then the side (`:buy`, `:sell`, `"buy"` or `"sell"`,
+  else `{:error, {:invalid_side, side}}`), then the numbers (`{:error, {:invalid_amount, v}}`
+  for a float). Exposed so `DpExchange.Gemini.Fake` refuses with this exact function, in the same
   order, and answers with what was committed rather than a fixed pair.
   """
   @spec commit_terms(term(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -2433,8 +2498,10 @@ defmodule DpExchange.Gemini.Private do
   @doc """
   The venue symbol and side a conversion between `from` and `to` is made at.
 
-  From `opts[:symbol]` and `opts[:side]` when both are given (`:buy` or `:sell`); one without
-  the other is `{:error, {:missing_option, [:symbol, :side]}}`; neither derives them from the
+  From `opts[:symbol]` and `opts[:side]` when both are given (a string symbol, and `:buy` or
+  `:sell` as an atom); one without the other, or a side that is not one of those two atoms, is
+  `{:error, {:missing_option, [:symbol, :side]}}` and a blank symbol is
+  `{:error, {:invalid_option, :symbol, symbol}}`; neither derives them from the
   assets and refuses with `{:error, {:ambiguous_conversion, from, to}}` when that is not
   determinable. Checked before anything is signed. Exposed so `DpExchange.Gemini.Fake`
   refuses with this function in the same order.
@@ -3022,7 +3089,12 @@ defmodule DpExchange.Gemini.Private do
   venue gave a pending status with no activation time — unknown, not "ready".
 
   `opts[:network]` selects; there is no all-networks variant, because the venue keeps a list
-  per network.
+  per network. It is required (`{:error, {:missing_option, :network}}`).
+
+  `status` is read from the venue's `active`, `pending-time` and `pending-mua`; the two
+  pending words are both `:pending`, and one the venue does not state is `:pending` too. A
+  status the venue stated that is none of these refuses the page,
+  `{:error, :unexpected_response_shape}`; it is never read as `:pending`.
   """
   @spec list_approved_addresses(map(), keyword()) ::
           {:ok, [ApprovedAddress.t()]} | {:error, term()} | {:refused, term()}
@@ -3078,8 +3150,9 @@ defmodule DpExchange.Gemini.Private do
     # `createdAt` absent or `null` is `nil`; one the venue sent and this package cannot read
     # (text, zero, out of range) refuses the row rather than reading as "no time".
     with {:ok, address} <- required_id(row["address"], :address),
-         {:ok, created_at} <- stated_created_at(row["createdAt"]) do
-      {:ok, to_approved_address(row, network, address, created_at)}
+         {:ok, created_at} <- stated_created_at(row["createdAt"]),
+         {:ok, status} <- approval_status(row["status"]) do
+      {:ok, build_approved_address(row, network, {address, created_at, status})}
     end
   end
 
@@ -3092,13 +3165,13 @@ defmodule DpExchange.Gemini.Private do
     end
   end
 
-  defp to_approved_address(row, network, address, created_at) do
+  defp build_approved_address(row, network, {address, created_at, status}) do
     %ApprovedAddress{
       address: address,
       # Text, as the field is typed: a number or an object the venue put in `network` was carried
       # onto the entry whole.
       network: text_or_nil(row["network"]) || network,
-      status: approval_status(row["status"]),
+      status: status,
       asset: nil,
       label: text_or_nil(row["label"]),
       # The venue publishes `createdAt` and no activation time. `usable?/2` therefore
@@ -3109,11 +3182,20 @@ defmodule DpExchange.Gemini.Private do
     }
   end
 
-  # The venue's own words. Anything it invents later is `:pending` rather than `:active`:
-  # treating an unknown status as usable is the direction that loses money.
-  defp approval_status("active"), do: :active
-  defp approval_status("rejected"), do: :rejected
-  defp approval_status(_pending_or_unknown), do: :pending
+  # The venue's own words (`ApprovedAddress.status`, rest.yaml): `active`, `pending-time` (the
+  # 7-day lock) and `pending-mua` (another administrator must approve), the last two both
+  # `:pending`. `rejected` is not in the committed spec but is the contract's own word for a
+  # refused entry, so it is read, not guessed at. A status the venue did not state is
+  # `:pending` with no activation time, which `usable?/2` answers `nil` ("unknown"). **A status
+  # it DID state and this package has no word for refuses the row**: it used to read as
+  # `:pending`, a guess that a status the venue may mean as terminal (a removed or refused
+  # address) is still waiting to become usable.
+  defp approval_status("active"), do: {:ok, :active}
+  defp approval_status("rejected"), do: {:ok, :rejected}
+  defp approval_status("pending-time"), do: {:ok, :pending}
+  defp approval_status("pending-mua"), do: {:ok, :pending}
+  defp approval_status(nil), do: {:ok, :pending}
+  defp approval_status(_unknown), do: {:error, :unexpected_response_shape}
 
   defp epoch_ms_to_datetime(nil), do: nil
 
@@ -3150,7 +3232,9 @@ defmodule DpExchange.Gemini.Private do
 
   This moves no funds. `withdraw/6` does.
 
-  The same pre-signing checks as `withdraw/6` apply to `asset`, `network` and `amount`. A
+  `opts[:address]` is required (`{:error, {:missing_option, :address}}` when absent or blank,
+  `{:error, {:invalid_address, value}}` when not a string). The same pre-signing checks as
+  `withdraw/6` apply to `asset`, `network` and `amount`. A
   reply with no readable `fee` is `{:error, :unexpected_response_shape}`, not an estimate of
   `nil`.
   """
@@ -3275,8 +3359,9 @@ defmodule DpExchange.Gemini.Private do
 
   Before anything is signed, `asset`, `network` and `address` must be non-blank strings
   (`{:error, {:invalid_asset | :invalid_network | :invalid_address, value}}`) and `amount` a
-  finite number above zero (`{:error, {:invalid_amount, value}}`). A `:memo` that is not a string or a non-negative whole number is
-  `{:error, {:invalid_memo, memo}}`. A blank `opts[:client_transfer_id]` is treated as none, and
+  finite number above zero (`{:error, {:invalid_amount, value}}`). A `:memo` that is not a
+  string or a non-negative whole number is `{:error, {:invalid_memo, memo}}`, and
+  `memo_required: true` with no usable memo is `{:error, :memo_required}`. A blank `opts[:client_transfer_id]` is treated as none, and
   one is generated; one that is neither a string nor absent is
   `{:error, {:invalid_option, :client_transfer_id, value}}`, never replaced by a generated key.
 
@@ -4434,10 +4519,12 @@ defmodule DpExchange.Gemini.Private do
   unbonds. All three travel; `nil` on the last two means the venue does not report progress,
   **not** that the operation is complete.
 
-  `:type` is the normalised atom and `:venue_type` keeps Gemini's own word — `Deposit`,
-  `Redeem`, `Interest` and others. A normalisation that loses the original cannot be audited
-  when it turns out to be wrong, and an unrecognised word maps to `:other` rather than to
-  the nearest one that fits.
+  `:type` is the normalised atom and `:venue_type` keeps Gemini's own word. `Deposit` is
+  `:stake`, `Redeem` is `:unstake` and `Interest` is `:reward`; the rest of the venue's
+  `transactionType` enum (`RedeemPayment`, `AdminRedeem`, `AdminCreditAdjustment`,
+  `AdminDebitAdjustment`) and any word it adds later map to `:other` rather than to the
+  nearest one that fits. A normalisation that loses the original cannot be audited when it
+  turns out to be wrong, so `:venue_type` is always the venue's own text.
 
   `opts[:since]` and `opts[:until]` go out **in ISO datetime with timezone format**
   (`rest.yaml:6729,6733`; the request example at `:6758` gives
@@ -4844,6 +4931,12 @@ defmodule DpExchange.Gemini.Private do
   **Realised and unrealised P&L stay apart.** One has happened; the other is a mark-to-market
   opinion that may never be realised.
 
+  **A row with a quantity of exactly zero is dropped**, not returned: the list is the venue's
+  `openPositions` and a flat row is not open. A row with no symbol is
+  `{:error, {:missing_required_field, :symbol}}` and a quantity that cannot be read refuses
+  the reply. `instrument_type` is `:perp` or `:spot` (the venue's two words, `OpenPosition` in
+  `rest.yaml`); any other word is `nil`.
+
   `liquidation_price` is `nil` here: `/v1/positions` does not publish one. **That does not
   mean the position is safe** — `get_account_margin/2` publishes
   `estimated_liquidation_price` for the account, which is where a caller must look.
@@ -5021,7 +5114,7 @@ defmodule DpExchange.Gemini.Private do
   which `get_positions/2` does not publish. A caller judging how much room is left reads it
   here.
 
-  Returned as the venue's own map. Its eleven fields divide margin four ways — by position,
+  Returned as the venue's own map. Its fields divide margin four ways — by position,
   by open order, by buy side and by sell side — and a struct that kept only a total would
   drop the split a caller sizing its next order needs.
 
@@ -5149,8 +5242,8 @@ defmodule DpExchange.Gemini.Private do
   `symbol` is required by the venue, so a `nil`, blank or non-string one is
   `{:error, {:invalid_option, :symbol, symbol}}`. `opts[:from]` and `opts[:to]` must be given
   **together or not at all** — the venue makes each mandatory if the other is present, and
-  sending one alone is refused here rather than silently returning a differently-bounded
-  report. Their values, and `opts[:rows]`, are checked as `funding_payment_report/2`'s are.
+  sending one alone is `{:error, :from_and_to_together}`, refused here rather than silently
+  returning a differently-bounded report. Their values, and `opts[:rows]`, are checked as `funding_payment_report/2`'s are.
   """
   @spec funding_amount_report(String.t() | term(), map(), keyword()) ::
           {:ok, binary()} | {:error, term()} | {:refused, term()}
@@ -5345,9 +5438,15 @@ defmodule DpExchange.Gemini.Private do
   a preview computed against a quantity the caller did not mean is a number that looks
   right.
 
-  `side` is `buy` or `sell` and `type` is `market` or `limit` (`rest.yaml:2426`); anything
-  else is `{:error, {:unknown_side, side}}` / `{:error, {:unknown_order_type, type}}` before
-  a request goes out, rather than being sized as though it were a market sell.
+  `side` is `buy` or `sell` and `type` is `market` or `limit` (`rest.yaml:2489`), lower case;
+  anything else is `{:error, {:unknown_side, side}}` / `{:error, {:unknown_order_type, type}}`
+  before a request goes out, rather than being sized as though it were a market sell. A
+  request that is not a map with a string `:symbol` and an atom or string `:side` and `:type`,
+  or whose symbol is blank, is `{:error, :missing_order_fields}`. The sizing field the order
+  needs and the request lacks is `{:error, :total_spend_required}` (market buy, `:total_spend`),
+  `{:error, :amount_required}` or `{:error, :price_required}` (limit); a number that is not
+  above zero is `{:error, {:invalid_decimal | :non_positive_amount | :invalid_amount, ...}}`
+  as for `place_order/3`.
   """
   @spec preview_margin_order(map(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -5467,8 +5566,9 @@ defmodule DpExchange.Gemini.Private do
   nothing.
 
   `opts[:type]` is `"exchange"` or `"custody"`, and the venue's own default when it is
-  omitted is `exchange`. This package does not send one: choosing between an exchange
-  account and a custody account for a caller who did not is choosing what the account can do.
+  omitted is `exchange`. This package sends `type` only when the caller gives one: choosing
+  between an exchange account and a custody account for a caller who did not is choosing what
+  the account can do.
 
   Requires the **Administrator** role.
   """
@@ -5597,7 +5697,7 @@ defmodule DpExchange.Gemini.Private do
   nothing to say it was truncated. **A full page with no `:limit` is therefore refused, not
   returned as every account:** `{:error, :history_truncated}`. Pass `:limit` to take
   exactly one page on purpose, or `:since` to narrow — the venue reads it as "created on or
-  before" (`rest.yaml:6037`), despite the name every other call gives it.
+  before" (`rest.yaml:6083`), despite the name every other call gives it.
 
   Each row's `account` is the kebab-cased shortname other endpoints address by; `name` is
   the display name. `counterparty_id` is `None` on a custody account — the venue's own
@@ -5770,8 +5870,7 @@ defmodule DpExchange.Gemini.Private do
 
   **Only reachable with an OAuth token**, not with an API key: the endpoint revokes the
   token that authenticates the call. A credential map without `access_token` is refused here
-  rather than sent, because an API-key-signed call would revoke nothing and report success
-  shape.
+  rather than sent, because an API-key-signed call would revoke nothing and report success.
 
   Once revoked the token cannot be used again, and neither can any request already in
   flight that had not reached the venue.
@@ -5805,8 +5904,11 @@ defmodule DpExchange.Gemini.Private do
   counterparty confirms it. A caller that treated a successful response as a fill has a
   position it does not have.
 
-  `symbol`, `amount`, `price` and `side` are required by the venue and are not defaulted.
-  `opts[:counterparty_id]` names the other side; `opts[:expires_in_hrs]` bounds how long the
+  `symbol`, `amount`, `price` and `side` are required by the venue and are not defaulted: a
+  request without all four (or whose `symbol` is not a string) is
+  `{:error, :missing_clearing_terms}`, a `side` that is not `:buy`, `:sell`, `"buy"` or
+  `"sell"` is `{:error, {:invalid_side, side}}`, and a bad number is refused as for
+  `place_order/3`. `opts[:counterparty_id]` names the other side; `opts[:expires_in_hrs]` bounds how long the
   offer stands.
 
   **`is_confirmed` on the response is the field that matters.** `false` means the trade has
@@ -5902,7 +6004,7 @@ defmodule DpExchange.Gemini.Private do
   because `details` is where it says why a cancel did not take.
 
   **The venue answers a cancel that did not take with HTTP 200** and `result: "failed"`
-  (`rest.yaml:3978`, its own `failedCancel` example). That is `{:refused, body}` here, not
+  (`rest.yaml:4053`, its own `failedCancel` example). That is `{:refused, body}` here, not
   `{:ok, body}`: a caller matching `{:ok, _}` would have treated an order still standing as
   cancelled. A 200 naming no `result` at all is `{:error, :unexpected_response_shape}`.
   """
@@ -5939,7 +6041,7 @@ defmodule DpExchange.Gemini.Private do
   order was created with.
 
   **Only `result: "confirmed"` is a confirmation.** A refused confirm is still HTTP 200 —
-  `result: "error"` with a `reason` and `message` (`rest.yaml:4072`, its `failedConfirm`
+  `result: "error"` with a `reason` and `message` (`rest.yaml:4164`, its `failedConfirm`
   example) — and is returned as `{:refused, body}`, not `{:ok, body}`: a caller matching
   `{:ok, _}` on a call that executes a trade would have recorded a trade that never happened.
   A 200 naming no `result` is `{:error, :unexpected_response_shape}`.
@@ -5976,7 +6078,7 @@ defmodule DpExchange.Gemini.Private do
   expire tomorrow, and filtering on the wrong one returns a real list that is not the one
   asked for.
 
-  **Each window needs both of its bounds** (`rest.yaml:4184`: "Requires `expiration_end` if
+  **Each window needs both of its bounds** (`rest.yaml:4235`: "Requires `expiration_end` if
   set", and the same for `submission_*`). One bound alone is
   `{:error, {:window_needs_both_bounds, :expiration | :submission}}` before a request goes
   out, rather than a request the venue refuses or reads as unbounded.
@@ -6072,7 +6174,7 @@ defmodule DpExchange.Gemini.Private do
   every other Gemini timestamp uses. A `DateTime` is converted to nanoseconds.
 
   **A full page with no `:limit` is refused, not returned as every trade.** The venue's page
-  is 100 by default and 300 at most (`rest.yaml:4700`) with no cursor, so the first 100
+  is 100 by default and 300 at most (`rest.yaml:4744`) with no cursor, so the first 100
   trades were answered as the whole list. With no `:limit` this asks for 300, and a reply
   that full is `{:error, :history_truncated}` (no payload): narrow with `:since_nanos`,
   or pass `:limit` to take exactly one page on purpose.

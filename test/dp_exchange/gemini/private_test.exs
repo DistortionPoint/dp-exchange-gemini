@@ -1752,12 +1752,13 @@ defmodule DpExchange.Gemini.PrivateTest do
       # `:retry_delay` was dropped before `Core.HttpClient` and the retry waited a default
       # second; forwarded since tick AK, the 1 ms retry lands in the same second. A counter
       # draws a new value per signing, so equal values here can only mean a replayed header.
-      Private.get_balances(@credentials,
-        plug: plug,
-        retry_attempts: 2,
-        retry_delay: 1,
-        nonce_mode: :incremental
-      )
+      assert {:ok, []} =
+               Private.get_balances(@credentials,
+                 plug: plug,
+                 retry_attempts: 2,
+                 retry_delay: 1,
+                 nonce_mode: :incremental
+               )
 
       assert_received {:nonce, first}
       assert_received {:nonce, second}

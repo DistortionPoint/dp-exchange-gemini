@@ -129,9 +129,11 @@ defmodule DpExchange.Gemini.TickNReviewTest do
     end
 
     test "a valid id still reaches the venue" do
-      opts = [plug: json(%{}), retry_attempts: 0]
+      body = %{"result" => "ok", "clearing_id" => "c-1"}
+      opts = [plug: payload_plug(body, self()), retry_attempts: 0]
 
-      assert {:ok, %{}} = Private.get_clearing_order("c-1", @credentials, opts)
+      assert {:ok, ^body} = Private.get_clearing_order("c-1", @credentials, opts)
+      assert_receive {:payload, %{"clearing_id" => "c-1"}}, 5_000
     end
   end
 
@@ -518,7 +520,15 @@ defmodule DpExchange.Gemini.TickNReviewTest do
         assert query =~ expected
       end
 
-      assert {:ok, _book} = Fake.get_order_book("BTC-USD", depth: 3)
+      # The fake narrows by the same option: the first level a side, and the whole ladder
+      # for 0 (the venue's "full book") and nil.
+      assert {:ok, one} = Fake.get_order_book("BTC-USD", depth: 1)
+      assert length(one.bids) == 1
+      assert length(one.asks) == 1
+
+      assert {:ok, whole} = Fake.get_order_book("BTC-USD", depth: 0)
+      assert length(whole.bids) > 1
+      assert length(whole.asks) > 1
     end
   end
 

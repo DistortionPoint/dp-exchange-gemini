@@ -85,7 +85,8 @@ defmodule DpExchange.Gemini.Rest do
       same timestamp in one reply refuse it `{:error, {:duplicate_candle, time}}`. Both
       checks are UNMEASURED against the live venue: they fail closed on what the vendor
       does not state (and its own example repeats a timestamp).
-    * An open, high, low or close <= 0 refuses the reply.
+    * An open, high, low or close <= 0 refuses the reply, as does a bar whose low is above its
+      high (`{:inconsistent_candle, opened_at}`) and a negative volume.
   """
 
   alias DpExchange.Core.{Config, HttpClient, Timeframe}
@@ -324,8 +325,21 @@ defmodule DpExchange.Gemini.Rest do
     * a bar not aligned to its width → `{:error, {:unaligned_candle, time}}` (unmeasured)
     * two bars with one timestamp → `{:error, {:duplicate_candle, opened_at}}` (unmeasured)
     * an open, high, low or close <= 0 → `{:error, {:non_positive_price, field, value}}`
-    * an unknown width → `{:error, {:unsupported_timeframe, width}}`
+    * a bar whose low is above its high → `{:error, {:inconsistent_candle, opened_at}}`
+    * a negative or unreadable volume → `{:error, {:negative_volume, raw}}` or
+      `{:error, {:invalid_decimal, :volume, raw}}`; an unreadable price →
+      `{:error, {:invalid_decimal, field, value}}` or `{:error, {:missing_required_field, field}}`
+    * a bar time that is not a whole millisecond epoch from 2015 on →
+      `{:error, {:unparseable_venue_timestamp, value}}`; a row that is not six elements →
+      `{:error, :unexpected_response_shape}`
+    * an unknown width → `{:error, {:unsupported_timeframe, width}}`; a **perpetual** symbol
+      serves `1m` only (the venue's derivatives candles), so any other width for one is the
+      same error rather than a spot series for a different instrument
     * a `:start` older than the window can reach → `{:error, {:range_unavailable, …}}`
+    * a blank or non-string symbol → `{:error, {:invalid_symbol, symbol}}`; a `range` that is
+      not a keyword list of `DateTime` bounds → `{:error, {:invalid_range, range}}`; an
+      `:include_partial` that is not a boolean →
+      `{:error, {:invalid_option, :include_partial, value}}`
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -465,7 +479,7 @@ defmodule DpExchange.Gemini.Rest do
   **Closed symbols are included**: `/v1/symbols` keeps them, and nothing here says which
   pairs trade (issue #4). For status, use `list_instruments/1`.
   """
-  @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  @spec get_symbols(keyword()) :: {:ok, [String.t()]} | {:error, term()} | {:refused, term()}
   def get_symbols(opts) do
     with {:ok, body} <- get_body("/v1/symbols", opts),
          {:ok, symbols} <- list(body),
@@ -500,7 +514,7 @@ defmodule DpExchange.Gemini.Rest do
   Do not scale it; check one value against a chart before relying on it. A pair whose `price`
   or `percentChange24h` is absent has `nil` for that field.
   """
-  @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()}
+  @spec get_market_overview(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_market_overview(opts) do
     with {:ok, body} <- get_body("/v1/pricefeed", opts),
          {:ok, rows} <- list(body) do
@@ -575,6 +589,13 @@ defmodule DpExchange.Gemini.Rest do
   `tick_size` is the **base-asset** increment and `quote_increment` the **price**
   increment. They are not interchangeable and the names do not say so: for `btcusd`,
   `tick_size` is `1.0e-8` BTC while `quote_increment` is `0.01` USD.
+
+  Answers `{:ok, %{price_increment: _, quantity_increment: _, min_quantity: _, status: _}}`:
+  `price_increment` is the venue's `quote_increment`, `quantity_increment` its `tick_size`,
+  `min_quantity` its `min_order_size` and `status` its own book status string, passed
+  through. Each is `nil` where the venue did not state it, but a reply stating neither
+  increment is `{:error, :unexpected_response_shape}`, and a non-positive increment or a
+  negative minimum is too.
   """
   @spec quantization(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -1316,9 +1337,11 @@ defmodule DpExchange.Gemini.Rest do
   amounts; this exists because a caller that only needs the schedule should not have to read
   a funding amount to get it.
 
-  A body that is not an integer is `{:error, :unexpected_response_shape}` rather than a nil
-  timestamp — "the venue said something else" and "there is no next funding" are different
-  answers, and the second would be remarkable on a perpetual.
+  A body that is not an integer (a JSON string holding only digits is read as one) is
+  `{:error, :unexpected_response_shape}` rather than a nil timestamp — "the venue said
+  something else" and "there is no next funding" are different answers, and the second would be
+  remarkable on a perpetual. So is an integer before 2015: milliseconds are expected, and a
+  seconds value would be January 1970.
   """
   @spec next_funding_timestamp(String.t(), keyword()) ::
           {:ok, DateTime.t()} | {:error, term()} | {:refused, term()}

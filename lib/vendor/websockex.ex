@@ -94,9 +94,10 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly five things**, each marked `## VENDORED FIX` at its call site below (the fourth
-  bounds an unfinished frame and a reassembled message at 16 MiB; the fifth, listed last,
-  joins a large frame's TCP chunks once instead of once per chunk):
+  **Exactly six things**, each marked `## VENDORED FIX (n)` (the sixth `## VENDORED CHANGE
+  (6)`) at its call site below, `n` being the item's number in this list (the fourth bounds
+  an unfinished frame and a reassembled message at 16 MiB; the fifth joins a large frame's
+  TCP chunks once instead of once per chunk; the sixth redacts `:ssl_options` in telemetry):
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -136,15 +137,16 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
      16 MiB bound of item 4 (now counted over buffer plus pending) and every callback are
      unchanged.
 
-  6. (Added after the five above, marked `## VENDORED CHANGE (6)`.) `execute_telemetry/3`
+  6. (Added after the five above.) `execute_telemetry/3`
      replaces the connection's `:ssl_options` with `:redacted` in the metadata of every
      `[:websockex, ...]` event, so a telemetry handler that logs its metadata cannot write out
      a client key or password a caller put there. Nothing else in an event changes.
 
   Every function body and every `@spec` is copied verbatim from
-  `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
-  true size: two clauses, the `spawn_process/5`/`do_spawn/2` glue, and the handshake
-  deadline. A handful of doc comments were additionally edited, never behaviour: the two
+  `deps/websockex/lib/websockex.ex` at 0.5.1 except for those six — `diff` against that file
+  to see the changes' true size: the `{:error, %WebSockex.FrameError{}}` clause, the
+  `spawn_process/5`/`do_spawn/2` glue, the handshake deadline, the 16 MiB bound, the pending
+  chunk list, and the telemetry redaction. A handful of doc comments were additionally edited, never behaviour: the two
   self-referential examples in this moduledoc's closing section (`use WebSockex` → `use
   DpExchange.Gemini.Vendor.WebSockex`), the two `@doc` headers for `start/4` and
   `start_link/4`, and a few backtick spans de-linked to plain text where this package's
@@ -198,7 +200,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
   this exact defect, drop this vendor module, restore `use WebSockex` /
   `WebSockex` calls in `DpExchange.Gemini.Socket`, and
   relax `mix.exs`'s pin back to `~>`. Until then, every future upstream release should be
-  diffed here for anything beyond this file's own three marked changes.
+  diffed here for anything beyond this file's own six marked changes.
 
   ---
 
@@ -592,7 +594,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
   def start(conn_info, module, state, opts \\ [])
 
   def start(%WebSockex.Conn{} = conn, module, state, opts) do
-    # ## VENDORED FIX (2 of 3) — `spawn_process/5` below, not `Utils.spawn/5`. See the
+    # ## VENDORED FIX (2) — `spawn_process/5` below, not `Utils.spawn/5`. See the
     # moduledoc's "What stayed a dependency, and why".
     spawn_process(:no_link, conn, module, state, opts)
   end
@@ -624,7 +626,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
   def start_link(conn_info, module, state, opts \\ [])
 
   def start_link(conn = %WebSockex.Conn{}, module, state, opts) do
-    # ## VENDORED FIX (2 of 3) — see the moduledoc's "What stayed a dependency, and why".
+    # ## VENDORED FIX (2) — see the moduledoc's "What stayed a dependency, and why".
     spawn_process(:link, conn, module, state, opts)
   end
 
@@ -639,7 +641,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
     end
   end
 
-  # ## VENDORED FIX (2 of 3) — inlined from the real `WebSockex.Utils.spawn/5` and
+  # ## VENDORED FIX (2) — inlined from the real `WebSockex.Utils.spawn/5` and
   # `WebSockex.Utils`'s private `do_spawn/2`, changed in exactly one place: the
   # `:proc_lib` entry module is `__MODULE__` here, not the literal atom `WebSockex` those
   # functions hardcode. See the moduledoc's "What stayed a dependency, and why" — this is
@@ -893,7 +895,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
         new_state = Map.drop(state, [:task, :handshake_deadline])
         {:error, reason, new_state}
     after
-      # ## VENDORED FIX (3 of 3) — upstream 0.5.1's `receive` has no `after`, and nothing
+      # ## VENDORED FIX (3) — upstream 0.5.1's `receive` has no `after`, and nothing
       # below it has an overall deadline either. `WebSockex.Conn`'s `wait_for_response/2`
       # reads the upgrade response with `socket_recv_timeout` per `recv`, and every chunk
       # restarts it. So a peer that trickles the response, never finishing its headers,
@@ -930,7 +932,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
   defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   # The most one unfinished frame, or one reassembled message, may hold. See "VENDORED FIX
-  # (4 of 4)" in `websocket_loop/3`.
+  # (4)" in `websocket_loop/3`.
   @max_message_bytes 16_777_216
 
   defp websocket_loop(parent, debug, state) do
@@ -942,7 +944,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
 
         handle_frame(frame, parent, debug, %{state | buffer: buffer})
 
-      # ## VENDORED FIX (1 of 3) — dp-exchange-core issue #27. Upstream 0.5.1 has no
+      # ## VENDORED FIX (1) — dp-exchange-core issue #27. Upstream 0.5.1 has no
       # clause for this even though `WebSockex.Frame.parse_frame/1`'s own `@spec` names
       # it as a real return value; an unguarded `case` here means a peer sending a
       # frame `WebSockex.Frame` correctly rejects (Webull's malformed close frame,
@@ -988,7 +990,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
           {^transport, ^socket, message} ->
             chunks = read_all_data(transport, socket, [message])
 
-            # ## VENDORED FIX (4 of 4) — an unfinished frame is not buffered without limit.
+            # ## VENDORED FIX (4) — an unfinished frame is not buffered without limit.
             # A frame header may declare any length up to 2^63, and `parse_frame/1` answers
             # `:incomplete` until all of it has arrived, so a peer (or a proxy) that never
             # finishes one grew `state.buffer` until the node ran out of memory. Gemini's
@@ -1445,7 +1447,7 @@ defmodule DpExchange.Gemini.Vendor.WebSockex do
     my_pid = self()
     debug = Utils.sys_debug(debug, :connect, state)
 
-    # ## VENDORED FIX (3 of 3) — the handshake has a deadline. See `open_loop/3`.
+    # ## VENDORED FIX (3) — the handshake has a deadline. See `open_loop/3`.
     deadline =
       System.monotonic_time(:millisecond) + conn.socket_connect_timeout +
         conn.socket_recv_timeout
