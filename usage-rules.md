@@ -288,6 +288,38 @@ sockets — this package still shards nothing.
 it events to that subscriber are dropped and a `:degraded` notice is sent; a value that is
 not a positive integer raises `ArgumentError` at start.
 
+**Start options are judged at start (tick AQ).** The tree and the feed read exactly 13 keys:
+`:name`, `:feed`, `:limiter`, `:environment`, `:channels`, `:max_queue_len`, `:url`,
+`:socket_connect_timeout`, `:socket_recv_timeout`, `:ssl_options`, `:credentials`, and the
+hand-offs `:socket` and `:ledger`. `start_link/1` (and `DpExchange.Gemini.Fake.start_link/1`)
+answers, with nothing started: `{:error, {:unknown_option, key}}` for any other key (a misspelt
+`max_queu_len:` used to keep the default bound), `{:error, {:invalid_options, opts}}` for options
+that are not a keyword list (`:credentials` redacted), `{:error, {:invalid_option,
+:socket_connect_timeout | :socket_recv_timeout, value}}` unless `nil` or a positive integer of
+milliseconds, `{:error, {:invalid_option, :environment, value}}` unless `:production` or
+`:sandbox` (it raised `ArgumentError` before), and `{:error, {:invalid_option, :url, :redacted}}`
+for a `:url` that is not a parseable WebSocket URL (never echoed: it may carry a token).
+
+**WebSocket numbers keep every digit.** A frame's JSON numbers are decoded as `Decimal`, not
+floats, so a price or size sent as a number is exact. A bare fractional number as a whole frame
+is an `:undecodable_frame` `:data_quality` notice. The socket remembers the last trade price it
+reported per symbol, to send a `Quote` only when it changes; that table holds at most 4_096
+symbols and restarts when a new symbol arrives past that, which repeats one `Quote` per symbol
+and never drops one.
+
+**Refusals made before anything is signed (tick AQ).** A conversion asset (`quote_conversion/4`,
+`convert/4`) must be one alphanumeric code: `""`, `"BTC-X"` and `" BTC"` are `{:error,
+{:invalid_asset, value}}`, and a blank `:symbol` is `{:error, {:invalid_option, :symbol,
+value}}`. A margin read's `:symbol` (`get_account_margin/1`, `get_margin_account/1`) must be a
+non-blank string, else `{:error, {:invalid_option, :symbol, value}}`; a margin preview with a
+blank symbol is `{:error, :missing_order_fields}`. An FX pair is six letters or two three-letter
+codes with one `-` between them, so `E-U-R-U-S-D` is `{:error, {:unsupported_fx_pair, "EURUSD"}}`.
+A clearing order's `:expires_in_hrs` must be a positive integer and `:counterparty_id` a
+non-blank string, else `{:error, {:invalid_option, key, value}}`. `quantization/1` answers
+`{:error, :unexpected_response_shape}` for a details reply that states neither `quote_increment`
+nor `tick_size`, rather than an all-`nil` success. `DpExchange.Gemini.Fake` refuses all of these
+the same way.
+
 **What the streaming calls answer.** None of `subscribe/2`, `unsubscribe/2`,
 `update_symbols/2` and `subscribe_notices/1` exits in your process. With no feed running,
 `subscribe/2`, `update_symbols/2` and `subscribe_notices/1` answer `{:error,

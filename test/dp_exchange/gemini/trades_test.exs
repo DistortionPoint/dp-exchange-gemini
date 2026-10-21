@@ -135,7 +135,8 @@ defmodule DpExchange.Gemini.TradesTest do
       assert {:ok, [t]} =
                Rest.get_trades("BTC-USD", plug: responding([trade()]), retry_attempts: 0)
 
-      assert t.timestamp == DateTime.from_unix!(1_547_146_811_357, :millisecond)
+      expected = DateTime.from_unix!(1_547_146_811_357, :millisecond)
+      assert DateTime.compare(t.timestamp, expected) == :eq
     end
 
     test "seconds are used when milliseconds are absent" do
@@ -144,7 +145,7 @@ defmodule DpExchange.Gemini.TradesTest do
       assert {:ok, [t]} =
                Rest.get_trades("BTC-USD", plug: responding([row]), retry_attempts: 0)
 
-      assert t.timestamp == DateTime.from_unix!(1_547_146_811)
+      assert DateTime.compare(t.timestamp, DateTime.from_unix!(1_547_146_811)) == :eq
     end
 
     test "an undated print is refused, never stamped with the local clock" do

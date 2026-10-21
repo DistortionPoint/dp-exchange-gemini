@@ -313,7 +313,7 @@ defmodule DpExchange.Gemini.TickLPrivateTest do
     test "staking history: provider, window and limit narrow it; the row is dated" do
       opts = [credentials: @credentials]
       assert {:ok, [row]} = Fake.get_staking_history(opts)
-      assert row.venue_time == ~U[2026-08-28 12:00:00Z]
+      assert DateTime.compare(row.venue_time, ~U[2026-08-28 12:00:00Z]) == :eq
 
       assert {:ok, []} = Fake.get_staking_history(opts ++ [provider_id: "provider-b"])
       assert {:ok, [_row]} = Fake.get_staking_history(opts ++ [provider_id: "provider-a"])

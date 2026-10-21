@@ -572,7 +572,7 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert fill.timestamp == ~U[2026-08-28 16:55:47.000Z]
+      assert DateTime.compare(fill.timestamp, ~U[2026-08-28 16:55:47.000Z]) == :eq
     end
 
     test "an absent order_id is not reported as an empty string" do
@@ -792,7 +792,8 @@ defmodule DpExchange.Gemini.PrivateTest do
       assert {:ok, order} =
                Private.get_order(@credentials, "1", plug: responding(body), retry_attempts: 0)
 
-      assert order.created_at == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      expected = DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert DateTime.compare(order.created_at, expected) == :eq
     end
 
     test "a present but unreadable timestamp fails the order rather than becoming nil" do
@@ -1806,7 +1807,8 @@ defmodule DpExchange.Gemini.PrivateTest do
                  retry_attempts: 0
                )
 
-      assert rate.as_of == DateTime.from_unix!(1_594_651_859_000, :millisecond)
+      expected = DateTime.from_unix!(1_594_651_859_000, :millisecond)
+      assert DateTime.compare(rate.as_of, expected) == :eq
     end
 
     test "no asOf is refused, not replaced by the instant asked for" do

@@ -382,7 +382,8 @@ defmodule DpExchange.Gemini.DefensiveBranchesTest do
                  retry_attempts: 0
                )
 
-      assert candle.opened_at == DateTime.from_unix!(1_757_000_040_000, :millisecond)
+      expected = DateTime.from_unix!(1_757_000_040_000, :millisecond)
+      assert DateTime.compare(candle.opened_at, expected) == :eq
       assert Decimal.equal?(candle.open, Decimal.new("1"))
       assert Decimal.equal?(candle.close, Decimal.new("1.5"))
       assert Decimal.equal?(candle.volume, Decimal.new("10"))

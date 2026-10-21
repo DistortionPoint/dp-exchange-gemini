@@ -225,7 +225,11 @@ defmodule DpExchange.Gemini do
   The supervisor child spec for this venue, so `{DpExchange.Gemini, opts}` works in your tree.
 
   Wraps any credentials in `opts` before the spec is built, so they never appear in a
-  supervisor's crash report. Recognised options: `:environment`, `:name`. The child id is
+  supervisor's crash report. Recognised options (13, judged at start): `:name`, `:feed`,
+  `:limiter`, `:environment`, `:channels`, `:max_queue_len`, `:url`, `:socket_connect_timeout`,
+  `:socket_recv_timeout`, `:ssl_options`, `:credentials`, `:socket`, `:ledger`; an unknown key
+  is `{:error, {:unknown_option, key}}` from `start_link/1` and a bad timeout, environment or
+  URL `{:error, {:invalid_option, key, value}}` (`:redacted` for the URL). The child id is
   `:name` when given, else `DpExchange.Gemini` (production) or `DpExchange.Gemini.Sandbox`
   (sandbox), so both environments can sit in one tree unnamed. The child is
   declared `type: :supervisor`. See `c:DpExchange.Core.Venue.child_spec/1` for the contract.

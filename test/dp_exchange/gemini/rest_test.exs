@@ -412,7 +412,8 @@ defmodule DpExchange.Gemini.RestTest do
                  retry_attempts: 0
                )
 
-      assert candle.opened_at == DateTime.from_unix!(newest, :millisecond)
+      expected = DateTime.from_unix!(newest, :millisecond)
+      assert DateTime.compare(candle.opened_at, expected) == :eq
     end
 
     test "candles come back oldest-first with Decimal numerics" do
@@ -514,7 +515,7 @@ defmodule DpExchange.Gemini.RestTest do
                  retry_attempts: 0
                )
 
-      assert only.opened_at == at.(older)
+      assert DateTime.compare(only.opened_at, at.(older)) == :eq
 
       assert {:ok, [only]} =
                Rest.get_historical_prices("BTC-USD", "1m", [start: at.(newer)],
@@ -522,7 +523,7 @@ defmodule DpExchange.Gemini.RestTest do
                  retry_attempts: 0
                )
 
-      assert only.opened_at == at.(newer)
+      assert DateTime.compare(only.opened_at, at.(newer)) == :eq
     end
 
     test "a bar not aligned to its width refuses the reply, with the venue's value (MD3)" do

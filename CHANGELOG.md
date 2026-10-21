@@ -20,6 +20,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A WebSocket frame's JSON numbers lost digits.** `Socket` decoded frames with `Jason.decode/1`, so
+  a price or size sent as a number became a float (17 significant digits). Frames are decoded with
+  `floats: :decimals` now, as REST bodies are; a bare fractional number is an `:undecodable_frame`
+  notice, not an object. The last-trade table is bounded at 4_096 symbols (restarts; costs one
+  repeated `Quote`, never a lost one).
+- **Conversion pair, margin symbol, FX pair, clearing hours.** A blank or `-`-bearing asset, or a
+  blank `:symbol`, is `{:invalid_asset | :invalid_option, ...}` instead of a derived symbol such as
+  `usd`; a margin `:symbol` that is not a non-blank string is `{:invalid_option, :symbol, v}`
+  (it raised `FunctionClauseError`); `E-U-R-U-S-D` is no longer the pair `EURUSD`;
+  `:expires_in_hrs` must be a positive integer and `:counterparty_id` a non-blank string. The Fake
+  refuses the same.
+- **A symbol-details reply stating neither increment** is `:unexpected_response_shape`, not an
+  all-`nil` success.
+- **Start options are judged at start.** `Feed.start_link/1`, `Supervisor.start_link/1` and
+  `Fake.start_link/1` refuse an unknown key (a misspelt `max_queu_len:` kept the default), a
+  non-positive-integer socket timeout, an unknown `:environment` and an unparseable `:url` with
+  `{:error, ...}` and start nothing.
+- **A resubscribe worker outlived a killed feed.** It is linked as well as monitored.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.119` (tick AQ: value types refuse non-positive
+  prices and negative sizes, conformance groups 52 and 53, group 26 requires coverage to
+  empty after the last unsubscribe).
+
+
 ## [0.2.155] - 2026-10-20
 
 ### Dependencies

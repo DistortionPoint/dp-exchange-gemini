@@ -169,7 +169,7 @@ defmodule DpExchange.Gemini.FakeParityTest do
                Fake.get_historical_prices("BTC-USD", "1d", [start: long_ago], [])
 
       assert Enum.sort(Keyword.keys(real_details)) == Enum.sort(Keyword.keys(fake_details))
-      assert Keyword.get(fake_details, :requested) == long_ago
+      assert DateTime.compare(Keyword.get(fake_details, :requested), long_ago) == :eq
     end
   end
 

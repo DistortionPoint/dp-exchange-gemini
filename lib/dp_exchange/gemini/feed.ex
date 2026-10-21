@@ -298,6 +298,31 @@ defmodule DpExchange.Gemini.Feed do
   `{:error, :dial_deadline_exceeded}` with nothing sent or recorded. Before this, replays ran
   back to back and a caller far enough back the queue exited while its request was applied.
 
+  ## Start options are judged at start
+
+  `start_link/1` (and `DpExchange.Gemini.Supervisor.start_link/1`, and `Fake.start_link/1`)
+  accept exactly these 13 keys: `:name`, `:feed`, `:limiter`, `:environment`, `:channels`,
+  `:max_queue_len`, `:url`, `:socket_connect_timeout`, `:socket_recv_timeout`, `:ssl_options`,
+  `:credentials`, and the hand-offs `:socket` and `:ledger`. Anything else, or a value the feed
+  would only have failed on at its first dial, is refused and nothing starts:
+
+    * `{:error, {:unknown_option, key}}` for the first key outside the 13;
+    * `{:error, {:invalid_options, opts}}` when `opts` is not a keyword list (`:credentials`
+      shown as `:redacted`);
+    * `{:error, {:invalid_option, :socket_connect_timeout | :socket_recv_timeout, value}}`
+      unless the value is `nil` or a positive integer of milliseconds;
+    * `{:error, {:invalid_option, :environment, value}}` unless `:production` or `:sandbox`;
+    * `{:error, {:invalid_option, :url, :redacted}}` for a `:url` that is not a parseable
+      WebSocket URL string (a URL may carry a token, so it is never echoed).
+
+  `:channels` and `:max_queue_len` still raise `ArgumentError` from `init/1`.
+
+  ## A resubscribe worker is linked to its feed
+
+  The worker (`start_resubscribe/2`) is linked as well as monitored, so a feed that is killed
+  outright, which runs no `terminate/2`, takes its worker with it instead of leaving it to wait
+  out WebSockex's 5s send window per frame.
+
   ## Stopping the feed stops its socket
 
   The socket this feed dialled is linked to it and does not trap exits, so a `:normal` stop
@@ -321,7 +346,7 @@ defmodule DpExchange.Gemini.Feed do
 
   alias DpExchange.Core.{Capabilities, Config, Fanout, Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
-  alias DpExchange.Gemini.{Credentials, Ledger, Socket, SymbolFormat}
+  alias DpExchange.Gemini.{Credentials, Environment, Ledger, OptionKeys, Socket, SymbolFormat}
 
   require Logger
 
@@ -373,12 +398,80 @@ defmodule DpExchange.Gemini.Feed do
 
   @doc """
   Starts the feed. See the moduledoc for the options it forwards to `Socket`.
+
+  The options are judged here, at start (`check_start_options/1`), and a bad one answers
+  `{:error, reason}` with nothing started.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
-    # Idempotent: credentials, if any were passed, never reach the init argument raw.
-    opts = Credentials.wrap_opt(opts)
-    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+    with :ok <- check_start_options(opts) do
+      # Idempotent: credentials, if any were passed, never reach the init argument raw.
+      opts = Credentials.wrap_opt(opts)
+      GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+    end
+  end
+
+  @doc """
+  `:ok`, or the refusal for a start option this feed would only have failed on later.
+
+  A key outside the table `DpExchange.Gemini.OptionKeys.check_start/1` holds is `{:error,
+  {:unknown_option, key}}` (`{:error, {:invalid_options, opts}}` when `opts` is not a keyword
+  list); a
+  misspelt `max_queu_len:` used to be dropped and the default bound used in its place. A value
+  the feed would have failed on at its first dial is refused now instead:
+  `:socket_connect_timeout` and `:socket_recv_timeout` must be positive whole milliseconds
+  (the dial budget adds them, so a string raised `ArithmeticError` inside this shared process),
+  `:environment` one of `DpExchange.Gemini.Environment.known/0`, and `:url` a WebSocket URL
+  (`{:error, {:invalid_option, :url, :redacted}}`: a URL may carry a token, so it is not
+  echoed). `nil` is absent for the three. `:channels` and `:max_queue_len` keep raising
+  `ArgumentError` from `init/1`, as documented.
+
+  Exposed so `DpExchange.Gemini.Supervisor.start_link/1` and `DpExchange.Gemini.Fake` refuse
+  exactly as the feed does.
+  """
+  @spec check_start_options(term()) :: :ok | {:error, term()}
+  def check_start_options(opts) do
+    with :ok <- OptionKeys.check_start(opts),
+         :ok <- check_timeout(opts, :socket_connect_timeout),
+         :ok <- check_timeout(opts, :socket_recv_timeout),
+         :ok <- check_environment(opts) do
+      check_url(opts)
+    end
+  end
+
+  defp check_timeout(opts, key) do
+    case Keyword.get(opts, key) do
+      nil -> :ok
+      milliseconds when is_integer(milliseconds) and milliseconds > 0 -> :ok
+      other -> {:error, {:invalid_option, key, other}}
+    end
+  end
+
+  defp check_environment(opts) do
+    case Keyword.fetch(opts, :environment) do
+      :error ->
+        :ok
+
+      {:ok, environment} ->
+        if environment in Environment.known(),
+          do: :ok,
+          else: {:error, {:invalid_option, :environment, environment}}
+    end
+  end
+
+  defp check_url(opts) do
+    case Keyword.get(opts, :url) do
+      nil -> :ok
+      url when is_binary(url) -> parseable_url(url)
+      _not_text -> {:error, {:invalid_option, :url, :redacted}}
+    end
+  end
+
+  defp parseable_url(url) do
+    case WebSockex.Conn.parse_url(url) do
+      {:ok, _uri} -> :ok
+      {:error, _reason} -> {:error, {:invalid_option, :url, :redacted}}
+    end
   end
 
   @doc """
@@ -1106,7 +1199,7 @@ defmodule DpExchange.Gemini.Feed do
   # `:socket` handed in through the options is the caller's, and may be the caller itself.
   @impl true
   def terminate(_reason, state) do
-    _state = cancel_resubscribe(state)
+    state = cancel_resubscribe(state)
 
     case Map.get(state, :dialled_socket) do
       socket when is_pid(socket) -> Process.exit(socket, :shutdown)
@@ -1197,11 +1290,19 @@ defmodule DpExchange.Gemini.Feed do
     token = make_ref()
     channels = active_socket_channels(state)
 
+    # **Linked as well as monitored.** This process traps exits, so the worker's own end reaches
+    # it as an ignored `{:EXIT, worker, _}` beside the `:DOWN` it already judges. The link is for
+    # the other direction: a feed that is killed outright (a supervisor's shutdown timeout,
+    # `Process.exit(feed, :kill)`) runs no `terminate/2`, and a monitor-only worker then went on
+    # waiting out WebSockex's 5s send window per frame for a feed that no longer existed.
     {pid, monitor} =
-      spawn_monitor(fn ->
-        results = wire_resubscribe(socket, channels, unsubscribe, subscribe)
-        send(feed, {:resubscribe_done, token, results})
-      end)
+      :erlang.spawn_opt(
+        fn ->
+          results = wire_resubscribe(socket, channels, unsubscribe, subscribe)
+          send(feed, {:resubscribe_done, token, results})
+        end,
+        [:link, :monitor]
+      )
 
     flight = %{
       token: token,

@@ -73,6 +73,59 @@ defmodule DpExchange.Gemini.AuthNonceRaceTest do
       end
     end
 
+    test "concurrent first callers of the microsecond and nanosecond counters share one" do
+      for key <- [{Auth, :nonce_counter_us}, {Auth, :nonce_counter_ns}] do
+        :persistent_term.erase(key)
+
+        refs =
+          1..40
+          |> Enum.map(fn _caller -> Task.async(&Auth.ensure_counter/0) end)
+          |> Task.await_many(10_000)
+          |> Enum.uniq()
+
+        assert length(refs) == 1
+        assert :persistent_term.get(key)
+      end
+
+      for mode <- [:incremental_us, :incremental_ns] do
+        key = if mode == :incremental_us, do: :nonce_counter_us, else: :nonce_counter_ns
+        :persistent_term.erase({Auth, key})
+
+        nonces =
+          1..40
+          |> Enum.map(fn _caller -> Task.async(fn -> Auth.nonce(mode) end) end)
+          |> Task.await_many(10_000)
+
+        assert length(Enum.uniq(nonces)) == length(nonces), "#{mode}: repeated nonces"
+      end
+    end
+
+    test "fifty processes drawing many nonces each: all unique, each one's sequence rises" do
+      Auth.ensure_counter()
+
+      for mode <- [:incremental, :incremental_us, :incremental_ns, {:incremental_ns, scale: 3}] do
+        runs =
+          1..60
+          |> Enum.map(fn _caller ->
+            Task.async(fn -> for _draw <- 1..50, do: nonce_value(Auth.nonce(mode)) end)
+          end)
+          |> Task.await_many(30_000)
+
+        for run <- runs do
+          assert run == Enum.sort(run)
+          assert length(Enum.uniq(run)) == length(run), "#{inspect(mode)}: a process repeated"
+        end
+
+        all = List.flatten(runs)
+        assert length(Enum.uniq(all)) == length(all), "#{inspect(mode)}: processes collided"
+        assert Enum.all?(all, &is_integer/1)
+      end
+    end
+
+    # The scaled mode's wire value is a decimal string; compare it as the integer it spells.
+    defp nonce_value(value) when is_integer(value), do: value
+    defp nonce_value(value) when is_binary(value), do: String.to_integer(value)
+
     test "seed_nonce/1 lifts the counter once, and the sequence still advances by one" do
       # dp-exchange-gemini issue #2. An incremental key whose stored mark is above epoch
       # milliseconds is unreachable by `nonce/1` in either mode — `:time_based` emits

@@ -101,10 +101,16 @@ defmodule DpExchange.Gemini.Fake do
   @doc """
   Starts nothing and answers `:ignore`: the fake keeps its state per process, not in a tree.
 
+  The start options are refused as the real tree refuses them (`Feed.check_start_options/1`):
+  a key it does not read, or a timeout, environment or URL it cannot use, is `{:error, reason}`
+  here too, so a consumer's test cannot start the fake with an option the real tree rejects.
+
   See `c:DpExchange.Core.Venue.start_link/1`.
   """
   @impl true
-  def start_link(_opts), do: :ignore
+  def start_link(opts) do
+    with :ok <- Feed.check_start_options(opts), do: :ignore
+  end
 
   @doc "The real adapter's `DpExchange.Gemini.provider_name/0`, unchanged."
   @impl true
@@ -3376,8 +3382,9 @@ defmodule DpExchange.Gemini.Fake do
   end
 
   @doc """
-  A fixed clearing order awaiting the counterparty. The terms are validated by the real
-  function before the credential. Nothing is confirmed.
+  A fixed clearing order awaiting the counterparty. The terms, `:counterparty_id` and
+  `:expires_in_hrs` are validated by the real function before the credential. Nothing is
+  confirmed.
 
   See `DpExchange.Gemini.create_clearing_order/2`.
   """
@@ -3390,7 +3397,7 @@ defmodule DpExchange.Gemini.Fake do
 
   defp do_create_clearing_order(request, opts) do
     with_injection(fn ->
-      with :ok <- Private.validate_clearing_order(request),
+      with :ok <- Private.validate_clearing_create(request, opts),
            :ok <- authenticated(fake_credentials(opts), opts) do
         {:ok, %{"result" => "AwaitConfirm", "clearing_id" => "0OQGOZXW", "is_confirmed" => false}}
       end

@@ -214,7 +214,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert Decimal.equal?(trade.quantity, Decimal.new("0.27413495"))
       assert trade.broken == true
       # timestampms (1547146811357), the precise field, over timestamp (1547146811).
-      assert trade.timestamp == DateTime.from_unix!(1_547_146_811_357, :millisecond)
+      expected = DateTime.from_unix!(1_547_146_811_357, :millisecond)
+      assert DateTime.compare(trade.timestamp, expected) == :eq
     end
   end
 
@@ -319,8 +320,10 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       # against the vendor's real example rather than a fixture written to dodge it.
       assert Decimal.equal?(funding.amount, Decimal.new("-1.50991"))
       assert Decimal.equal?(funding.estimated_amount, Decimal.new("-2.10595"))
-      assert funding.funded_at == DateTime.from_unix!(1_745_344_800_000, :millisecond)
-      assert funding.next_funding_at == DateTime.from_unix!(1_745_348_400_000, :millisecond)
+      funded = DateTime.from_unix!(1_745_344_800_000, :millisecond)
+      next = DateTime.from_unix!(1_745_348_400_000, :millisecond)
+      assert DateTime.compare(funding.funded_at, funded) == :eq
+      assert DateTime.compare(funding.next_funding_at, next) == :eq
     end
   end
 
@@ -334,7 +337,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert at == DateTime.from_unix!(1_745_348_400_000, :millisecond)
+      expected = DateTime.from_unix!(1_745_348_400_000, :millisecond)
+      assert DateTime.compare(at, expected) == :eq
     end
   end
 
@@ -387,7 +391,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert length(candles) == 2
       [first, second] = candles
 
-      assert first.opened_at == DateTime.from_unix!(1_559_755_800_000, :millisecond)
+      opened = DateTime.from_unix!(1_559_755_800_000, :millisecond)
+      assert DateTime.compare(first.opened_at, opened) == :eq
       assert Decimal.equal?(first.open, Decimal.from_float(7781.6))
       assert Decimal.equal?(first.high, Decimal.from_float(7820.23))
       assert Decimal.equal?(first.low, Decimal.from_float(7776.56))
@@ -396,7 +401,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert first.symbol == "BTC-USD"
       assert first.provider == :gemini
 
-      assert second.opened_at == DateTime.from_unix!(1_559_757_600_000, :millisecond)
+      opened = DateTime.from_unix!(1_559_757_600_000, :millisecond)
+      assert DateTime.compare(second.opened_at, opened) == :eq
       assert Decimal.equal?(second.high, Decimal.from_float(7829.46))
       assert Decimal.equal?(second.close, Decimal.from_float(7817.28))
       assert Decimal.equal?(second.volume, Decimal.from_float(43.4228281059))
@@ -903,7 +909,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
 
       assert rate.pair == response["fxPair"]
       assert Decimal.equal?(rate.rate, Decimal.new(response["rate"]))
-      assert rate.as_of == DateTime.from_unix!(response["asOf"], :millisecond)
+      expected = DateTime.from_unix!(response["asOf"], :millisecond)
+      assert DateTime.compare(rate.as_of, expected) == :eq
       assert rate.source == response["provider"]
       assert rate.benchmark == response["benchmark"]
     end
@@ -1229,8 +1236,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert first_matic.provider_id == "62b21e17-2534-4b9f-afcf-b7edb609dd8d"
       assert Decimal.equal?(first_matic.apy_pct, Decimal.new("5.75"))
       assert first_matic.accrual_count == 1
-      assert first_matic.period_start == ~U[2022-08-23 20:00:00.000Z]
-      assert first_matic.period_end == ~U[2022-08-23 20:00:00.000Z]
+      assert DateTime.compare(first_matic.period_start, ~U[2022-08-23 20:00:00.000Z]) == :eq
+      assert DateTime.compare(first_matic.period_end, ~U[2022-08-23 20:00:00.000Z]) == :eq
     end
 
     test "since/until go out ISO-8601, not epoch millis — rest.yaml:6885,6896" do
@@ -1275,7 +1282,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert redeem.venue_type == "Redeem"
       assert redeem.asset == "MATIC"
       assert Decimal.equal?(redeem.amount, Decimal.new("20"))
-      assert redeem.venue_time == DateTime.from_unix!(1_667_418_560_153, :millisecond)
+      expected = DateTime.from_unix!(1_667_418_560_153, :millisecond)
+      assert DateTime.compare(redeem.venue_time, expected) == :eq
 
       interest = Enum.find(txns, &(&1.venue_type == "Interest"))
       assert interest.type == :reward
@@ -1315,7 +1323,7 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert txn.id == "MPZ7LDD8"
       assert Decimal.equal?(txn.amount, Decimal.new("20"))
       assert Decimal.equal?(txn.amount_remaining, Decimal.new("0"))
-      assert txn.venue_time == ~U[2022-11-02 19:49:20.153Z]
+      assert DateTime.compare(txn.venue_time, ~U[2022-11-02 19:49:20.153Z]) == :eq
     end
   end
 
@@ -2038,7 +2046,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert Decimal.equal?(top.bid_size, Decimal.new("1.5"))
       assert Decimal.equal?(top.ask, Decimal.new("77791.92000"))
       assert Decimal.equal?(top.ask_size, Decimal.new("2.25"))
-      assert top.venue_time == DateTime.from_unix!(1_787_936_147_123_456_789, :nanosecond)
+      expected = DateTime.from_unix!(1_787_936_147_123_456_789, :nanosecond)
+      assert DateTime.compare(top.venue_time, expected) == :eq
 
       refute_received {:dp_exchange, :gemini, %Types.Quote{}}
     end
@@ -2070,7 +2079,8 @@ defmodule DpExchange.Gemini.SpecExamplesTest do
       assert trade.side == :sell
       assert Decimal.equal?(trade.price, Decimal.new("3610.85"))
       assert Decimal.equal?(trade.quantity, Decimal.new("0.27413495"))
-      assert trade.timestamp == DateTime.from_unix!(1_787_936_147_423_456_789, :nanosecond)
+      expected = DateTime.from_unix!(1_787_936_147_423_456_789, :nanosecond)
+      assert DateTime.compare(trade.timestamp, expected) == :eq
       assert trade.broken == false
     end
   end

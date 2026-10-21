@@ -42,8 +42,8 @@ defmodule DpExchange.Gemini.FakeTest do
 
       # `venue_time` is `nil` on the REST quote (the venue states none), so the clock the fake
       # could stamp is `observed_at`: two reads are the same fixed instant, in the past.
-      assert first.observed_at == second.observed_at
-      assert first.observed_at == ~U[2026-08-28 12:00:00Z]
+      assert DateTime.compare(first.observed_at, second.observed_at) == :eq
+      assert DateTime.compare(first.observed_at, ~U[2026-08-28 12:00:00Z]) == :eq
     end
   end
 
@@ -93,7 +93,7 @@ defmodule DpExchange.Gemini.FakeTest do
       assert {:ok, [bar]} =
                Fake.get_historical_prices("BTC-USD", "1d", end: ~U[2026-08-28 00:00:01Z])
 
-      assert bar.opened_at == ~U[2026-08-28 00:00:00Z]
+      assert DateTime.compare(bar.opened_at, ~U[2026-08-28 00:00:00Z]) == :eq
 
       # A `start` after the bar moves it to the first boundary at or after `start`, and a range
       # that ends before that boundary keeps nothing, exactly as `Rest.within?/2` decides.

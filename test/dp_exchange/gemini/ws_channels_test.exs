@@ -156,14 +156,17 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert Decimal.equal?(top.bid, Decimal.new("68169.88000"))
       assert Decimal.equal?(top.ask, Decimal.new("64886.32000"))
       assert top.venue_time == nil, "the venue stated no time, and nil says exactly that"
-      assert top.observed_at == @observed, "freshness is still stated, by the honest field"
+
+      assert DateTime.compare(top.observed_at, @observed) == :eq,
+             "freshness is still stated, by the honest field"
     end
 
     test "a venue timestamp is still used when the frame carries one" do
       dated = Map.put(@captured, "E", 1_787_936_147_000_000_000)
 
       assert {:ok, top} = WsDecode.to_top_of_book(dated, "BTC-USD", @observed)
-      assert top.venue_time == DateTime.from_unix!(1_787_936_147_000_000_000, :nanosecond)
+      expected = DateTime.from_unix!(1_787_936_147_000_000_000, :nanosecond)
+      assert DateTime.compare(top.venue_time, expected) == :eq
     end
 
     test "an unreadable venue timestamp is nil rather than the whole book being dropped" do
@@ -385,8 +388,8 @@ defmodule DpExchange.Gemini.WsChannelsTest do
       assert Decimal.equal?(top.bid, Decimal.new("3610.00"))
       assert Decimal.equal?(top.bid_size, Decimal.new("1.5"))
       assert top.venue_time
-      assert top.observed_at == observed
-      refute top.venue_time == top.observed_at
+      assert DateTime.compare(top.observed_at, observed) == :eq
+      refute DateTime.compare(top.venue_time, top.observed_at) == :eq
     end
   end
 
@@ -538,7 +541,7 @@ defmodule DpExchange.Gemini.WsChannelsTest do
                )
 
       assert is_nil(book.venue_time)
-      assert book.observed_at == observed
+      assert DateTime.compare(book.observed_at, observed) == :eq
     end
   end
 

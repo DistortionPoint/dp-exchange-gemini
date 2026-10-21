@@ -324,8 +324,8 @@ defmodule DpExchange.Gemini.StakingTest do
       assert reward.asset == "ETH"
       assert reward.provider_id == "provider-a"
       assert reward.accrual_count == 7
-      assert reward.period_start == ~U[2026-08-25 00:00:00.000Z]
-      assert reward.period_end == ~U[2026-09-01 00:00:00.000Z]
+      assert DateTime.compare(reward.period_start, ~U[2026-08-25 00:00:00.000Z]) == :eq
+      assert DateTime.compare(reward.period_end, ~U[2026-09-01 00:00:00.000Z]) == :eq
     end
 
     test "one currency with two rate periods is two rewards, each with its own apy" do
@@ -524,7 +524,7 @@ defmodule DpExchange.Gemini.StakingTest do
                  retry_attempts: 0
                )
 
-      assert numeric.venue_time == ~U[2026-08-28 17:00:01.000Z]
+      assert DateTime.compare(numeric.venue_time, ~U[2026-08-28 17:00:01.000Z]) == :eq
 
       # A time the venue SENT and this package cannot read fails the page; it is not `nil`.
       assert {:error, :unexpected_response_shape} =
@@ -836,7 +836,7 @@ defmodule DpExchange.Gemini.StakingTest do
       # The dangerous reading is "ten arrived". Ten was asked for and none has arrived.
       assert tx.type == :unstake
       assert tx.venue_type == nil
-      assert tx.venue_time == ~U[2026-08-28 17:00:01.000Z]
+      assert DateTime.compare(tx.venue_time, ~U[2026-08-28 17:00:01.000Z]) == :eq
       assert Decimal.equal?(tx.amount, Decimal.new("10"))
       assert Decimal.equal?(tx.amount_remaining, Decimal.new("10"))
       refute Types.StakingTransaction.settled?(tx)

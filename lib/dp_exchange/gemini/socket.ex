@@ -1708,14 +1708,29 @@ defmodule DpExchange.Gemini.Socket do
     # look like a silent venue.
     Telemetry.link_event(:gemini, :frame, byte_size(raw))
 
-    case Jason.decode(raw) do
-      {:ok, %{} = message} -> handle_message(message, note_answer(message, state))
+    case decode_frame(raw) do
+      {:ok, message} -> handle_message(message, note_answer(message, state))
       # Not JSON, or JSON that is not an object.
-      _unreadable -> {:ok, undecodable_frame(state, raw)}
+      :error -> {:ok, undecodable_frame(state, raw)}
     end
   end
 
   def handle_frame(_other, state), do: {:ok, state}
+
+  # **A JSON number is read as a `Decimal`, never as a float.** `Jason.decode/1` turns `0.1` or
+  # `65000.12345678901234567` into an Erlang float, which holds 17 significant digits at most, so
+  # a price or size the venue sent as a number (REST sends several as numbers, and the AsyncAPI
+  # types its prices as strings but a proxy or a venue change can differ) lost its low digits
+  # before any decoder saw it. `floats: :decimals` keeps every digit, as `Rest.decoded_body/1`
+  # already does for the same venue's REST bodies. A fractional number standing alone at the top
+  # level is then a `%Decimal{}`, which is a map: it is not a frame object, and is refused here
+  # rather than matched as one.
+  defp decode_frame(raw) do
+    case Jason.decode(raw, floats: :decimals) do
+      {:ok, message} when is_map(message) and not is_struct(message) -> {:ok, message}
+      _not_an_object -> :error
+    end
+  end
 
   # **A text frame that is not a JSON object is reported, not dropped.** Every frame the venue
   # documents is an object (websocket.yaml), so one that is not JSON, or is JSON of another
@@ -2317,9 +2332,24 @@ defmodule DpExchange.Gemini.Socket do
             provider: :gemini
           })
 
-          Map.put(state, :last_trade_price, Map.put(last_by_symbol, symbol, price))
+          Map.put(state, :last_trade_price, remember_last_trade(last_by_symbol, symbol, price))
         end
     end
+  end
+
+  # **The table of last-reported trade prices is bounded.** One entry per symbol this connection
+  # has reported a `Quote` for. `forget_depth/3` drops a symbol's entry on unsubscribe, but a
+  # `bookTicker` frame already in flight re-adds it afterwards, and a venue that names a symbol
+  # nobody subscribed (or a hostile frame) adds one per frame. At `@max_last_trade_symbols`
+  # distinct symbols the table starts again from the symbol in hand. What that costs is one
+  # repeated `Quote` per symbol on its next frame, the same repeat a reconnect already causes,
+  # and never a lost one: forgetting what was reported can only re-report it.
+  @max_last_trade_symbols 4_096
+
+  defp remember_last_trade(tracked, symbol, price) do
+    if map_size(tracked) >= @max_last_trade_symbols and not Map.has_key?(tracked, symbol),
+      do: %{symbol => price},
+      else: Map.put(tracked, symbol, price)
   end
 
   defp unchanged_trade?(nil, _price), do: false

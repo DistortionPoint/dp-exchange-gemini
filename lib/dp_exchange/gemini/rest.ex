@@ -586,7 +586,8 @@ defmodule DpExchange.Gemini.Rest do
          {:ok, price_increment} <- stated_increment(body, "quote_increment"),
          {:ok, quantity_increment} <- stated_increment(body, "tick_size"),
          {:ok, min_quantity} <- stated_minimum(body, "min_order_size"),
-         {:ok, status} <- stated_status(body) do
+         {:ok, status} <- stated_status(body),
+         :ok <- states_an_increment(price_increment, quantity_increment) do
       {:ok,
        %{
          price_increment: price_increment,
@@ -596,6 +597,14 @@ defmodule DpExchange.Gemini.Rest do
        }}
     end
   end
+
+  # **A details reply that states neither increment answers nothing.** Each field is optional in
+  # the vendor's `SymbolDetails`, so one left out stays `nil`, but `{}` (or a symbol object with
+  # only a name) came back as `{:ok, %{price_increment: nil, quantity_increment: nil, ...}}`:
+  # a success whose entire content is "unknown", which a consumer reads as "fall back to the
+  # defaults for this asset class" and then rounds orders to a step the venue never stated.
+  defp states_an_increment(nil, nil), do: {:error, :unexpected_response_shape}
+  defp states_an_increment(_price_increment, _quantity_increment), do: :ok
 
   # An increment is a step a price or size is a multiple of: zero or less is no step, and a
   # consumer rounding to it divides by it. A minimum is zero or more.

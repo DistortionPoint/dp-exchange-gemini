@@ -95,7 +95,7 @@ defmodule DpExchange.Gemini.DecimalBodyTest do
                  retry_attempts: 0
                )
 
-      assert tx.venue_time == ~U[2022-11-02 19:49:20Z]
+      assert DateTime.compare(tx.venue_time, ~U[2022-11-02 19:49:20Z]) == :eq
     end
 
     test "float milliseconds decode to the right DateTime" do
@@ -105,7 +105,7 @@ defmodule DpExchange.Gemini.DecimalBodyTest do
                  retry_attempts: 0
                )
 
-      assert tx.venue_time == ~U[2022-11-02 19:49:20.153Z]
+      assert DateTime.compare(tx.venue_time, ~U[2022-11-02 19:49:20.153Z]) == :eq
     end
   end
 

@@ -85,7 +85,7 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
       frame = %{"b" => "1", "a" => "2", "E" => Integer.to_string(@ns)}
 
       assert {:ok, top} = WsDecode.to_top_of_book(frame, "BTC-USD", @observed)
-      assert top.venue_time == DateTime.from_unix!(@ns, :nanosecond)
+      assert DateTime.compare(top.venue_time, DateTime.from_unix!(@ns, :nanosecond)) == :eq
     end
   end
 
@@ -388,7 +388,8 @@ defmodule DpExchange.Gemini.TickAcDecodersTest do
       row = [@day_ms, "1.5", "2.0", "3.0", "2.0", "1"]
 
       assert {:error, {:inconsistent_candle, opened_at}} = candles(row)
-      assert opened_at == DateTime.from_unix!(@day_ms, :millisecond)
+      expected = DateTime.from_unix!(@day_ms, :millisecond)
+      assert DateTime.compare(opened_at, expected) == :eq
     end
   end
 

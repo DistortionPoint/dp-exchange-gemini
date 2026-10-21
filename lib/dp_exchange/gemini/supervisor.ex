@@ -83,19 +83,29 @@ defmodule DpExchange.Gemini.Supervisor do
   @doc """
   Starts this venue's tree: the rate limiter, then the feed.
 
-  `opts` are the ones `DpExchange.Gemini.child_spec/1` takes (`:environment`, `:name`,
-  `:feed`, `:limiter`, `:channels`, `:max_queue_len`, `:ssl_options`, ...) and pass straight
-  through to `DpExchange.Gemini.Feed`. A `:credentials` entry is wrapped so a crash report
+  `opts` are the ones `DpExchange.Gemini.child_spec/1` takes: the 13 keys `:name`, `:feed`,
+  `:limiter`, `:environment`, `:channels`, `:max_queue_len`, `:url`, `:socket_connect_timeout`,
+  `:socket_recv_timeout`, `:ssl_options`, `:credentials`, `:socket` and `:ledger`. They pass
+  straight through to `DpExchange.Gemini.Feed`. A `:credentials` entry is wrapped so a crash report
   cannot print it (`DpExchange.Gemini.Credentials`).
+
+  **The options are judged before anything starts**
+  (`DpExchange.Gemini.Feed.check_start_options/1`): a key the tree does not read, a timeout
+  that is not a positive whole number of milliseconds, an unknown `:environment` or an
+  unparseable `:url` is `{:error, {:unknown_option, key}}` or `{:error, {:invalid_option, key,
+  value}}` here (the URL shown as `:redacted`), where it used to start a tree whose feed
+  failed at its first dial, or ran on a default the caller had tried to change.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
-    # Idempotent with the wrap `DpExchange.Gemini.child_spec/1` already did. A caller that
-    # reaches here directly (`DpExchange.Gemini.start_link/1`) would otherwise leave raw
-    # credentials in the supervisor's init argument and in its child specs, both printed by
-    # `:sys.get_status/1` and any crash report.
-    opts = DpExchange.Gemini.Credentials.wrap_opt(opts)
-    Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
+    with :ok <- Feed.check_start_options(opts) do
+      # Idempotent with the wrap `DpExchange.Gemini.child_spec/1` already did. A caller that
+      # reaches here directly (`DpExchange.Gemini.start_link/1`) would otherwise leave raw
+      # credentials in the supervisor's init argument and in its child specs, both printed by
+      # `:sys.get_status/1` and any crash report.
+      opts = DpExchange.Gemini.Credentials.wrap_opt(opts)
+      Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
+    end
   end
 
   @doc """

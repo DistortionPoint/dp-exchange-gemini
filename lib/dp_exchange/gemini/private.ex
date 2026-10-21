@@ -2446,22 +2446,39 @@ defmodule DpExchange.Gemini.Private do
       {nil, nil} ->
         derive_instant_pair(from, to)
 
+      # A blank symbol is not a symbol: `to_exchange_symbol("")` is `""`, and it was signed into
+      # the conversion as the pair, on a call that moves the money.
       {symbol, side} when is_binary(symbol) and side in [:buy, :sell] ->
-        {:ok, SymbolFormat.to_exchange_symbol(symbol), to_string(side)}
+        if String.trim(symbol) == "",
+          do: invalid_option(:symbol, symbol),
+          else: {:ok, SymbolFormat.to_exchange_symbol(symbol), to_string(side)}
 
       _partial ->
         {:error, {:missing_option, [:symbol, :side]}}
     end
   end
 
-  # A non-string asset raised in `String.upcase/1`, in the caller, before anything was signed.
-  defp derive_instant_pair(from, _to) when not is_binary(from),
-    do: {:error, {:invalid_asset, from}}
-
-  defp derive_instant_pair(_from, to) when not is_binary(to),
-    do: {:error, {:invalid_asset, to}}
-
+  # **An asset is one alphanumeric code.** A non-string raised in `String.upcase/1`, in the
+  # caller, before anything was signed; a blank one, or one carrying the pair separator, was
+  # joined into `"#{to}-#{from}"` and read back as a different pair: `"" -> "USD"` became the
+  # symbol `usd` (the quote currency sent as though it were a product), and `"BTC-X"` became
+  # `btcxusd`. Neither names an asset, so neither is turned into a symbol.
   defp derive_instant_pair(from, to) do
+    with {:ok, from} <- instant_asset(from),
+         {:ok, to} <- instant_asset(to) do
+      derive_instant_sides(from, to)
+    end
+  end
+
+  defp instant_asset(asset) when is_binary(asset) do
+    if String.match?(asset, ~r/\A[A-Za-z0-9]+\z/),
+      do: {:ok, asset},
+      else: {:error, {:invalid_asset, asset}}
+  end
+
+  defp instant_asset(other), do: {:error, {:invalid_asset, other}}
+
+  defp derive_instant_sides(from, to) do
     quotes = SymbolFormat.quotes()
     from_quote? = String.upcase(from) in quotes
     to_quote? = String.upcase(to) in quotes
@@ -2844,15 +2861,24 @@ defmodule DpExchange.Gemini.Private do
   @spec validate_fx_pair(term()) ::
           {:ok, String.t()} | {:error, {:unsupported_fx_pair, String.t()}}
   def validate_fx_pair(pair) when is_binary(pair) or is_atom(pair) do
-    native = pair |> to_string() |> String.replace("-", "") |> String.upcase()
+    text = to_string(pair)
+    native = text |> String.replace("-", "") |> String.upcase()
 
-    if native in @fx_pairs,
+    if native in @fx_pairs and fx_separator_ok?(text),
       do: {:ok, native},
       else: {:error, {:unsupported_fx_pair, native}}
   end
 
   # `to_string/1` raised `Protocol.UndefinedError` in the caller on a map, a tuple or a list.
   def validate_fx_pair(other), do: {:error, {:unsupported_fx_pair, inspect(other)}}
+
+  # **The separator is stripped, so where it sits matters.** Every `-` was removed before the
+  # lookup, which made `"E-U-R-U-S-D"`, `"EURUSD-"` and `"-EURUSD"` the supported pair `EURUSD`:
+  # several spellings that name no pair read as one that exists. A pair is six letters, or two
+  # codes of three with one `-` between them.
+  defp fx_separator_ok?(text) do
+    not String.contains?(text, "-") or String.match?(text, ~r/\A[^-]{3}-[^-]{3}\z/)
+  end
 
   defp to_fx_rate(%{"rate" => rate} = body, native, _requested_at) do
     with {:ok, parsed_rate} <- required_positive(rate, :rate, :non_positive_rate),
@@ -5010,7 +5036,7 @@ defmodule DpExchange.Gemini.Private do
   @spec get_account_margin(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_account_margin(credentials, opts) do
-    with {:ok, symbol} <- required_opt(opts, :symbol) do
+    with {:ok, symbol} <- margin_symbol(opts) do
       params = %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
 
       with {:ok, body, _headers} <- post("/v1/margin", params, credentials, opts) do
@@ -5272,7 +5298,7 @@ defmodule DpExchange.Gemini.Private do
   @spec get_margin_account(map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_margin_account(credentials, opts) do
-    with {:ok, symbol} <- required_opt(opts, :symbol) do
+    with {:ok, symbol} <- margin_symbol(opts) do
       params = %{"symbol" => SymbolFormat.to_exchange_symbol(symbol)}
 
       with {:ok, body, _headers} <- post("/v1/margin/account", params, credentials, opts) do
@@ -5346,7 +5372,8 @@ defmodule DpExchange.Gemini.Private do
       "type" => to_string(type)
     }
 
-    with :ok <- preview_side(to_string(side)),
+    with :ok <- preview_symbol(symbol),
+         :ok <- preview_side(to_string(side)),
          {:ok, sized} <- margin_preview_size(base, to_string(type), to_string(side), request),
          {:ok, price} <- preview_number(Map.get(request, :price), nil, :price) do
       {:ok, put_present(sized, "price", price)}
@@ -5390,6 +5417,12 @@ defmodule DpExchange.Gemini.Private do
   # was previewed as though it had one.
   defp margin_preview_size(_base, type, _side, _request),
     do: {:error, {:unknown_order_type, type}}
+
+  # A blank symbol names no contract: the same `:missing_order_fields` as a request with none,
+  # not a preview signed for the empty string.
+  defp preview_symbol(symbol) do
+    if String.trim(symbol) == "", do: {:error, :missing_order_fields}, else: :ok
+  end
 
   defp preview_side(side) when side in ["buy", "sell"], do: :ok
   defp preview_side(side), do: {:error, {:unknown_side, side}}
@@ -5782,7 +5815,8 @@ defmodule DpExchange.Gemini.Private do
   @spec create_clearing_order(map(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_clearing_order(request, credentials, opts) do
-    with {:ok, params} <- clearing_order_params(request) do
+    with {:ok, params} <- clearing_order_params(request),
+         :ok <- clearing_create_options(opts) do
       params =
         params
         |> put_present("counterparty_id", Keyword.get(opts, :counterparty_id))
@@ -5819,7 +5853,7 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, params} <- clearing_order_params(request),
          {:ok, source} <- required_name(opts, :source_counterparty_id),
          {:ok, target} <- required_name(opts, :target_counterparty_id),
-         {:ok, hours} <- required_opt(opts, :expires_in_hrs) do
+         {:ok, hours} <- required_clearing_hours(opts) do
       params =
         params
         |> Map.put("source_counterparty_id", source)
@@ -6192,12 +6226,26 @@ defmodule DpExchange.Gemini.Private do
   # what the real call refuses (or the reverse) cannot arise by the two drifting.
 
   @doc """
-  Refusal for the perpetuals and spot margin reads when `opts[:symbol]` is missing:
-  `{:error, {:missing_option, :symbol}}`, else `:ok`. Checked before a credential is read.
+  Refusal for the perpetuals and spot margin reads when `opts[:symbol]` cannot be sent:
+  `{:error, {:missing_option, :symbol}}` when absent, `{:error, {:invalid_option, :symbol,
+  value}}` when it is not a non-blank string, else `:ok`. Checked before a credential is read.
   """
-  @spec validate_margin_symbol(keyword()) :: :ok | {:error, {:missing_option, :symbol}}
+  @spec validate_margin_symbol(keyword()) ::
+          :ok | {:error, {:missing_option, :symbol} | {:invalid_option, :symbol, term()}}
   def validate_margin_symbol(opts) do
-    with {:ok, _symbol} <- required_opt(opts, :symbol), do: :ok
+    with {:ok, _symbol} <- margin_symbol(opts), do: :ok
+  end
+
+  # **The symbol is text.** `SymbolFormat.to_exchange_symbol/1` has no clause for an atom or a
+  # number, so `symbol: :btcgusdperp` raised `FunctionClauseError` in the caller, and `""` was
+  # signed into the request as the contract. Anything that is not a non-blank string is
+  # refused, named, before the credential is read.
+  defp margin_symbol(opts) do
+    with {:ok, symbol} <- required_opt(opts, :symbol) do
+      if is_binary(symbol) and String.trim(symbol) != "",
+        do: {:ok, symbol},
+        else: invalid_option(:symbol, symbol)
+    end
   end
 
   @doc """
@@ -6251,8 +6299,50 @@ defmodule DpExchange.Gemini.Private do
     with {:ok, _params} <- clearing_order_params(request),
          {:ok, _source} <- required_name(opts, :source_counterparty_id),
          {:ok, _target} <- required_name(opts, :target_counterparty_id),
-         {:ok, _hours} <- required_opt(opts, :expires_in_hrs),
+         {:ok, _hours} <- required_clearing_hours(opts),
          do: :ok
+  end
+
+  @doc """
+  What `create_clearing_order/3` refuses before it signs, in order: the four terms, then the
+  options. `:counterparty_id`, when given, is a non-blank string and `:expires_in_hrs`, when
+  given, a whole number of hours above zero (`{:error, {:invalid_option, key, value}}`): they
+  were signed as given, so `expires_in_hrs: -5` or `"soon"` was an offer to a counterparty on
+  terms the venue's integer field cannot hold. Exposed so `DpExchange.Gemini.Fake` refuses with
+  this function.
+  """
+  @spec validate_clearing_create(term(), keyword()) :: :ok | {:error, term()}
+  def validate_clearing_create(request, opts) do
+    with {:ok, _params} <- clearing_order_params(request), do: clearing_create_options(opts)
+  end
+
+  defp clearing_create_options(opts) do
+    with :ok <- optional_name(opts, :counterparty_id),
+         do: optional_clearing_hours(Keyword.get(opts, :expires_in_hrs))
+  end
+
+  defp optional_clearing_hours(nil), do: :ok
+
+  defp optional_clearing_hours(hours) do
+    with {:ok, _hours} <- clearing_hours(hours), do: :ok
+  end
+
+  # `expires_in_hrs` is `type: integer` on both clearing creates (rest.yaml): the hours an
+  # offer stands, so a whole number above zero. The broker form is required and the bilateral
+  # one is not.
+  defp required_clearing_hours(opts) do
+    with {:ok, hours} <- required_opt(opts, :expires_in_hrs), do: clearing_hours(hours)
+  end
+
+  defp clearing_hours(hours) when is_integer(hours) and hours > 0, do: {:ok, hours}
+  defp clearing_hours(other), do: invalid_option(:expires_in_hrs, other)
+
+  defp optional_name(opts, key) do
+    case Keyword.get(opts, key) do
+      nil -> :ok
+      name when is_binary(name) -> if present?(name), do: :ok, else: invalid_option(key, name)
+      other -> invalid_option(key, other)
+    end
   end
 
   @doc """

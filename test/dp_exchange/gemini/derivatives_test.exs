@@ -83,8 +83,10 @@ defmodule DpExchange.Gemini.DerivativesTest do
       assert %Types.Funding{} = funding
       assert Decimal.equal?(funding.amount, Decimal.from_float(-1.50991))
       assert Decimal.equal?(funding.estimated_amount, Decimal.from_float(-2.10595))
-      assert funding.funded_at == DateTime.from_unix!(1_787_936_401_000, :millisecond)
-      assert funding.next_funding_at == DateTime.from_unix!(1_787_940_001_000, :millisecond)
+      funded = DateTime.from_unix!(1_787_936_401_000, :millisecond)
+      next = DateTime.from_unix!(1_787_940_001_000, :millisecond)
+      assert DateTime.compare(funding.funded_at, funded) == :eq
+      assert DateTime.compare(funding.next_funding_at, next) == :eq
     end
 
     test "fundingAmount is read where the vendor's own example uses it instead of amount" do
@@ -133,7 +135,8 @@ defmodule DpExchange.Gemini.DerivativesTest do
                  retry_attempts: 0
                )
 
-      assert at == DateTime.from_unix!(1_787_940_001_000, :millisecond)
+      expected = DateTime.from_unix!(1_787_940_001_000, :millisecond)
+      assert DateTime.compare(at, expected) == :eq
     end
 
     test "a body that is not an integer is unreadable, not a nil timestamp" do

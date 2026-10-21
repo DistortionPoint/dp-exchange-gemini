@@ -71,7 +71,7 @@ defmodule DpExchange.Gemini.RestDecimalTest do
 
     assert_exact(funding.amount, "-1.509910000000000001")
     assert_exact(funding.estimated_amount, "-2.105950000000000001")
-    assert funding.funded_at == ~U[2025-04-22 18:00:00.000Z]
+    assert DateTime.compare(funding.funded_at, ~U[2025-04-22 18:00:00.000Z]) == :eq
   end
 
   test "a numeric ratePct is read, not dropped" do
@@ -112,7 +112,8 @@ defmodule DpExchange.Gemini.RestDecimalTest do
     assert {:ok, [candle]} =
              Rest.get_historical_prices("BTC-USD", "1m", [], plug: raw(body), retry_attempts: 0)
 
-    assert candle.opened_at == DateTime.from_unix!(1_787_935_740_000, :millisecond)
+    expected = DateTime.from_unix!(1_787_935_740_000, :millisecond)
+    assert DateTime.compare(candle.opened_at, expected) == :eq
   end
 
   test "an absurd candle time is refused instead of building a huge integer" do

@@ -352,6 +352,39 @@ defmodule DpExchange.Gemini.OptionKeys do
     end
   end
 
+  # The options a tree (`DpExchange.Gemini.Supervisor.start_link/1`) or a standalone feed
+  # (`DpExchange.Gemini.Feed.start_link/1`) reads at start. `:ledger` is the supervisor's own
+  # hand-off to its feed, and `:socket` an already-connected socket a test hands in; neither is
+  # for a consumer, but both are read. Everything else a start option could have been is
+  # refused as `{:unknown_option, key}` rather than dropped: a misspelt `max_queu_len:` kept the
+  # default bound without a word.
+  @start [
+    :name,
+    :feed,
+    :limiter,
+    :environment,
+    :channels,
+    :max_queue_len,
+    :url,
+    :socket_connect_timeout,
+    :socket_recv_timeout,
+    :ssl_options,
+    :credentials,
+    :socket,
+    :ledger
+  ]
+
+  @doc """
+  Checks the options a tree or a feed is started with against the keys it reads (`:name`,
+  `:feed`, `:limiter`, `:environment`, `:channels`, `:max_queue_len`, `:url`,
+  `:socket_connect_timeout`, `:socket_recv_timeout`, `:ssl_options`, `:credentials`, and the
+  hand-offs `:socket` and `:ledger`): `:ok`, `{:error, {:unknown_option, key}}` for the first
+  key not read, or `{:error, {:invalid_options, opts}}` for anything but a keyword list (a
+  `:credentials` entry shown as `:redacted`, as `check/2` does).
+  """
+  @spec check_start(term()) :: :ok | refusal()
+  def check_start(opts), do: opts |> Options.check(@start) |> scrubbed()
+
   @doc """
   Checks the keyword terms a function takes as a positional argument (`transfer_internal/4`'s
   `:from`, `:to` and `:client_transfer_id`) against those keys alone.
