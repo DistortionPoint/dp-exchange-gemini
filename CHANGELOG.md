@@ -20,6 +20,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.2.158] - 2026-11-11
+
 ### Changed
 
 - Requires `dp_exchange_core` 0.3.123 or later, the release that adds the required
