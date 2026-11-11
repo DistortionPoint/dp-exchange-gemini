@@ -1341,6 +1341,30 @@ named subaccount could not reach the venue and the token's own account would ans
 | `refresh_access_token/3` | `:client_secret`, `:auth_url` (no `:environment`, `:base_url`, `:retry_attempts` or `:retry_delay`) |
 | `revoke_access_token/1` | none (the token names the account; a stray `:account` is refused; no `:retry_attempts` or `:retry_delay`) |
 
+## Ask which options a call takes: `start_options/0` and `call_options/1`
+
+Rather than copy the table above, ask the package. `DpExchange.Gemini.start_options/0` is the
+list of keys `start_link/1` and `child_spec/1` accept (a key outside it is
+`{:error, {:unknown_option, key}}`), and `DpExchange.Gemini.call_options/1` answers for a
+function name:
+
+```elixir
+{:ok, pid} = DpExchange.Gemini.start_link(Keyword.take(opts, DpExchange.Gemini.start_options()))
+
+{:ok, keys} = DpExchange.Gemini.call_options(:get_trades)
+DpExchange.Gemini.get_trades("BTC-USD", Keyword.take(opts, keys))
+```
+
+`call_options/1` answers `{:ok, keys}` for a function the facade defines, `{:error,
+:not_supported}` for an endpoint this venue does not serve (it answers that whatever the
+options), and `{:error, {:unknown_function, name}}` for a name that is not a facade function
+(including a misspelling or a non-atom), never `{:ok, []}`. A function that takes no options
+(`provider_name/0`, `capabilities/0`, `quantization/1`, ...) is `{:ok, []}`; `child_spec` and
+`start_link` answer the start options. The keys are the very lists the calls refuse against
+(`DpExchange.Gemini.OptionKeys`), so a key in the declaration is never refused as
+`{:unknown_option, key}` by that call. `DpExchange.Gemini.Fake` exports both and answers for
+itself; every key the facade declares, the Fake accepts too. (dp-exchange-core issue #43.)
+
 ## An error from `subscribe/2` or `update_symbols/2` means nothing was recorded
 
 If `subscribe/2` answers `{:error, _}` (the connection could not be dialled, or the frame

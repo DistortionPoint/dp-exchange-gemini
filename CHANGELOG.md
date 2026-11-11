@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `dp_exchange_core` 0.3.123 or later, the release that adds the required
+  `start_options/0` and `call_options/1` callbacks and conformance group 55.
+
+### Added
+
+- **`start_options/0` and `call_options/1` declare which options the venue accepts**
+  (DistortionPoint/dp-exchange-core#43), on `DpExchange.Gemini` and `DpExchange.Gemini.Fake`.
+  `start_options/0` is the list `start_link/1` and `child_spec/1` refuse against
+  (`OptionKeys.start_keys/0`, the very list `check_start/1` uses). `call_options/1` answers
+  `{:ok, keys}` for a facade function (exactly `OptionKeys.allowed/1`, the list its own check
+  refuses against; `{:ok, []}` for a function taking no options; the start options for
+  `child_spec` and `start_link`), `{:error, :not_supported}` for an endpoint the declaration
+  marks `:unsupported`, and `{:error, {:unknown_function, name}}` for anything else, including
+  a non-atom. A consumer takes its options with `Keyword.take(opts, keys)` instead of being
+  refused with `{:unknown_option, key}`. Proof: `declared_options_test.exs`. Requires a
+  `dp_exchange_core` that defines both callbacks.
+
 ## [0.2.157] - 2026-10-21
 
 ### Fixed (tick AR)

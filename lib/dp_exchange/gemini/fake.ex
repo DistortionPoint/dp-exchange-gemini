@@ -143,6 +143,31 @@ defmodule DpExchange.Gemini.Fake do
       {:error, {:invalid_option, :max_queue_len, Keyword.get(opts, :max_queue_len)}}
   end
 
+  @doc """
+  The keys `start_link/1` accepts: the real tree's list
+  (`DpExchange.Gemini.OptionKeys.start_keys/0`), since `start_link/1` refuses with the same
+  check.
+
+  See `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: OptionKeys.start_keys()
+
+  @doc """
+  The options the fake's own function `name` accepts, from the table its own option check
+  refuses against (`DpExchange.Gemini.OptionKeys`, shared with the real facade, so every key
+  the facade declares for an endpoint the fake accepts too). An endpoint the declaration
+  marks `:unsupported` is `{:error, :not_supported}`; an unknown name,
+  `{:error, {:unknown_function, name}}`.
+
+  See `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(atom()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, atom()}}
+  def call_options(name), do: OptionKeys.call_options(__MODULE__, name)
+
   @doc "The real adapter's `DpExchange.Gemini.provider_name/0`, unchanged."
   @impl true
   def provider_name, do: DpExchange.Gemini.provider_name()

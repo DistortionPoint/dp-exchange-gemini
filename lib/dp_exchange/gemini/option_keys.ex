@@ -69,7 +69,7 @@ defmodule DpExchange.Gemini.OptionKeys do
   before the credential and before anything is signed or sent.
   """
 
-  alias DpExchange.Core.Options
+  alias DpExchange.Core.{Capabilities, Options, Venue}
 
   # Keys every signed (authenticated) call reads: `Auth.headers/5` reads `:nonce_mode`,
   # `Private.auth_scheme/2` reads `:auth_scheme`, and `Private.with_account/3` adds `:account`
@@ -300,10 +300,81 @@ defmodule DpExchange.Gemini.OptionKeys do
   def allowed(function) do
     own = Map.fetch!(@own, function)
 
+    keys =
+      cond do
+        function in @no_request ->
+          [:credentials | own]
+
+        function in @feed_addressing ->
+          [:credentials, :environment] ++ tree_name(function) ++ own
+
+        true ->
+          (Options.transport_options() -- not_read(function)) ++ tree_name(function) ++ own
+      end
+
+    Enum.uniq(keys)
+  end
+
+  # The public facade functions that take no options at all (and so declare `[]`). Every other
+  # facade function is either in `@own` or one of the start calls below.
+  @no_options [
+    :provider_name,
+    :runtime_id,
+    :asset_classes,
+    :capabilities,
+    :quantization,
+    :venue_does_not_serve,
+    :seed_nonce,
+    :start_options,
+    :call_options
+  ]
+
+  # The calls that take the start options: `child_spec/1` and `start_link/1`.
+  @start_calls [:child_spec, :start_link]
+
+  @doc """
+  The options the public function `name` of `module` (`DpExchange.Gemini` or
+  `DpExchange.Gemini.Fake`) accepts, as `DpExchange.Core.Venue.call_options/1` answers them.
+
+  In order:
+
+    * `{:error, {:unknown_function, name}}` when `name` is not an atom, or `module` does not
+      export a function of that name, or it is neither in the table above nor a
+      zero-option function: never `{:ok, []}` for a name nobody knows
+    * `{:error, :not_supported}` when `name` is a `DpExchange.Core.Venue` callback whose
+      endpoint `module.capabilities/0` declares `:unsupported`
+    * `{:ok, start_keys()}` for `child_spec` and `start_link`
+    * `{:ok, allowed(name)}` for a function in the table: the very list its call-site
+      `check/2` refuses against
+    * `{:ok, []}` for a function that takes no options (`provider_name/0`, `capabilities/0`,
+      `quantization/1`, ...)
+  """
+  @spec call_options(module(), term()) ::
+          {:ok, [atom()]} | {:error, :not_supported | {:unknown_function, term()}}
+  def call_options(module, name) when is_atom(name) do
     cond do
-      function in @no_request -> [:credentials | own]
-      function in @feed_addressing -> [:credentials, :environment] ++ tree_name(function) ++ own
-      true -> (Options.transport_options() -- not_read(function)) ++ tree_name(function) ++ own
+      not exported?(module, name) -> {:error, {:unknown_function, name}}
+      inactive?(module, name) -> {:error, :not_supported}
+      name in @start_calls -> {:ok, start_keys()}
+      Map.has_key?(@own, name) -> {:ok, allowed(name)}
+      name in @no_options -> {:ok, []}
+      true -> {:error, {:unknown_function, name}}
+    end
+  end
+
+  def call_options(_module, name), do: {:error, {:unknown_function, name}}
+
+  defp exported?(module, name), do: name in Keyword.keys(module.__info__(:functions))
+
+  # A `Venue` callback whose every arity the module's own declaration marks `:unsupported`.
+  defp inactive?(module, name) do
+    case for({^name, arity} <- Venue.behaviour_info(:callbacks), do: arity) do
+      [] ->
+        false
+
+      arities ->
+        capabilities = module.capabilities()
+        not Enum.any?(arities, &Capabilities.active?(capabilities, {name, &1}))
     end
   end
 
@@ -379,6 +450,14 @@ defmodule DpExchange.Gemini.OptionKeys do
     :socket,
     :ledger
   ]
+
+  @doc """
+  The keys `start_link/1` and `child_spec/1` read, from the very list `check_start/1` refuses
+  against, so the two cannot drift. A key outside it is `{:error, {:unknown_option, key}}`
+  at start; no key is repeated.
+  """
+  @spec start_keys() :: [atom()]
+  def start_keys, do: @start
 
   @doc """
   Checks the options a tree or a feed is started with against the keys it reads (`:name`,

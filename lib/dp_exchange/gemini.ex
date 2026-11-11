@@ -303,6 +303,35 @@ defmodule DpExchange.Gemini do
   @impl true
   def start_link(opts), do: DpExchange.Gemini.Supervisor.start_link(opts)
 
+  @doc """
+  The keys `start_link/1` and `child_spec/1` accept, from the list the start check refuses
+  against (`DpExchange.Gemini.OptionKeys.start_keys/0`). A key outside it is
+  `{:error, {:unknown_option, key}}` at start.
+
+      DpExchange.Gemini.start_link(Keyword.take(opts, DpExchange.Gemini.start_options()))
+
+  See `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: OptionKeys.start_keys()
+
+  @doc """
+  The options the public function `name` accepts: `{:ok, keys}`, `{:error, :not_supported}`
+  for an endpoint this venue does not serve, or `{:error, {:unknown_function, name}}`.
+
+      {:ok, keys} = DpExchange.Gemini.call_options(:get_trades)
+      DpExchange.Gemini.get_trades(symbol, Keyword.take(opts, keys))
+
+  The answer is `DpExchange.Gemini.OptionKeys.allowed/1`, the list the call itself refuses
+  against; see `DpExchange.Gemini.OptionKeys.call_options/2` for the order. See
+  `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(atom()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, atom()}}
+  def call_options(name), do: OptionKeys.call_options(__MODULE__, name)
+
   # --- declaration -------------------------------------------------------
 
   @doc """
